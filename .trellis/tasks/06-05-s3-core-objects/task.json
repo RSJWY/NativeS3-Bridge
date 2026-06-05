@@ -3,7 +3,7 @@
   "name": "s3-core-objects",
   "title": "S3核心对象操作与1对1原生映射",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

@@ -1,6 +1,6 @@
 # --- Go ---
 # Binaries
-natives3bridge
+/natives3bridge
 natives3bridge.exe
 /bin/
 *.exe
