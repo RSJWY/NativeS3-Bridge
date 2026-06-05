@@ -71,3 +71,36 @@ Implemented S3 core HTTP server, native file-backed object operations, storage t
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Webadmin UI and dashboard
+
+**Date**: 2026-06-06
+**Task**: Webadmin UI and dashboard
+**Branch**: `master`
+
+### Summary
+
+Implemented single-password webadmin API, embedded Vue3/Vite/ECharts admin UI, credential CRUD, dashboard charts, validation/spec updates, and archived 06-05-webadmin-ui.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `21bd6ff` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
