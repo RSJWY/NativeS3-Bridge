@@ -32,13 +32,13 @@
 
 ## Acceptance Criteria
 
-- [ ] `go build ./...` 通过，无编译错误。
-- [ ] `go vet ./...` 通过。
-- [ ] 用 `config.sqlite.yaml` 运行 `main.go`，自动创建 SQLite 文件并建出 `credentials` / `request_stats` / `hook_configs` 三张表（可用 sqlite3 查 `.tables` 验证）。
-- [ ] 将 driver 改为 `mysql` / `postgres`（提供对应 dsn）时，同一份代码能连接并 AutoMigrate 成功（有实例时验证；无实例则代码路径审查确认三分支齐全）。
-- [ ] 配置缺失必填项（如 `storage.data_root` 为空）时，启动报清晰错误并非零退出。
-- [ ] 模型字段与父任务 `design.md` 第 3 节逐字段一致（含索引、默认值、约束）。
-- [ ] 无任何单驱动专属类型（grep 确认无 `jsonb`、无 `datetime(6)` 之类硬编码）。
+- [x] `go build ./...` 通过，无编译错误。
+- [x] `go vet ./...` 通过。
+- [x] 用 `config.sqlite.yaml` 运行 `main.go`，自动创建 SQLite 文件并建出 `credentials` / `request_stats` / `hook_configs` 三张表（可用 sqlite3 查 `.tables` 验证）。
+- [x] 将 driver 改为 `mysql` / `postgres`（提供对应 dsn）时，同一份代码能连接并 AutoMigrate 成功（有实例时验证；无实例则代码路径审查确认三分支齐全）。
+- [x] 配置缺失必填项（如 `storage.data_root` 为空）时，启动报清晰错误并非零退出。
+- [x] 模型字段与父任务 `design.md` 第 3 节逐字段一致（含索引、默认值、约束）。
+- [x] 无任何单驱动专属类型（grep 确认无 `jsonb`、无 `datetime(6)` 之类硬编码）。
 
 ## Notes
 - module path、所选 GORM 驱动包版本写入 `research/` 备查。

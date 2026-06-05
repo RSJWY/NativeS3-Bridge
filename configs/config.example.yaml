@@ -1,0 +1,27 @@
+server:
+  s3_addr: "0.0.0.0:9000"
+  admin_addr: "0.0.0.0:9001"
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+storage:
+  data_root: "./data"
+  multipart_tmp: "./data/.multipart"
+  metadata_suffix: ".s3meta"
+
+database:
+  driver: "sqlite"
+  dsn: "./natives3.db"
+  # mysql:    "user:pass@tcp(127.0.0.1:3306)/natives3?charset=utf8mb4&parseTime=True&loc=Local"
+  # postgres: "host=127.0.0.1 user=postgres password=pass dbname=natives3 port=5432 sslmode=disable"
+
+webadmin:
+  password_hash: ""
+  admin_bootstrap_password: ""
+  session_secret: "change-me-32bytes-random"
+  session_ttl_minutes: 720
+
+region: "us-east-1"
+log_level: "info"

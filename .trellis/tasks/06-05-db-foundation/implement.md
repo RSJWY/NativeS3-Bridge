@@ -4,15 +4,15 @@
 
 ## 步骤
 
-- [ ] 1. `go mod init <module-path>`（path 记入 `research/decisions.md`）。设 `go 1.21`。
-- [ ] 2. 添加依赖：`gorm.io/gorm`、sqlite 驱动（优先 `github.com/glebarez/sqlite` 纯 Go）、`gorm.io/driver/mysql`、`gorm.io/driver/postgres`、`gopkg.in/yaml.v3`。`go mod tidy`。
-- [ ] 3. 写 `pkg/config/config.go`：Config 及子结构、`Load`、`applyDefaults`、`Validate`。字段严格对齐父 design 第 5 节。
-- [ ] 4. 写 `pkg/db/models.go`：三个模型，逐字段对齐父 design 第 3 节（索引/默认值/约束/复合唯一索引）。
-- [ ] 5. 写 `pkg/db/db.go`：`Open` 三驱动分发 + GORM logger 接 slog 级别。
-- [ ] 6. 写 `pkg/db/migrate.go`：`Migrate`。
-- [ ] 7. 写 `cmd/natives3bridge/main.go`：装配链 + slog 初始化 + ready 日志 + S2 TODO。
-- [ ] 8. 写 `configs/config.example.yaml`（含 mysql/postgres dsn 注释）与 `configs/config.sqlite.yaml`。
-- [ ] 9. 写 `research/decisions.md`：module path、sqlite 驱动选择及理由、各依赖版本。
+- [x] 1. `go mod init <module-path>`（path 记入 `research/decisions.md`）。设 `go 1.21`。
+- [x] 2. 添加依赖：`gorm.io/gorm`、sqlite 驱动（优先 `github.com/glebarez/sqlite` 纯 Go）、`gorm.io/driver/mysql`、`gorm.io/driver/postgres`、`gopkg.in/yaml.v3`。`go mod tidy`。
+- [x] 3. 写 `pkg/config/config.go`：Config 及子结构、`Load`、`applyDefaults`、`Validate`。字段严格对齐父 design 第 5 节。
+- [x] 4. 写 `pkg/db/models.go`：三个模型，逐字段对齐父 design 第 3 节（索引/默认值/约束/复合唯一索引）。
+- [x] 5. 写 `pkg/db/db.go`：`Open` 三驱动分发 + GORM logger 接 slog 级别。
+- [x] 6. 写 `pkg/db/migrate.go`：`Migrate`。
+- [x] 7. 写 `cmd/natives3bridge/main.go`：装配链 + slog 初始化 + ready 日志 + S2 TODO。
+- [x] 8. 写 `configs/config.example.yaml`（含 mysql/postgres dsn 注释）与 `configs/config.sqlite.yaml`。
+- [x] 9. 写 `research/decisions.md`：module path、sqlite 驱动选择及理由、各依赖版本。
 
 ## 验证命令
 

@@ -1,0 +1,25 @@
+server:
+  s3_addr: "0.0.0.0:9000"
+  admin_addr: "0.0.0.0:9001"
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+storage:
+  data_root: "./data"
+  multipart_tmp: "./data/.multipart"
+  metadata_suffix: ".s3meta"
+
+database:
+  driver: "sqlite"
+  dsn: "./natives3.db"
+
+webadmin:
+  password_hash: ""
+  admin_bootstrap_password: ""
+  session_secret: "change-me-32bytes-random"
+  session_ttl_minutes: 720
+
+region: "us-east-1"
+log_level: "info"
