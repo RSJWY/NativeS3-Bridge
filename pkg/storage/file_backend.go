@@ -23,12 +23,20 @@ var (
 )
 
 type FileBackend struct {
-	root         string
-	metadataMu   sync.RWMutex
-	contentTypes map[string]string
+	root           string
+	metadataSuffix string
+	metadataMu     sync.RWMutex
+	contentTypes   map[string]string
 }
 
 func NewFileBackend(root string) (*FileBackend, error) {
+	return NewFileBackendWithMetadataSuffix(root, DefaultMetadataSuffix)
+}
+
+func NewFileBackendWithMetadataSuffix(root, metadataSuffix string) (*FileBackend, error) {
+	if metadataSuffix == "" {
+		metadataSuffix = DefaultMetadataSuffix
+	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -36,10 +44,14 @@ func NewFileBackend(root string) (*FileBackend, error) {
 	if err := os.MkdirAll(rootAbs, 0o755); err != nil {
 		return nil, err
 	}
-	return &FileBackend{root: rootAbs, contentTypes: make(map[string]string)}, nil
+	return &FileBackend{root: rootAbs, metadataSuffix: metadataSuffix, contentTypes: make(map[string]string)}, nil
 }
 
 func (b *FileBackend) PutObject(bucket, key string, r io.Reader, contentType string) (ObjectInfo, error) {
+	return b.PutObjectWithMetadata(bucket, key, r, contentType, nil)
+}
+
+func (b *FileBackend) PutObjectWithMetadata(bucket, key string, r io.Reader, contentType string, metadata map[string]string) (ObjectInfo, error) {
 	target, err := ResolveObjectPath(b.root, bucket, key)
 	if err != nil {
 		return ObjectInfo{}, err
@@ -72,13 +84,26 @@ func (b *FileBackend) PutObject(bucket, key string, r io.Reader, contentType str
 		return ObjectInfo{}, err
 	}
 	resolvedContentType := normalizeContentType(contentType, key)
+	etag := hex.EncodeToString(h.Sum(nil))
+	meta := cloneStringMap(metadata)
+	if err := WriteSidecar(target, b.metadataSuffix, Sidecar{
+		ETag:        etag,
+		ContentType: resolvedContentType,
+		Metadata:    meta,
+		Tags:        map[string]string{},
+		Size:        size,
+		UploadedAt:  time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return ObjectInfo{}, err
+	}
 	b.setContentType(target, resolvedContentType)
 	return ObjectInfo{
 		Key:          filepath.ToSlash(key),
 		Size:         size,
-		ETag:         hex.EncodeToString(h.Sum(nil)),
+		ETag:         etag,
 		LastModified: info.ModTime().UTC(),
 		ContentType:  resolvedContentType,
+		Metadata:     meta,
 	}, nil
 }
 
@@ -129,16 +154,35 @@ func (b *FileBackend) HeadObject(bucket, key string) (ObjectInfo, error) {
 	if info.IsDir() {
 		return ObjectInfo{}, ErrNoSuchKey
 	}
-	etag, err := fileMD5(target)
+	sidecar, exists, err := ReadSidecar(target, b.metadataSuffix)
 	if err != nil {
 		return ObjectInfo{}, err
+	}
+	contentType := b.contentTypeFor(target, key)
+	metadata := map[string]string{}
+	etag := ""
+	if exists {
+		if sidecar.ETag != "" {
+			etag = sidecar.ETag
+		}
+		if sidecar.ContentType != "" {
+			contentType = sidecar.ContentType
+		}
+		metadata = cloneStringMap(sidecar.Metadata)
+	}
+	if etag == "" {
+		etag, err = fileMD5(target)
+		if err != nil {
+			return ObjectInfo{}, err
+		}
 	}
 	return ObjectInfo{
 		Key:          filepath.ToSlash(key),
 		Size:         info.Size(),
 		ETag:         etag,
 		LastModified: info.ModTime().UTC(),
-		ContentType:  b.contentTypeFor(target, key),
+		ContentType:  contentType,
+		Metadata:     metadata,
 	}, nil
 }
 
@@ -153,12 +197,49 @@ func (b *FileBackend) DeleteObject(bucket, key string) error {
 	err = os.Remove(target)
 	if errors.Is(err, os.ErrNotExist) {
 		b.deleteContentType(target)
+		_ = DeleteSidecar(target, b.metadataSuffix)
 		return nil
 	}
 	if err == nil {
 		b.deleteContentType(target)
+		if sidecarErr := DeleteSidecar(target, b.metadataSuffix); sidecarErr != nil {
+			return sidecarErr
+		}
 	}
 	return err
+}
+
+func (b *FileBackend) PutObjectTags(bucket, key string, tags map[string]string) error {
+	info, target, sidecar, err := b.sidecarForExistingObject(bucket, key)
+	if err != nil {
+		return err
+	}
+	sidecar.Tags = cloneStringMap(tags)
+	if sidecar.UploadedAt == "" {
+		sidecar.UploadedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if sidecar.ETag == "" {
+		sidecar.ETag = info.ETag
+	}
+	if sidecar.ContentType == "" {
+		sidecar.ContentType = info.ContentType
+	}
+	if sidecar.Size == 0 {
+		sidecar.Size = info.Size
+	}
+	return WriteSidecar(target, b.metadataSuffix, sidecar)
+}
+
+func (b *FileBackend) GetObjectTags(bucket, key string) (map[string]string, error) {
+	_, _, sidecar, err := b.sidecarForExistingObject(bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	return cloneStringMap(sidecar.Tags), nil
+}
+
+func (b *FileBackend) DeleteObjectTags(bucket, key string) error {
+	return b.PutObjectTags(bucket, key, map[string]string{})
 }
 
 func (b *FileBackend) ListObjects(bucket, prefix, delimiter, token string, maxKeys int) (ListResult, error) {
@@ -193,7 +274,7 @@ func (b *FileBackend) ListObjects(bucket, prefix, delimiter, token string, maxKe
 			}
 			return nil
 		}
-		if strings.HasSuffix(name, ".s3meta") || strings.HasSuffix(name, ".db") || strings.HasSuffix(name, ".sqlite") || strings.HasSuffix(name, ".sqlite3") {
+		if strings.HasSuffix(name, b.metadataSuffix) || strings.HasSuffix(name, ".s3meta") || strings.HasSuffix(name, ".db") || strings.HasSuffix(name, ".sqlite") || strings.HasSuffix(name, ".sqlite3") {
 			return nil
 		}
 		rel, err := filepath.Rel(bucketDir, p)
@@ -258,6 +339,77 @@ func (b *FileBackend) ListObjects(bucket, prefix, delimiter, token string, maxKe
 		result.NextToken = ""
 	}
 	return result, nil
+}
+
+func (b *FileBackend) WriteCompletedObject(bucket, key, tmpPath, etag, contentType string, metadata, tags map[string]string, size int64) (ObjectInfo, error) {
+	target, err := ResolveObjectPath(b.root, bucket, key)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return ObjectInfo{}, err
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		_ = os.Remove(tmpPath)
+		return ObjectInfo{}, err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	resolvedContentType := normalizeContentType(contentType, key)
+	meta := cloneStringMap(metadata)
+	if err := WriteSidecar(target, b.metadataSuffix, Sidecar{
+		ETag:        etag,
+		ContentType: resolvedContentType,
+		Metadata:    meta,
+		Tags:        cloneStringMap(tags),
+		Size:        size,
+		UploadedAt:  time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return ObjectInfo{}, err
+	}
+	b.setContentType(target, resolvedContentType)
+	return ObjectInfo{
+		Key:          filepath.ToSlash(key),
+		Size:         size,
+		ETag:         etag,
+		LastModified: info.ModTime().UTC(),
+		ContentType:  resolvedContentType,
+		Metadata:     meta,
+	}, nil
+}
+
+func (b *FileBackend) sidecarForExistingObject(bucket, key string) (ObjectInfo, string, Sidecar, error) {
+	info, err := b.HeadObject(bucket, key)
+	if err != nil {
+		return ObjectInfo{}, "", Sidecar{}, err
+	}
+	target, err := ResolveObjectPath(b.root, bucket, key)
+	if err != nil {
+		return ObjectInfo{}, "", Sidecar{}, err
+	}
+	sidecar, exists, err := ReadSidecar(target, b.metadataSuffix)
+	if err != nil {
+		return ObjectInfo{}, "", Sidecar{}, err
+	}
+	if !exists {
+		sidecar = Sidecar{
+			ETag:        info.ETag,
+			ContentType: info.ContentType,
+			Metadata:    cloneStringMap(info.Metadata),
+			Tags:        map[string]string{},
+			Size:        info.Size,
+			UploadedAt:  time.Now().UTC().Format(time.RFC3339),
+		}
+	}
+	if sidecar.Metadata == nil {
+		sidecar.Metadata = map[string]string{}
+	}
+	if sidecar.Tags == nil {
+		sidecar.Tags = map[string]string{}
+	}
+	return info, target, sidecar, nil
 }
 
 func (b *FileBackend) ListBuckets() ([]BucketInfo, error) {
@@ -389,4 +541,12 @@ func firstErr(errs ...error) error {
 		}
 	}
 	return nil
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

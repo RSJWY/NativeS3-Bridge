@@ -54,17 +54,17 @@
 
 ## Acceptance Criteria
 
-- [ ] `go build`/`go vet`/`go test ./pkg/storage/...` 通过。
-- [ ] aws-cli 上传 120MB 文件（自动触发 multipart），完成后 `data_root/{bucket}/{key}` 为**单个原生文件**，可用文件管理器打开，内容与源 `diff` 一致。
-- [ ] 上传过程中 `multipart_tmp/{uploadID}/` 存在分片；完成后该目录被删除（`.multipart` 下无残留）。
-- [ ] Abort 后对应临时目录被删除。
-- [ ] multipart 对象的 ETag 形如 `<hash>-<partCount>`。
-- [ ] `aws s3api put-object --metadata author=jdoe,team=infra` 上传后，`head-object` 返回 `x-amz-meta-author`/`x-amz-meta-team`。
-- [ ] `put-object-tagging` 后 `get-object-tagging` 原样返回标签。
-- [ ] 外部直接拷入磁盘、无 sidecar 的文件，GET 仍可下载（content-type 用扩展名推断，不报错）。
-- [ ] sidecar 文件不出现在 ListObjectsV2 结果中。
-- [ ] GC：构造一个过期 uploadID 目录，触发清理后被删除。
-- [ ] Complete 后 `credentials.used_bytes` 按合并后大小正确增加。
+- [x] `go build`/`go vet`/`go test ./pkg/storage/...` 通过。
+- [x] aws-cli 上传 120MB 文件（自动触发 multipart），完成后 `data_root/{bucket}/{key}` 为**单个原生文件**，可用文件管理器打开，内容与源 `diff` 一致。
+- [x] 上传过程中 `multipart_tmp/{uploadID}/` 存在分片；完成后该目录被删除（`.multipart` 下无残留）。
+- [x] Abort 后对应临时目录被删除。
+- [x] multipart 对象的 ETag 形如 `<hash>-<partCount>`。
+- [x] `aws s3api put-object --metadata author=jdoe,team=infra` 上传后，`head-object` 返回 `x-amz-meta-author`/`x-amz-meta-team`。
+- [x] `put-object-tagging` 后 `get-object-tagging` 原样返回标签。
+- [x] 外部直接拷入磁盘、无 sidecar 的文件，GET 仍可下载（content-type 用扩展名推断，不报错）。
+- [x] sidecar 文件不出现在 ListObjectsV2 结果中。
+- [x] GC：构造一个过期 uploadID 目录，触发清理后被删除。
+- [x] Complete 后 `credentials.used_bytes` 按合并后大小正确增加。
 
 ## Notes
 - 分片合并必须流式，禁止把整文件读入内存。

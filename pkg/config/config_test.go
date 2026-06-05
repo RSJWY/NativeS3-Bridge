@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadRejectsMissingDataRoot(t *testing.T) {
@@ -28,5 +29,18 @@ webadmin:
 	}
 	if !strings.Contains(err.Error(), "storage.data_root is required") {
 		t.Fatalf("expected data_root error, got %v", err)
+	}
+}
+
+func TestLoadParsesMultipartDurations(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "configs", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("load example config: %v", err)
+	}
+	if cfg.Storage.MultipartGCInterval != time.Hour {
+		t.Fatalf("multipart gc interval = %v, want 1h", cfg.Storage.MultipartGCInterval)
+	}
+	if cfg.Storage.MultipartTTL != 24*time.Hour {
+		t.Fatalf("multipart ttl = %v, want 24h", cfg.Storage.MultipartTTL)
 	}
 }

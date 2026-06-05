@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +28,18 @@ func NewObjectHandler(backend storage.Backend, commit UsageCommitter) *ObjectHan
 }
 
 func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	info, err := h.backend.PutObject(bucket, key, r.Body, r.Header.Get("Content-Type"))
+	var (
+		info storage.ObjectInfo
+		err  error
+	)
+	metadata := extractUserMetadata(r.Header)
+	if backend, ok := h.backend.(interface {
+		PutObjectWithMetadata(string, string, io.Reader, string, map[string]string) (storage.ObjectInfo, error)
+	}); ok {
+		info, err = backend.PutObjectWithMetadata(bucket, key, r.Body, r.Header.Get("Content-Type"), metadata)
+	} else {
+		info, err = h.backend.PutObject(bucket, key, r.Body, r.Header.Get("Content-Type"))
+	}
 	if err != nil {
 		writeStorageError(w, err, r.URL.Path)
 		return
@@ -106,6 +118,71 @@ func (h *ObjectHandler) Delete(w http.ResponseWriter, r *http.Request, bucket, k
 	h.commitUsage(r, -deletedSize, quota.OpDelete)
 }
 
+func (h *ObjectHandler) PutTagging(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	var req taggingRequest
+	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+		WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
+		return
+	}
+	tags := make(map[string]string, len(req.TagSet.Tags))
+	for _, tag := range req.TagSet.Tags {
+		if tag.Key == "" {
+			WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
+			return
+		}
+		tags[tag.Key] = tag.Value
+	}
+	backend, ok := h.backend.(interface {
+		PutObjectTags(string, string, map[string]string) error
+	})
+	if !ok {
+		WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
+		return
+	}
+	if err := backend.PutObjectTags(bucket, key, tags); err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	SetStandardHeaders(w)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *ObjectHandler) GetTagging(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	backend, ok := h.backend.(interface {
+		GetObjectTags(string, string) (map[string]string, error)
+	})
+	if !ok {
+		WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
+		return
+	}
+	tags, err := backend.GetObjectTags(bucket, key)
+	if err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	resp := taggingRequest{TagSet: tagSet{Tags: make([]tagEntry, 0, len(tags))}}
+	for key, value := range tags {
+		resp.TagSet.Tags = append(resp.TagSet.Tags, tagEntry{Key: key, Value: value})
+	}
+	WriteXML(w, http.StatusOK, resp)
+}
+
+func (h *ObjectHandler) DeleteTagging(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	backend, ok := h.backend.(interface {
+		DeleteObjectTags(string, string) error
+	})
+	if !ok {
+		WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
+		return
+	}
+	if err := backend.DeleteObjectTags(bucket, key); err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	SetStandardHeaders(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *ObjectHandler) ListObjectsV2(w http.ResponseWriter, r *http.Request, bucket string) {
 	query := r.URL.Query()
 	maxKeys := 1000
@@ -177,11 +254,43 @@ type commonPrefix struct {
 	Prefix string `xml:"Prefix"`
 }
 
+type taggingRequest struct {
+	XMLName xml.Name `xml:"Tagging"`
+	TagSet  tagSet   `xml:"TagSet"`
+}
+
+type tagSet struct {
+	Tags []tagEntry `xml:"Tag"`
+}
+
+type tagEntry struct {
+	Key   string `xml:"Key"`
+	Value string `xml:"Value"`
+}
+
 func writeObjectHeaders(w http.ResponseWriter, info storage.ObjectInfo) {
 	w.Header().Set("ETag", quoteETag(info.ETag))
 	w.Header().Set("Last-Modified", info.LastModified.UTC().Format(http.TimeFormat))
 	w.Header().Set("Content-Type", info.ContentType)
 	w.Header().Set("Accept-Ranges", "bytes")
+	for key, value := range info.Metadata {
+		if key == "" {
+			continue
+		}
+		w.Header().Set("x-amz-meta-"+key, value)
+	}
+}
+
+func extractUserMetadata(header http.Header) map[string]string {
+	metadata := map[string]string{}
+	for key, values := range header {
+		lower := strings.ToLower(key)
+		if !strings.HasPrefix(lower, "x-amz-meta-") || len(values) == 0 {
+			continue
+		}
+		metadata[strings.TrimPrefix(lower, "x-amz-meta-")] = values[0]
+	}
+	return metadata
 }
 
 func parseRangeHeader(header string) (*storage.Range, bool, error) {

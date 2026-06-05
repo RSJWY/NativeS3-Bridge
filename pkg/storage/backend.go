@@ -11,6 +11,7 @@ type ObjectInfo struct {
 	ETag         string
 	LastModified time.Time
 	ContentType  string
+	Metadata     map[string]string
 }
 
 type BucketInfo struct {

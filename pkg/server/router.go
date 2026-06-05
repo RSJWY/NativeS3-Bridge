@@ -17,16 +17,18 @@ import (
 type Middleware func(http.Handler) http.Handler
 
 type Router struct {
-	objectHandler *handlers.ObjectHandler
-	bucketHandler *handlers.BucketHandler
-	chain         []Middleware
+	objectHandler    *handlers.ObjectHandler
+	bucketHandler    *handlers.BucketHandler
+	multipartHandler *handlers.MultipartHandler
+	chain            []Middleware
 }
 
-func NewRouter(backend storage.Backend, authenticator auth.Authenticator, commit handlers.UsageCommitter) http.Handler {
+func NewRouter(backend storage.Backend, multipartStore *storage.MultipartStore, authenticator auth.Authenticator, commit handlers.UsageCommitter) http.Handler {
 	r := &Router{
-		objectHandler: handlers.NewObjectHandler(backend, commit),
-		bucketHandler: handlers.NewBucketHandler(backend),
-		chain:         []Middleware{Recover, Logging, Auth(authenticator), Quota},
+		objectHandler:    handlers.NewObjectHandler(backend, commit),
+		bucketHandler:    handlers.NewBucketHandler(backend),
+		multipartHandler: handlers.NewMultipartHandler(multipartStore, commit),
+		chain:            []Middleware{Recover, Logging, Auth(authenticator), Quota},
 	}
 	var h http.Handler = http.HandlerFunc(r.dispatch)
 	for i := len(r.chain) - 1; i >= 0; i-- {
@@ -51,7 +53,46 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 		case http.MethodHead:
 			r.bucketHandler.HeadBucket(w, req, bucket)
 		case http.MethodGet:
+			if hasQuery(req, "uploads") {
+				r.multipartHandler.ListUploads(w, req, bucket)
+				return
+			}
 			r.objectHandler.ListObjectsV2(w, req, bucket)
+		default:
+			handlers.WriteS3Error(w, "MethodNotAllowed", http.StatusMethodNotAllowed, req.URL.Path)
+		}
+		return
+	}
+
+	if hasQuery(req, "tagging") {
+		switch req.Method {
+		case http.MethodPut:
+			r.objectHandler.PutTagging(w, req, bucket, key)
+		case http.MethodGet:
+			r.objectHandler.GetTagging(w, req, bucket, key)
+		case http.MethodDelete:
+			r.objectHandler.DeleteTagging(w, req, bucket, key)
+		default:
+			handlers.WriteS3Error(w, "MethodNotAllowed", http.StatusMethodNotAllowed, req.URL.Path)
+		}
+		return
+	}
+
+	if hasQuery(req, "uploads") && req.Method == http.MethodPost {
+		r.multipartHandler.Create(w, req, bucket, key)
+		return
+	}
+
+	if req.URL.Query().Get("uploadId") != "" {
+		switch req.Method {
+		case http.MethodPut:
+			r.multipartHandler.UploadPart(w, req, bucket, key)
+		case http.MethodPost:
+			r.multipartHandler.Complete(w, req, bucket, key)
+		case http.MethodDelete:
+			r.multipartHandler.Abort(w, req, bucket, key)
+		case http.MethodGet:
+			r.multipartHandler.ListParts(w, req, bucket, key)
 		default:
 			handlers.WriteS3Error(w, "MethodNotAllowed", http.StatusMethodNotAllowed, req.URL.Path)
 		}
@@ -70,6 +111,11 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 	default:
 		handlers.WriteS3Error(w, "MethodNotAllowed", http.StatusMethodNotAllowed, req.URL.Path)
 	}
+}
+
+func hasQuery(r *http.Request, key string) bool {
+	_, ok := r.URL.Query()[key]
+	return ok
 }
 
 func parseS3Path(rawPath string) (string, string) {
@@ -121,7 +167,7 @@ func Auth(authenticator auth.Authenticator) Middleware {
 func Quota(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bucket, key := parseS3Path(r.URL.Path)
-		if r.Method == http.MethodPut && bucket != "" && key != "" {
+		if r.Method == http.MethodPut && bucket != "" && key != "" && !hasQuery(r, "tagging") && r.URL.Query().Get("uploadId") == "" {
 			id, ok := auth.IdentityFromContext(r.Context())
 			if !ok || id == nil {
 				handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)

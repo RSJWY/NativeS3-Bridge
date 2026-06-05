@@ -103,3 +103,116 @@ if err := os.Rename(tmp, target); err != nil {
 - Do not convert `maxKeys == 0` to the default page size. `max-keys=0` should return no entries and indicate truncation when entries exist.
 - Do not persist S3 Content-Type by inventing a sidecar in the core objects task. Durable object metadata belongs to the later metadata sidecar task; core storage may only infer by extension or preserve same-process values in memory.
 - Do not return `NoSuchKey` for missing buckets on bucket-scoped operations. Preserve `NoSuchBucket` so handlers emit the correct S3 XML.
+
+## Scenario: Multipart Uploads And Metadata Sidecars
+
+### 1. Scope / Trigger
+
+- Trigger: any change to `pkg/storage/metadata.go`, `pkg/storage/multipart.go`, object tagging handlers, multipart handlers, S3 route query dispatch, storage config keys for multipart GC, or sidecar-aware object listing.
+- Goal: preserve native object bytes while supporting S3 multipart upload, custom metadata, and object tags through isolated temporary directories and `.s3meta` sidecars.
+
+### 2. Signatures
+
+- `type Sidecar struct { ETag string; ContentType string; Metadata map[string]string; Tags map[string]string; Size int64; UploadedAt string }`
+- `func WriteSidecar(objPath, suffix string, s Sidecar) error`
+- `func ReadSidecar(objPath, suffix string) (Sidecar, bool, error)`
+- `func DeleteSidecar(objPath, suffix string) error`
+- `func NewMultipartStore(root, tmpRoot, metadataSuffix string) (*MultipartStore, error)`
+- `func (s *MultipartStore) Create(bucket, key, contentType string, meta map[string]string, tags map[string]string) (string, error)`
+- `func (s *MultipartStore) ValidateTarget(uploadID, bucket, key string) error`
+- `func (s *MultipartStore) UploadPart(uploadID string, partNumber int, r io.Reader) (string, error)`
+- `func (s *MultipartStore) CompleteSize(uploadID string, parts []CompletedPart) (int64, error)`
+- `func (s *MultipartStore) Complete(uploadID string, parts []CompletedPart) (ObjectInfo, error)`
+- `func (s *MultipartStore) Abort(uploadID string) error`
+- `func (s *MultipartStore) ListParts(uploadID string) ([]PartInfo, error)`
+- `func (s *MultipartStore) ListMultipartUploads(bucket, prefix string) ([]MultipartUploadInfo, error)`
+- `func (s *MultipartStore) CleanupExpired(ttl time.Duration) error`
+- Config keys: `storage.multipart_tmp`, `storage.metadata_suffix`, `storage.multipart_gc_interval`, `storage.multipart_ttl`.
+
+### 3. Contracts
+
+- Sidecar path is exactly `<native object path><metadata_suffix>`, defaulting to `.s3meta`; sidecars are auxiliary metadata and must never be required to read the native object bytes.
+- Sidecar JSON stores `etag`, `content_type`, user `metadata` without the `x-amz-meta-` prefix, `tags`, `size`, and RFC3339 UTC `uploaded_at`.
+- `WriteSidecar` must write to a temporary file, `fsync`, close, then rename atomically to the sidecar path.
+- Missing sidecar is not an error. `HeadObject`/`GetObject` must infer content type by extension and return empty metadata/tags for externally copied native files.
+- Single-part `PutObject` writes native bytes first, then writes a sidecar containing the MD5 ETag, content type, user metadata, empty tags, size, and upload timestamp.
+- `GetObject` and `HeadObject` must return sidecar `Content-Type` plus every metadata key as `x-amz-meta-<key>` at the HTTP handler boundary.
+- `DeleteObject` must remove the native object and its sidecar; missing sidecar deletion is ignored.
+- Object tagging updates only `Sidecar.Tags`. `PUT ?tagging` replaces tags, `GET ?tagging` returns current tags, and `DELETE ?tagging` clears tags. A later `PutObject` overwrite resets tags to an empty map.
+- Multipart temporary layout is `{multipart_tmp}/{uploadID}/manifest.json` plus `part-00001` through `part-10000`; `uploadID` must be a canonical UUID before resolving any directory.
+- Multipart handlers must call `ValidateTarget(uploadID, bucket, key)` before `UploadPart`, `Complete`, `Abort`, or `ListParts` so a valid upload ID cannot be used against a different URL bucket/key.
+- `UploadPart` writes each part natively to a temporary file, `fsync`s, renames to `part-%05d`, and returns the lowercase hex MD5 as the part ETag.
+- `Complete` must stream submitted parts in client order into one temporary target object file, `fsync`, close, rename to the final native object path, write the sidecar, compute multipart ETag as `md5(concat(raw part md5s)) + "-<partCount>"`, and remove the upload directory.
+- `ListObjects` must exclude files ending in the configured metadata suffix and `.s3meta`, and must skip hidden multipart directories.
+- Multipart GC runs from `main` using `StartGC(ctx.Done(), cfg.Storage.MultipartGCInterval, cfg.Storage.MultipartTTL)`; defaults are `1h` interval and `24h` TTL.
+
+### 4. Validation & Error Matrix
+
+- Invalid bucket/key path on multipart create -> storage path error -> S3 `InvalidBucketName` or `InvalidArgument`.
+- Non-UUID, missing, expired, or mismatched `uploadId` -> `ErrNoSuchUpload` -> HTTP `404 NoSuchUpload` XML.
+- `partNumber < 1` or `partNumber > 10000` -> `ErrInvalidPartNumber` -> HTTP `400 InvalidArgument` XML.
+- Missing submitted part file or ETag mismatch -> `ErrInvalidPart` -> HTTP `400 InvalidPart` XML.
+- Non-contiguous submitted part numbers -> `ErrInvalidPartOrder` -> HTTP `400 InvalidPartOrder` XML.
+- Corrupt sidecar JSON -> storage error -> HTTP `500 InternalError`; missing sidecar remains a non-error fallback.
+- Missing object for tagging -> storage `ErrNoSuchKey` / `ErrNoSuchBucket` -> standard S3 XML from `writeStorageError`.
+
+### 5. Good/Base/Bad Cases
+
+- Good: `aws s3 cp` of a 120 MiB file creates multipart temp parts, completes into one native `data_root/bucket/key` file, returns an ETag like `<hex>-15`, and leaves `multipart_tmp` empty.
+- Good: `aws s3api put-object --metadata author=jdoe` writes native bytes plus a sidecar; `head-object` returns `Metadata.author == jdoe`.
+- Base: direct filesystem copy of `data_root/test-bucket/external.txt` without sidecar still downloads through GET with inferred content type and empty metadata.
+- Bad: accepting `uploadId=.` or `uploadId=../x` and resolving it through `filepath.Base`; this can target the multipart root instead of one upload directory.
+- Bad: completing or aborting an upload ID from `/other-bucket/other-key?uploadId=<valid>` without checking the manifest bucket/key.
+- Bad: listing `object.s3meta` sidecars as S3 objects or requiring sidecars to read native object bytes.
+
+### 6. Tests Required
+
+- Unit test `WriteSidecar`/`ReadSidecar`/`DeleteSidecar` for atomic write shape, missing-sidecar fallback, initialized maps, and delete idempotency.
+- Unit test single-part `PutObjectWithMetadata`, `HeadObject`, `GetObject`, and `DeleteObject` preserve native bytes, return metadata headers, and remove sidecar.
+- Unit test tagging PUT/GET/DELETE replaces, returns, and clears sidecar tags, including creating sidecar metadata for an existing external file.
+- Unit test multipart create/upload/list/complete verifies part sorting, merged bytes, multipart ETag algorithm, sidecar content, and temp directory cleanup.
+- Unit test rejects non-UUID upload IDs and verifies the multipart root remains intact.
+- Unit test `ValidateTarget` rejects mismatched bucket or key for an otherwise valid upload ID.
+- Unit test GC removes expired upload directories and preserves non-expired directories.
+- Smoke test with real `aws-cli` for 100 MiB+ multipart upload, metadata round-trip, tagging round-trip/delete/overwrite, sidecar listing exclusion, external no-sidecar GET, and abort cleanup.
+
+### 7. Wrong vs Correct
+
+Wrong:
+
+```go
+func (s *MultipartStore) uploadDir(uploadID string) string {
+    return filepath.Join(s.tmpRoot, filepath.Base(uploadID))
+}
+
+func (s *MultipartStore) Abort(uploadID string) error {
+    return os.RemoveAll(s.uploadDir(uploadID))
+}
+```
+
+Correct:
+
+```go
+func (s *MultipartStore) Abort(uploadID string) error {
+    if err := validateUploadID(uploadID); err != nil {
+        return err
+    }
+    return os.RemoveAll(s.uploadDir(uploadID))
+}
+```
+
+Wrong:
+
+```go
+etag, err := store.UploadPart(r.URL.Query().Get("uploadId"), partNumber, r.Body)
+```
+
+Correct:
+
+```go
+uploadID := r.URL.Query().Get("uploadId")
+if err := store.ValidateTarget(uploadID, bucket, key); err != nil {
+    return err
+}
+etag, err := store.UploadPart(uploadID, partNumber, r.Body)
+```

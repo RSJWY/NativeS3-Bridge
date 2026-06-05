@@ -56,18 +56,24 @@ func main() {
 		}
 	}
 
-	backend, err := storage.NewFileBackend(cfg.Storage.DataRoot)
+	backend, err := storage.NewFileBackendWithMetadataSuffix(cfg.Storage.DataRoot, cfg.Storage.MetadataSuffix)
 	if err != nil {
 		slog.Error("init storage backend", "error", err)
+		os.Exit(1)
+	}
+	multipartStore, err := storage.NewMultipartStore(cfg.Storage.DataRoot, cfg.Storage.MultipartTmp, cfg.Storage.MetadataSuffix)
+	if err != nil {
+		slog.Error("init multipart store", "error", err)
 		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	multipartStore.StartGC(ctx.Done(), cfg.Storage.MultipartGCInterval, cfg.Storage.MultipartTTL)
 
 	credentialStore := auth.NewCredentialStore(gdb, auth.DefaultCredentialCacheTTL)
 	authenticator := auth.NewLocalSigV4Authenticator(credentialStore, cfg.Region)
-	s3Server := server.New(cfg.Server, backend, authenticator, func(credID uint, deltaBytes int64, op quota.Op) error {
+	s3Server := server.New(cfg.Server, backend, multipartStore, authenticator, func(credID uint, deltaBytes int64, op quota.Op) error {
 		return quota.Commit(gdb, credID, deltaBytes, op)
 	})
 	if err := s3Server.Run(ctx); err != nil {

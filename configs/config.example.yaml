@@ -10,6 +10,8 @@ storage:
   data_root: "./data"
   multipart_tmp: "./data/.multipart"
   metadata_suffix: ".s3meta"
+  multipart_gc_interval: "1h"
+  multipart_ttl: "24h"
 
 database:
   driver: "sqlite"

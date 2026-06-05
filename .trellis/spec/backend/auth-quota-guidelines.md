@@ -31,6 +31,7 @@
 - Credential lookup is by `Credential.AccessKey`; missing keys return `InvalidAccessKeyId`, disabled credentials return `AccessDenied`, and bad signatures return `SignatureDoesNotMatch`.
 - Credential cache may cache secret/status/quota for the TTL, but enabled credentials must not serve stale `UsedBytes` for quota checks. Refresh `used_bytes` on cache hit or explicitly invalidate after every usage mutation.
 - PUT object quota checks use `Content-Length` or `x-amz-decoded-content-length` when present. Malformed or negative sizes are rejected before writing.
+- Multipart `UploadPart` does not count against `used_bytes`. `CompleteMultipartUpload` must compute the total submitted part size, run `quota.Check(id, totalSize)` before native merge, then call `Commit(OpPut, totalSize)` only after successful merge and sidecar write.
 - `QuotaBytes == 0` means unlimited. Otherwise reject when `incoming > QuotaBytes - UsedBytes` to avoid signed integer overflow.
 - `Commit` runs in one GORM transaction: update `credentials.used_bytes` with a portable `CASE WHEN` expression and upsert `request_stats` via `clause.OnConflict` on `(credential_id, day)`.
 - `OpPut` increments `used_bytes`, `put_count`, and `bytes_in`; `OpGet` increments `get_count` and `bytes_out` only after successful stream copy; `OpDelete` decrements `used_bytes` to a floor of zero and increments `delete_count` after successful delete.
@@ -46,15 +47,18 @@
 - Signature mismatch -> HTTP 403 `SignatureDoesNotMatch` XML.
 - Quota exceeded -> HTTP 403 `QuotaExceeded` XML.
 - Unknown PUT content length -> HTTP 400 `InvalidArgument` XML.
+- Multipart complete quota exceeded -> HTTP 403 `QuotaExceeded` XML; temporary multipart upload data is aborted/removed and `used_bytes` is unchanged.
 - Invalid quota operation -> `Commit` returns `ErrInvalidOp` and callers log it.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: aws-cli signs a PUT with an enabled DB credential, `Verify` returns identity, `Check` passes, object writes natively, and `Commit` records `used_bytes += actualSize`, `put_count += 1`, `bytes_in += actualSize`.
+- Good: aws-cli multipart upload stores parts without quota mutation; Complete computes total part size, checks quota once, merges to one native file, then commits `used_bytes += totalSize`.
 - Base: aws-cli `--no-sign-request` receives standard 403 `<Error><Code>AccessDenied</Code>...` without leaking internal DB or filesystem details.
 - Bad: caching an enabled credential's `UsedBytes` for 60 seconds and allowing sequential uploads to bypass quota until TTL expiry.
 - Bad: computing `UsedBytes + incoming > QuotaBytes` directly, which can overflow for large signed integers.
 - Bad: incrementing GET `bytes_out` before `io.Copy` succeeds.
+- Bad: applying quota to every `UploadPart`, because failed or aborted multipart uploads would consume permanent credential capacity.
 
 ### 6. Tests Required
 
@@ -65,6 +69,7 @@
 - Unit test `quota.Commit` for put/get/delete counters, positive and negative delete deltas, lower-bound zero, invalid ops, and concurrent put updates.
 - Smoke test with real aws-cli for PUT, HEAD, GET byte compare, LIST, DELETE.
 - Smoke test with real aws-cli for wrong secret, missing signature, unknown access key, quota exceeded, DB usage/stat totals, and concurrent uploads.
+- Smoke test with real aws-cli multipart upload where `used_bytes` increases by the final merged object size after Complete, and an over-quota Complete rejects without leaving native object bytes or increasing usage.
 
 ### 7. Wrong vs Correct
 

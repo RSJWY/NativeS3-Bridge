@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -29,9 +31,11 @@ type TLSConfig struct {
 }
 
 type StorageConfig struct {
-	DataRoot       string `yaml:"data_root"`
-	MultipartTmp   string `yaml:"multipart_tmp"`
-	MetadataSuffix string `yaml:"metadata_suffix"`
+	DataRoot            string        `yaml:"data_root"`
+	MultipartTmp        string        `yaml:"multipart_tmp"`
+	MetadataSuffix      string        `yaml:"metadata_suffix"`
+	MultipartGCInterval time.Duration `yaml:"multipart_gc_interval"`
+	MultipartTTL        time.Duration `yaml:"multipart_ttl"`
 }
 
 type DatabaseConfig struct {
@@ -74,6 +78,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Storage.MetadataSuffix == "" {
 		c.Storage.MetadataSuffix = ".s3meta"
+	}
+	if c.Storage.MultipartTmp == "" && c.Storage.DataRoot != "" {
+		c.Storage.MultipartTmp = filepath.Join(c.Storage.DataRoot, ".multipart")
+	}
+	if c.Storage.MultipartGCInterval == 0 {
+		c.Storage.MultipartGCInterval = time.Hour
+	}
+	if c.Storage.MultipartTTL == 0 {
+		c.Storage.MultipartTTL = 24 * time.Hour
 	}
 	if c.Region == "" {
 		c.Region = "us-east-1"

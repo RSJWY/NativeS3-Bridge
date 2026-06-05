@@ -4,16 +4,16 @@
 
 ## 步骤
 
-- [ ] 1. `pkg/storage/metadata.go`：Sidecar 类型 + 原子读/写/删 + 缺失容错。单测。
-- [ ] 2. 把 sidecar 接入 S2 的 PutObject / GetObject / HeadObject / DeleteObject（写、回填、删）。
-- [ ] 3. `pkg/storage/multipart.go`：Create / UploadPart / Complete（流式合并 + multipart ETag）/ Abort / ListParts。单测覆盖合并顺序与 ETag 格式。
-- [ ] 4. `pkg/handlers/multipart.go`：上述 5 个 multipart HTTP 适配 + XML 请求/响应解析。
-- [ ] 5. `pkg/handlers/object.go`（或新增）：PutObjectTagging / GetObjectTagging / DeleteObjectTagging。
-- [ ] 6. 扩展 `pkg/server/router.go`：按 query 参数（`uploads`/`uploadId`/`partNumber`/`tagging`）分发。
-- [ ] 7. 配额接入：Complete 前 Check（合并后总大小），成功后 Commit(OpPut)。
-- [ ] 8. GC goroutine（main 装配）+ 新增 config 项；research 记录并请规划者确认。
-- [ ] 9. 确认 ListObjectsV2 仍排除 `*.s3meta`。
-- [ ] 10. research：配额结算时机、GC 配置项、multipart ETag 算法验证记录。
+- [x] 1. `pkg/storage/metadata.go`：Sidecar 类型 + 原子读/写/删 + 缺失容错。单测。
+- [x] 2. 把 sidecar 接入 S2 的 PutObject / GetObject / HeadObject / DeleteObject（写、回填、删）。
+- [x] 3. `pkg/storage/multipart.go`：Create / UploadPart / Complete（流式合并 + multipart ETag）/ Abort / ListParts。单测覆盖合并顺序与 ETag 格式。
+- [x] 4. `pkg/handlers/multipart.go`：上述 5 个 multipart HTTP 适配 + XML 请求/响应解析。
+- [x] 5. `pkg/handlers/object.go`（或新增）：PutObjectTagging / GetObjectTagging / DeleteObjectTagging。
+- [x] 6. 扩展 `pkg/server/router.go`：按 query 参数（`uploads`/`uploadId`/`partNumber`/`tagging`）分发。
+- [x] 7. 配额接入：Complete 前 Check（合并后总大小），成功后 Commit(OpPut)。
+- [x] 8. GC goroutine（main 装配）+ 新增 config 项；research 记录并请规划者确认。
+- [x] 9. 确认 ListObjectsV2 仍排除 `*.s3meta`。
+- [x] 10. research：配额结算时机、GC 配置项、multipart ETag 算法验证记录。
 
 ## 验证命令
 

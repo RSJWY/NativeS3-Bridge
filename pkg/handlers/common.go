@@ -88,6 +88,12 @@ func errorMessage(code string) string {
 		return "The difference between the request time and the server time is too large."
 	case "QuotaExceeded":
 		return "The requested object exceeds the credential quota."
+	case "NoSuchUpload":
+		return "The specified multipart upload does not exist."
+	case "InvalidPart":
+		return "One or more of the specified parts could not be found or had an invalid ETag."
+	case "InvalidPartOrder":
+		return "The list of parts was not in ascending order."
 	default:
 		return "Internal server error."
 	}
