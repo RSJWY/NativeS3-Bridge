@@ -1,0 +1,102 @@
+# Webadmin Backend Guidelines
+
+> Single-password admin API, credential management, dashboard data, and embedded Vue SPA serving contracts.
+
+---
+
+## Scenario: Webadmin API And Embedded SPA
+
+### 1. Scope / Trigger
+
+- Trigger: any change to `pkg/webadmin`, admin routes in `cmd/natives3bridge`, `config.WebAdminConfig`, `server.admin_addr`, frontend embed wiring, or admin-facing credential/dashboard JSON payloads.
+- Goal: keep the admin UI isolated on the admin listener, protect API routes with the single-password session, and preserve the one-time credential secret contract.
+
+### 2. Signatures
+
+- `func BootstrapPasswordHash(cfg *config.WebAdminConfig) error`
+- `func NewAuth(cfg config.WebAdminConfig, secureCookie ...bool) *Auth`
+- `func (a *Auth) Login(w http.ResponseWriter, r *http.Request)`
+- `func (a *Auth) Logout(w http.ResponseWriter, r *http.Request)`
+- `func (a *Auth) Middleware(next http.Handler) http.Handler`
+- `func NewAPI(gdb *gorm.DB, invalidator interface{ Invalidate(string) }) *API`
+- `func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb *gorm.DB, credentialStore *auth.CredentialStore) (*Server, error)`
+- Embedded static bundle: `pkg/webadmin/ui.DistFS` from `//go:embed all:dist`.
+
+### 3. Contracts
+
+- Admin API routes are served only by the admin server on `server.admin_addr`, not by the S3 router.
+- `POST /api/admin/login` accepts `{"password": string}` and sets `natives3_admin_session` as an HTTP-only signed cookie on success.
+- All `/api/admin/*` routes except login must be wrapped by `Auth.Middleware` and return JSON `401` on missing, expired, or invalid sessions.
+- `POST /api/admin/logout` clears the session cookie.
+- `GET /api/admin/credentials` returns `id`, `access_key`, `name`, `status`, `quota_bytes`, `used_bytes`, and `created_at`; it must never return `secret_key`.
+- `POST /api/admin/credentials` accepts `name` and `quota_bytes`, creates an enabled credential, and returns `secret_key` exactly in that create response.
+- `PATCH /api/admin/credentials/{id}` accepts optional `name`, `status`, and `quota_bytes`; update must invalidate the affected `CredentialStore` access key.
+- `DELETE /api/admin/credentials/{id}` deletes the credential and invalidates the affected access key.
+- Dashboard APIs return real database data from `credentials` and `request_stats`:
+  - `/api/admin/dashboard/summary`: `total_credentials`, `total_quota_bytes`, `total_used_bytes`.
+  - `/api/admin/dashboard/usage-ranking`: access key/name usage rows ordered by `used_bytes`.
+  - `/api/admin/dashboard/request-trend?days=N`: UTC day buckets with put/get/delete and byte counters.
+- If `server.tls.enabled=false`, startup must log `admin UI served over plain HTTP; enable TLS for production`, and README must warn that the admin UI is plain HTTP.
+- SPA fallback must serve `index.html` for non-API deep links and return JSON errors for unknown `/api/*` paths.
+
+### 4. Validation & Error Matrix
+
+- Missing or invalid session on protected route -> HTTP `401` JSON `{"error":"unauthorized"}`.
+- Wrong login password -> fixed delay, HTTP `401` JSON `{"error":"invalid password"}`.
+- Unsupported HTTP method -> HTTP `405` JSON error.
+- Malformed JSON or unknown request fields -> HTTP `400` JSON error.
+- Negative `quota_bytes` -> HTTP `400` JSON error.
+- Credential `name` longer than 128 characters -> HTTP `400` JSON error.
+- Invalid status value outside `enabled` / `disabled` -> HTTP `400` JSON error.
+- Unknown credential id/access key -> HTTP `404` JSON error.
+- DB failures -> HTTP `500` JSON error without leaking SQL/internal details.
+
+### 5. Good/Base/Bad Cases
+
+- Good: login with the configured password, create a credential, use the returned secret with real `aws-cli`, disable the credential via admin API, and observe S3 requests rejected immediately due to cache invalidation.
+- Good: list credentials after create and verify the response includes `access_key` but not `secret_key`.
+- Base: moving the compiled binary to a directory without source still serves the embedded Vue app and admin JSON APIs.
+- Bad: exposing admin routes on the S3 listener, serving `/api/admin/credentials` without a session, or returning `secret_key` from list/update/delete.
+- Bad: updating credential status/quota/name without invalidating `CredentialStore`, because S3 auth can keep stale status/quota.
+
+### 6. Tests Required
+
+- `npm ci && npm run build` in `pkg/webadmin/ui` before Go build so `dist/` exists for embed.
+- `go build -o natives3bridge ./cmd/natives3bridge`, `go vet ./...`, and `go test ./...` after admin backend changes.
+- Curl smoke: unauthenticated `/api/admin/credentials` returns `401`; wrong password returns `401`; correct password sets cookie; create returns `secret_key`; list does not return `secret_key`.
+- Real `aws-cli` smoke: UI-created credential can upload/download; after admin disable, the same credential is rejected.
+- Browser smoke: login page renders; successful login reaches dashboard; three ECharts canvases render; credentials page renders.
+- Single-binary smoke: copy `natives3bridge` to a no-source temp directory and verify the embedded admin UI is still served.
+
+### 7. Wrong vs Correct
+
+Wrong:
+
+```go
+mux.HandleFunc("/api/admin/credentials", api.Credentials) // no session middleware
+```
+
+Correct:
+
+```go
+mux.Handle("/api/admin/credentials", auth.Middleware(http.HandlerFunc(api.Credentials)))
+```
+
+Wrong:
+
+```go
+writeJSON(w, http.StatusOK, cred) // includes SecretKey from db.Credential
+```
+
+Correct:
+
+```go
+writeJSON(w, http.StatusOK, credentialToResponse(cred)) // no secret_key field
+```
+
+---
+
+## Common Mistakes
+
+- Do not rely on `configs/config.sqlite.yaml` for admin login smoke unless it has a password configured. Use a temporary local config with `admin_bootstrap_password` for validation.
+- Do not commit built `dist/assets/*`; keep only `.gitkeep` tracked. Build artifacts are regenerated before embedding and are ignored by `.gitignore`.

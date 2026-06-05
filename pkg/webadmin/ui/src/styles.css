@@ -1,0 +1,359 @@
+:root {
+  color: #1c1917;
+  background: #f5f5f4;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #f5f5f4;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 24px;
+  font-weight: 650;
+}
+
+h2 {
+  font-size: 17px;
+  font-weight: 650;
+}
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+input {
+  width: 100%;
+  height: 40px;
+  padding: 8px 10px;
+  border: 1px solid #d6d3d1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1c1917;
+}
+
+input:focus {
+  outline: 2px solid #a8a29e;
+  outline-offset: 1px;
+}
+
+code,
+pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+pre {
+  margin: 6px 0 16px;
+  padding: 12px;
+  overflow-x: auto;
+  border: 1px solid #d6d3d1;
+  border-radius: 8px;
+  background: #f5f5f4;
+}
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 248px;
+  min-height: 100vh;
+  padding: 22px 18px;
+  border-right: 1px solid #e7e5e4;
+  background: #ffffff;
+}
+
+.brand {
+  margin-bottom: 28px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.nav-list {
+  display: grid;
+  gap: 6px;
+}
+
+.nav-list a {
+  display: block;
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: #44403c;
+  text-decoration: none;
+}
+
+.nav-list a:hover,
+.nav-list a.router-link-active {
+  background: #f5f5f4;
+  color: #1c1917;
+}
+
+.sidebar-logout {
+  margin-top: 28px;
+}
+
+.main-content {
+  flex: 1;
+  padding: 28px;
+}
+
+.page-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.muted {
+  margin-top: 6px;
+  color: #78716c;
+  font-size: 14px;
+}
+
+.primary-button,
+.secondary-button,
+.danger-button,
+.text-button {
+  min-height: 36px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+}
+
+.primary-button {
+  background: #44403c;
+  color: #ffffff;
+}
+
+.secondary-button {
+  border-color: #d6d3d1;
+  background: #ffffff;
+  color: #1c1917;
+}
+
+.danger-button {
+  border-color: #fecaca;
+  background: #fff1f2;
+  color: #b91c1c;
+}
+
+.text-button {
+  border: 0;
+  background: transparent;
+  color: #57534e;
+  padding-left: 0;
+}
+
+.panel,
+.summary-card,
+.login-card,
+.modal-card {
+  border: 1px solid #e7e5e4;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.panel {
+  overflow: hidden;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summary-card {
+  padding: 16px;
+}
+
+.summary-card span {
+  display: block;
+  margin-bottom: 8px;
+  color: #78716c;
+  font-size: 13px;
+}
+
+.summary-card strong {
+  font-size: 22px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.chart-panel {
+  padding: 16px;
+}
+
+.chart-wide {
+  grid-column: 1 / -1;
+}
+
+.chart-box {
+  height: 320px;
+  margin-top: 12px;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid #e7e5e4;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.data-table th {
+  background: #fafaf9;
+  color: #57534e;
+  font-weight: 650;
+}
+
+.data-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.actions-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.notice {
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.error-notice {
+  border: 1px solid #fecaca;
+  background: #fff1f2;
+  color: #991b1b;
+}
+
+.error-text {
+  color: #b91c1c;
+  font-size: 14px;
+}
+
+.login-page {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-card {
+  width: min(100%, 380px);
+  padding: 24px;
+}
+
+.login-card label {
+  margin-top: 22px;
+}
+
+.login-card .primary-button {
+  width: 100%;
+  margin-top: 18px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(28, 25, 23, 0.38);
+}
+
+.modal-card {
+  width: min(100%, 440px);
+  padding: 20px;
+}
+
+.modal-card label {
+  margin-top: 16px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.secret-modal {
+  width: min(100%, 560px);
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    display: block;
+  }
+
+  .sidebar {
+    width: 100%;
+    min-height: 0;
+    border-right: 0;
+    border-bottom: 1px solid #e7e5e4;
+  }
+
+  .nav-list {
+    grid-template-columns: repeat(2, max-content);
+  }
+
+  .summary-grid,
+  .chart-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .main-content {
+    padding: 20px;
+  }
+}

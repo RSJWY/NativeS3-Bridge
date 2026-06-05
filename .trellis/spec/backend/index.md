@@ -19,6 +19,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Storage Guidelines](./storage-guidelines.md) | Native S3 object storage contracts | Filled |
 | [Auth and Quota Guidelines](./auth-quota-guidelines.md) | SigV4 verification, credential cache, quota accounting | Filled |
 | [Presigned Hooks Guidelines](./presigned-hooks-guidelines.md) | Query SigV4 presigned URLs and async webhook event hooks | Filled |
+| [Webadmin Guidelines](./webadmin-guidelines.md) | Single-password admin API, credential CRUD, dashboard data, embedded SPA serving | Filled |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |

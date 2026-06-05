@@ -26,7 +26,8 @@ coverage.*
 
 # --- Frontend (Vue3 + Vite) ---
 node_modules/
-pkg/webadmin/ui/dist/
+pkg/webadmin/ui/dist/*
+!pkg/webadmin/ui/dist/.gitkeep
 pkg/webadmin/ui/.vite/
 npm-debug.log*
 yarn-error.log*
