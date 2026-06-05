@@ -13,6 +13,7 @@ type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Storage  StorageConfig  `yaml:"storage"`
 	Database DatabaseConfig `yaml:"database"`
+	Hooks    HooksConfig    `yaml:"hooks"`
 	WebAdmin WebAdminConfig `yaml:"webadmin"`
 	Region   string         `yaml:"region"`
 	LogLevel string         `yaml:"log_level"`
@@ -41,6 +42,13 @@ type StorageConfig struct {
 type DatabaseConfig struct {
 	Driver string `yaml:"driver"`
 	DSN    string `yaml:"dsn"`
+}
+
+type HooksConfig struct {
+	QueueSize int           `yaml:"queue_size"`
+	Workers   int           `yaml:"workers"`
+	MaxRetry  int           `yaml:"max_retry"`
+	Timeout   time.Duration `yaml:"timeout"`
 }
 
 type WebAdminConfig struct {
@@ -87,6 +95,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Storage.MultipartTTL == 0 {
 		c.Storage.MultipartTTL = 24 * time.Hour
+	}
+	if c.Hooks.QueueSize == 0 {
+		c.Hooks.QueueSize = 1024
+	}
+	if c.Hooks.Workers == 0 {
+		c.Hooks.Workers = 4
+	}
+	if c.Hooks.MaxRetry == 0 {
+		c.Hooks.MaxRetry = 3
+	}
+	if c.Hooks.Timeout == 0 {
+		c.Hooks.Timeout = 5 * time.Second
 	}
 	if c.Region == "" {
 		c.Region = "us-east-1"

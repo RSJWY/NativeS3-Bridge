@@ -12,6 +12,7 @@ import (
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/db"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/hooks"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/quota"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/server"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
@@ -73,9 +74,12 @@ func main() {
 
 	credentialStore := auth.NewCredentialStore(gdb, auth.DefaultCredentialCacheTTL)
 	authenticator := auth.NewLocalSigV4Authenticator(credentialStore, cfg.Region)
+	hookManager := hooks.NewManager(gdb, hooks.Config{QueueSize: cfg.Hooks.QueueSize, Workers: cfg.Hooks.Workers, MaxRetry: cfg.Hooks.MaxRetry, Timeout: cfg.Hooks.Timeout})
+	hookManager.Start()
+	defer hookManager.Stop()
 	s3Server := server.New(cfg.Server, backend, multipartStore, authenticator, func(credID uint, deltaBytes int64, op quota.Op) error {
 		return quota.Commit(gdb, credID, deltaBytes, op)
-	})
+	}, hookManager)
 	if err := s3Server.Run(ctx); err != nil {
 		slog.Error("run s3 server", "error", err)
 		os.Exit(1)

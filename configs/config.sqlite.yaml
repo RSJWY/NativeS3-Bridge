@@ -17,6 +17,12 @@ database:
   driver: "sqlite"
   dsn: "./natives3.db"
 
+hooks:
+  queue_size: 1024
+  workers: 4
+  max_retry: 3
+  timeout: "5s"
+
 webadmin:
   password_hash: ""
   admin_bootstrap_password: ""

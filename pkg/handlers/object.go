@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/hooks"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/quota"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 )
@@ -21,10 +22,19 @@ type UsageCommitter func(credID uint, deltaBytes int64, op quota.Op) error
 type ObjectHandler struct {
 	backend storage.Backend
 	commit  UsageCommitter
+	hooks   EventEmitter
+}
+
+type EventEmitter interface {
+	Emit(hooks.Event)
 }
 
 func NewObjectHandler(backend storage.Backend, commit UsageCommitter) *ObjectHandler {
-	return &ObjectHandler{backend: backend, commit: commit}
+	return NewObjectHandlerWithHooks(backend, commit, nil)
+}
+
+func NewObjectHandlerWithHooks(backend storage.Backend, commit UsageCommitter, emitter EventEmitter) *ObjectHandler {
+	return &ObjectHandler{backend: backend, commit: commit, hooks: emitter}
 }
 
 func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -48,6 +58,7 @@ func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key 
 	w.Header().Set("ETag", quoteETag(info.ETag))
 	w.WriteHeader(http.StatusOK)
 	h.commitUsage(r, info.Size, quota.OpPut)
+	h.emitObjectEvent(r, hooks.ObjectCreated, bucket, key, info)
 }
 
 func (h *ObjectHandler) Get(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -101,6 +112,7 @@ func (h *ObjectHandler) Head(w http.ResponseWriter, r *http.Request, bucket, key
 
 func (h *ObjectHandler) Delete(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	deletedSize := int64(0)
+	deleted := false
 	info, headErr := h.backend.HeadObject(bucket, key)
 	if headErr != nil && !errors.Is(headErr, storage.ErrNoSuchKey) {
 		writeStorageError(w, headErr, r.URL.Path)
@@ -108,6 +120,7 @@ func (h *ObjectHandler) Delete(w http.ResponseWriter, r *http.Request, bucket, k
 	}
 	if headErr == nil {
 		deletedSize = info.Size
+		deleted = true
 	}
 	if err := h.backend.DeleteObject(bucket, key); err != nil {
 		writeStorageError(w, err, r.URL.Path)
@@ -116,6 +129,9 @@ func (h *ObjectHandler) Delete(w http.ResponseWriter, r *http.Request, bucket, k
 	SetStandardHeaders(w)
 	w.WriteHeader(http.StatusNoContent)
 	h.commitUsage(r, -deletedSize, quota.OpDelete)
+	if deleted {
+		h.emitObjectEvent(r, hooks.ObjectDeleted, bucket, key, storage.ObjectInfo{Key: key, Size: deletedSize, ETag: info.ETag, Metadata: info.Metadata})
+	}
 }
 
 func (h *ObjectHandler) PutTagging(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -346,6 +362,26 @@ func (h *ObjectHandler) commitUsage(r *http.Request, deltaBytes int64, op quota.
 	if err := h.commit(id.CredentialID, deltaBytes, op); err != nil {
 		slog.Warn("commit usage", "credential_id", id.CredentialID, "op", op, "delta_bytes", deltaBytes, "error", err)
 	}
+}
+
+func (h *ObjectHandler) emitObjectEvent(r *http.Request, eventType hooks.EventType, bucket, key string, info storage.ObjectInfo) {
+	if h.hooks == nil {
+		return
+	}
+	id, ok := auth.IdentityFromContext(r.Context())
+	if !ok || id == nil {
+		return
+	}
+	h.hooks.Emit(hooks.Event{
+		Type:         eventType,
+		Bucket:       bucket,
+		Key:          key,
+		Size:         info.Size,
+		ETag:         info.ETag,
+		Metadata:     info.Metadata,
+		CredentialID: id.CredentialID,
+		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 func quoteETag(etag string) string {

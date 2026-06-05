@@ -15,7 +15,7 @@ const (
 	Algorithm       = "AWS4-HMAC-SHA256"
 	ServiceS3       = "s3"
 	terminalScope   = "aws4_request"
-	unsignedPayload = "UNSIGNED-PAYLOAD"
+	UnsignedPayload = "UNSIGNED-PAYLOAD"
 )
 
 type ParsedAuthorization struct {
@@ -79,6 +79,21 @@ func CanonicalRequest(r *http.Request, signedHeaders []string, payloadHash strin
 		r.Method,
 		canonicalURI(r),
 		canonicalQueryString(r.URL.Query()),
+		canonicalHeaders,
+		signedHeaderList,
+		payloadHash,
+	}, "\n"), nil
+}
+
+func CanonicalRequestWithQuery(r *http.Request, signedHeaders []string, payloadHash string, query url.Values) (string, error) {
+	canonicalHeaders, signedHeaderList, err := canonicalHeaders(r, signedHeaders)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join([]string{
+		r.Method,
+		canonicalURI(r),
+		canonicalQueryString(query),
 		canonicalHeaders,
 		signedHeaderList,
 		payloadHash,

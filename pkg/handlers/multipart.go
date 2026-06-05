@@ -8,8 +8,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/hooks"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/quota"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 )
@@ -17,10 +19,15 @@ import (
 type MultipartHandler struct {
 	store  *storage.MultipartStore
 	commit UsageCommitter
+	hooks  EventEmitter
 }
 
 func NewMultipartHandler(store *storage.MultipartStore, commit UsageCommitter) *MultipartHandler {
-	return &MultipartHandler{store: store, commit: commit}
+	return NewMultipartHandlerWithHooks(store, commit, nil)
+}
+
+func NewMultipartHandlerWithHooks(store *storage.MultipartStore, commit UsageCommitter, emitter EventEmitter) *MultipartHandler {
+	return &MultipartHandler{store: store, commit: commit, hooks: emitter}
 }
 
 func (h *MultipartHandler) Create(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -105,6 +112,7 @@ func (h *MultipartHandler) Complete(w http.ResponseWriter, r *http.Request, buck
 		ETag:     quoteETag(info.ETag),
 	})
 	h.commitUsage(r, info.Size, quota.OpPut)
+	h.emitObjectCreated(r, bucket, key, info)
 }
 
 func (h *MultipartHandler) Abort(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -178,6 +186,26 @@ func (h *MultipartHandler) commitUsage(r *http.Request, deltaBytes int64, op quo
 	if err := h.commit(id.CredentialID, deltaBytes, op); err != nil {
 		slog.Warn("commit usage", "credential_id", id.CredentialID, "op", op, "delta_bytes", deltaBytes, "error", err)
 	}
+}
+
+func (h *MultipartHandler) emitObjectCreated(r *http.Request, bucket, key string, info storage.ObjectInfo) {
+	if h.hooks == nil {
+		return
+	}
+	id, ok := auth.IdentityFromContext(r.Context())
+	if !ok || id == nil {
+		return
+	}
+	h.hooks.Emit(hooks.Event{
+		Type:         hooks.ObjectCreated,
+		Bucket:       bucket,
+		Key:          key,
+		Size:         info.Size,
+		ETag:         info.ETag,
+		Metadata:     info.Metadata,
+		CredentialID: id.CredentialID,
+		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 func writeMultipartStorageError(w http.ResponseWriter, err error, resource string) {

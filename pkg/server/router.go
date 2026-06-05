@@ -23,11 +23,11 @@ type Router struct {
 	chain            []Middleware
 }
 
-func NewRouter(backend storage.Backend, multipartStore *storage.MultipartStore, authenticator auth.Authenticator, commit handlers.UsageCommitter) http.Handler {
+func NewRouter(backend storage.Backend, multipartStore *storage.MultipartStore, authenticator auth.Authenticator, commit handlers.UsageCommitter, emitter handlers.EventEmitter) http.Handler {
 	r := &Router{
-		objectHandler:    handlers.NewObjectHandler(backend, commit),
+		objectHandler:    handlers.NewObjectHandlerWithHooks(backend, commit, emitter),
 		bucketHandler:    handlers.NewBucketHandler(backend),
-		multipartHandler: handlers.NewMultipartHandler(multipartStore, commit),
+		multipartHandler: handlers.NewMultipartHandlerWithHooks(multipartStore, commit, emitter),
 		chain:            []Middleware{Recover, Logging, Auth(authenticator), Quota},
 	}
 	var h http.Handler = http.HandlerFunc(r.dispatch)
