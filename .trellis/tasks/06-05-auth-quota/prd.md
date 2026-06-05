@@ -39,17 +39,17 @@
 
 ## Acceptance Criteria
 
-- [ ] `go build`/`go vet`/`go test ./pkg/auth/...` 通过。
-- [ ] 用正确密钥（DB 中存在、enabled）经 aws-cli 上传/下载成功。
-- [ ] 用错误 secret 签名 → 403 `SignatureDoesNotMatch`（标准 XML）。
-- [ ] 用不存在的 AccessKey → 403 `InvalidAccessKeyId`。
-- [ ] `status=disabled` 的密钥 → 403。
-- [ ] 时钟偏移超过 ±15 分钟的请求被拒（`RequestTimeTooSkewed`）。
-- [ ] 设某密钥 `quota_bytes` 小于待传文件 → 上传被拒（配额超限标准错误），且 `used_bytes` 未被错误增加。
-- [ ] 成功上传后 `credentials.used_bytes` 增加且 `request_stats` 当日 put_count/bytes_in 增加。
-- [ ] 删除对象后 `used_bytes` 相应减少（不为负）。
-- [ ] 并发上传同一密钥多文件，`used_bytes` 最终值正确（无竞态丢失），用脚本并发验证。
-- [ ] SigV4 与官方 aws-cli/SDK 互通（真实客户端能连通，非仅自测）。
+- [x] `go build`/`go vet`/`go test ./pkg/auth/...` 通过。
+- [x] 用正确密钥（DB 中存在、enabled）经 aws-cli 上传/下载成功。
+- [x] 用错误 secret 签名 → 403 `SignatureDoesNotMatch`（标准 XML）。
+- [x] 用不存在的 AccessKey → 403 `InvalidAccessKeyId`。
+- [x] `status=disabled` 的密钥 → 403。
+- [x] 时钟偏移超过 ±15 分钟的请求被拒（`RequestTimeTooSkewed`）。
+- [x] 设某密钥 `quota_bytes` 小于待传文件 → 上传被拒（配额超限标准错误），且 `used_bytes` 未被错误增加。
+- [x] 成功上传后 `credentials.used_bytes` 增加且 `request_stats` 当日 put_count/bytes_in 增加。
+- [x] 删除对象后 `used_bytes` 相应减少（不为负）。
+- [x] 并发上传同一密钥多文件，`used_bytes` 最终值正确（无竞态丢失），用脚本并发验证。
+- [x] SigV4 与官方 aws-cli/SDK 互通（真实客户端能连通，非仅自测）。
 
 ## Notes
 - SigV4 可手写或复用 `aws-sdk-go-v2` 的 signer 做校验侧；选择记入 research，保持单文件构建。

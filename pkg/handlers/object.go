@@ -4,20 +4,26 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/quota"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 )
 
+type UsageCommitter func(credID uint, deltaBytes int64, op quota.Op) error
+
 type ObjectHandler struct {
 	backend storage.Backend
+	commit  UsageCommitter
 }
 
-func NewObjectHandler(backend storage.Backend) *ObjectHandler {
-	return &ObjectHandler{backend: backend}
+func NewObjectHandler(backend storage.Backend, commit UsageCommitter) *ObjectHandler {
+	return &ObjectHandler{backend: backend, commit: commit}
 }
 
 func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -29,6 +35,7 @@ func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key 
 	SetStandardHeaders(w)
 	w.Header().Set("ETag", quoteETag(info.ETag))
 	w.WriteHeader(http.StatusOK)
+	h.commitUsage(r, info.Size, quota.OpPut)
 }
 
 func (h *ObjectHandler) Get(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -60,7 +67,12 @@ func (h *ObjectHandler) Get(w http.ResponseWriter, r *http.Request, bucket, key 
 	}
 	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	w.WriteHeader(status)
-	_, _ = io.Copy(w, rc)
+	written, copyErr := io.Copy(w, rc)
+	if copyErr != nil {
+		slog.Warn("stream object", "bucket", bucket, "key", key, "error", copyErr)
+		return
+	}
+	h.commitUsage(r, written, quota.OpGet)
 }
 
 func (h *ObjectHandler) Head(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -76,12 +88,22 @@ func (h *ObjectHandler) Head(w http.ResponseWriter, r *http.Request, bucket, key
 }
 
 func (h *ObjectHandler) Delete(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	deletedSize := int64(0)
+	info, headErr := h.backend.HeadObject(bucket, key)
+	if headErr != nil && !errors.Is(headErr, storage.ErrNoSuchKey) {
+		writeStorageError(w, headErr, r.URL.Path)
+		return
+	}
+	if headErr == nil {
+		deletedSize = info.Size
+	}
 	if err := h.backend.DeleteObject(bucket, key); err != nil {
 		writeStorageError(w, err, r.URL.Path)
 		return
 	}
 	SetStandardHeaders(w)
 	w.WriteHeader(http.StatusNoContent)
+	h.commitUsage(r, -deletedSize, quota.OpDelete)
 }
 
 func (h *ObjectHandler) ListObjectsV2(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -201,6 +223,19 @@ func writeStorageError(w http.ResponseWriter, err error, resource string) {
 		WriteS3Error(w, "InvalidRange", http.StatusRequestedRangeNotSatisfiable, resource)
 	default:
 		WriteS3Error(w, "InternalError", http.StatusInternalServerError, resource)
+	}
+}
+
+func (h *ObjectHandler) commitUsage(r *http.Request, deltaBytes int64, op quota.Op) {
+	if h.commit == nil {
+		return
+	}
+	id, ok := auth.IdentityFromContext(r.Context())
+	if !ok || id == nil {
+		return
+	}
+	if err := h.commit(id.CredentialID, deltaBytes, op); err != nil {
+		slog.Warn("commit usage", "credential_id", id.CredentialID, "op", op, "delta_bytes", deltaBytes, "error", err)
 	}
 }
 

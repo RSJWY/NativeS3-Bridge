@@ -3,7 +3,7 @@
   "name": "auth-quota",
   "title": "SigV4鉴权与按密钥配额",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

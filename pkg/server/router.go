@@ -1,12 +1,16 @@
 package server
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/handlers"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/quota"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 )
 
@@ -18,11 +22,11 @@ type Router struct {
 	chain         []Middleware
 }
 
-func NewRouter(backend storage.Backend) http.Handler {
+func NewRouter(backend storage.Backend, authenticator auth.Authenticator, commit handlers.UsageCommitter) http.Handler {
 	r := &Router{
-		objectHandler: handlers.NewObjectHandler(backend),
+		objectHandler: handlers.NewObjectHandler(backend, commit),
 		bucketHandler: handlers.NewBucketHandler(backend),
-		chain:         []Middleware{Recover, Logging, AuthNoop, QuotaNoop},
+		chain:         []Middleware{Recover, Logging, Auth(authenticator), Quota},
 	}
 	var h http.Handler = http.HandlerFunc(r.dispatch)
 	for i := len(r.chain) - 1; i >= 0; i-- {
@@ -100,14 +104,54 @@ func Logging(next http.Handler) http.Handler {
 	})
 }
 
-func AuthNoop(next http.Handler) http.Handler {
+func Auth(authenticator auth.Authenticator) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id, err := authenticator.Verify(r)
+			if err != nil {
+				code := auth.ErrorCode(err)
+				handlers.WriteS3Error(w, code, http.StatusForbidden, r.URL.Path)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), id)))
+		})
+	}
+}
+
+func Quota(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bucket, key := parseS3Path(r.URL.Path)
+		if r.Method == http.MethodPut && bucket != "" && key != "" {
+			id, ok := auth.IdentityFromContext(r.Context())
+			if !ok || id == nil {
+				handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+				return
+			}
+			size := contentLengthForQuota(r)
+			if size < 0 {
+				handlers.WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
+				return
+			}
+			if err := quota.Check(id, size); err != nil {
+				if errors.Is(err, quota.ErrQuotaExceeded) {
+					handlers.WriteS3Error(w, "QuotaExceeded", http.StatusForbidden, r.URL.Path)
+					return
+				}
+				handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+				return
+			}
+		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func QuotaNoop(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
-	})
+func contentLengthForQuota(r *http.Request) int64 {
+	if raw := r.Header.Get("x-amz-decoded-content-length"); raw != "" {
+		size, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return -1
+		}
+		return size
+	}
+	return r.ContentLength
 }

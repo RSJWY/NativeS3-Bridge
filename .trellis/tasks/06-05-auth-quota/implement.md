@@ -4,15 +4,15 @@
 
 ## 步骤
 
-- [ ] 1. `pkg/auth/identity.go`：`Identity`、`Authenticator` 接口、context key。
-- [ ] 2. `pkg/auth/sigv4.go`：CanonicalRequest / StringToSign / signing key 派生 / 签名比对，做成可复用纯函数。写单元测试用 AWS 官方测试向量验证。
-- [ ] 3. `pkg/auth/credential_store.go`：DB 查询 + TTL 缓存 + Invalidate。
-- [ ] 4. `pkg/auth/authenticator.go`：`LocalSigV4Authenticator.Verify`（含时钟偏移、disabled 处理）。
-- [ ] 5. `pkg/quota/quota.go`：`Check` + `Commit`（原子 used_bytes 更新 + request_stats upsert，用 clause.OnConflict）。写测试覆盖 put/get/delete 与下限 0。
-- [ ] 6. 替换 `pkg/server/router.go` 的 Auth/Quota 占位为真实中间件；handler 成功后调用 Commit。
-- [ ] 7. `main.go` 装配 authenticator + credentialStore + quota（注入 db）。
-- [ ] 8. 临时种子：提供一个 CLI/启动选项或测试夹具插入一个测试密钥（正式创建走 webadmin 子任务）。记录于 research。
-- [ ] 9. research：SecretKey 存储形态、used_bytes 跨方言原子更新方案、软/硬配额选择。
+- [x] 1. `pkg/auth/identity.go`：`Identity`、`Authenticator` 接口、context key。
+- [x] 2. `pkg/auth/sigv4.go`：CanonicalRequest / StringToSign / signing key 派生 / 签名比对，做成可复用纯函数。写单元测试用 AWS 官方测试向量验证。
+- [x] 3. `pkg/auth/credential_store.go`：DB 查询 + TTL 缓存 + Invalidate。
+- [x] 4. `pkg/auth/authenticator.go`：`LocalSigV4Authenticator.Verify`（含时钟偏移、disabled 处理）。
+- [x] 5. `pkg/quota/quota.go`：`Check` + `Commit`（原子 used_bytes 更新 + request_stats upsert，用 clause.OnConflict）。写测试覆盖 put/get/delete 与下限 0。
+- [x] 6. 替换 `pkg/server/router.go` 的 Auth/Quota 占位为真实中间件；handler 成功后调用 Commit。
+- [x] 7. `main.go` 装配 authenticator + credentialStore + quota（注入 db）。
+- [x] 8. 临时种子：提供一个 CLI/启动选项或测试夹具插入一个测试密钥（正式创建走 webadmin 子任务）。记录于 research。
+- [x] 9. research：SecretKey 存储形态、used_bytes 跨方言原子更新方案、软/硬配额选择。
 
 ## 验证命令
 

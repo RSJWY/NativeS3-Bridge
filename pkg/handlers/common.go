@@ -78,6 +78,16 @@ func errorMessage(code string) string {
 		return "The requested range is not satisfiable."
 	case "MethodNotAllowed":
 		return "The specified method is not allowed."
+	case "AccessDenied":
+		return "Access denied."
+	case "InvalidAccessKeyId":
+		return "The AWS access key ID you provided does not exist in our records."
+	case "SignatureDoesNotMatch":
+		return "The request signature we calculated does not match the signature you provided."
+	case "RequestTimeTooSkewed":
+		return "The difference between the request time and the server time is too large."
+	case "QuotaExceeded":
+		return "The requested object exceeds the credential quota."
 	default:
 		return "Internal server error."
 	}
