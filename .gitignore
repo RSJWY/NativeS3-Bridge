@@ -1,0 +1,44 @@
+# --- Go ---
+# Binaries
+natives3bridge
+natives3bridge.exe
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+# Test / coverage
+*.test
+*.out
+coverage.*
+
+# --- Project runtime data ---
+# Local data root (native files land here) — never commit
+/data/
+# SQLite database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+# Local config with real secrets (keep config.example.yaml committed)
+/configs/config.yaml
+/configs/config.local.yaml
+
+# --- Frontend (Vue3 + Vite) ---
+node_modules/
+pkg/webadmin/ui/dist/
+pkg/webadmin/ui/.vite/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Python (tooling caches) ---
+__pycache__/
+*.pyc
+
+# --- Editor / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

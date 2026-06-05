@@ -1,0 +1,33 @@
+{
+  "id": "natives3-bridge",
+  "name": "natives3-bridge",
+  "title": "NativeS3-Bridge 原生S3桥接中间件",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "architect",
+  "assignee": "architect",
+  "createdAt": "2026-06-05",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "06-05-db-foundation",
+    "06-05-s3-core-objects",
+    "06-05-auth-quota",
+    "06-05-multipart-metadata",
+    "06-05-presigned-hooks",
+    "06-05-webadmin-ui"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
