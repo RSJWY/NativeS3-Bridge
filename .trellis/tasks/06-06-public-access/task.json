@@ -1,0 +1,30 @@
+{
+  "id": "public-access",
+  "name": "public-access",
+  "title": "对象存储公开访问能力（Bucket ACL + 匿名下载）",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "rsjwy",
+  "assignee": "rsjwy",
+  "createdAt": "2026-06-06",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "06-06-bucket-model",
+    "06-06-anon-read",
+    "06-06-bucket-admin-ui"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
