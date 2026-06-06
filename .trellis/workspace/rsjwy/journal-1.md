@@ -104,3 +104,36 @@ Implemented single-password webadmin API, embedded Vue3/Vite/ECharts admin UI, c
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: 06-06-bucket-model 验收与收尾
+
+**Date**: 2026-06-06
+**Task**: 06-06-bucket-model 验收与收尾
+**Branch**: `master`
+
+### Summary
+
+验收 Bucket 模型子任务：审查 BucketStore/handler/路由/装配，go build+vet+test 全绿，aws-cli 冒烟覆盖建桶幂等、删空桶、删非空桶 BucketNotEmpty(409)、InvalidBucketName、NoSuchBucket(404)、ACL=private 及历史桶 negative cache。提交实现代码(feat)并归档任务。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `610ca66` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
