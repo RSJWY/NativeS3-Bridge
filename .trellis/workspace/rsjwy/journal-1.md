@@ -170,3 +170,36 @@ Implemented single-password webadmin API, embedded Vue3/Vite/ECharts admin UI, c
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Validate single-part PUT digests
+
+**Date**: 2026-06-07
+**Task**: Validate single-part PUT digests
+**Branch**: `06-06-s3-ops-completion`
+
+### Summary
+
+Implemented storage and handler digest validation for single-part PutObject, including Content-MD5 and concrete x-amz-content-sha256 checks before atomic rename; added BadDigest/InvalidDigest mappings, regressions for cleanup/overwrite/quota/hooks, updated backend storage spec, and verified go test ./pkg/storage ./pkg/handlers plus go test ./....
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `db51d0f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
