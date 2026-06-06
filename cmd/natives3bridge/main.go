@@ -88,7 +88,7 @@ func main() {
 	s3Server := server.New(cfg.Server, backend, multipartStore, bucketStore, authenticator, func(credID uint, deltaBytes int64, op quota.Op) error {
 		return quota.Commit(gdb, credID, deltaBytes, op)
 	}, hookManager)
-	adminServer, err := webadmin.NewServer(cfg.Server, cfg.WebAdmin, gdb, credentialStore)
+	adminServer, err := webadmin.NewServer(cfg.Server, cfg.WebAdmin, gdb, credentialStore, bucketStore)
 	if err != nil {
 		slog.Error("init admin server", "error", err)
 		os.Exit(1)

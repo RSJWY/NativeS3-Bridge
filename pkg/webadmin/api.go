@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	dbpkg "github.com/RSJWY/NativeS3-Bridge/pkg/db"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 	"gorm.io/gorm"
 )
 
@@ -32,6 +33,21 @@ type credentialInvalidator interface {
 type API struct {
 	db          *gorm.DB
 	invalidator credentialInvalidator
+	buckets     *storage.BucketStore
+}
+
+type bucketResponse struct {
+	Name      string    `json:"name"`
+	ACL       string    `json:"acl"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type createBucketRequest struct {
+	Name string `json:"name"`
+}
+
+type updateBucketACLRequest struct {
+	ACL string `json:"acl"`
 }
 
 type credentialResponse struct {
@@ -82,8 +98,8 @@ type requestTrendItem struct {
 	BytesOut    int64  `json:"bytes_out"`
 }
 
-func NewAPI(gdb *gorm.DB, invalidator credentialInvalidator) *API {
-	return &API{db: gdb, invalidator: invalidator}
+func NewAPI(gdb *gorm.DB, invalidator credentialInvalidator, buckets *storage.BucketStore) *API {
+	return &API{db: gdb, invalidator: invalidator, buckets: buckets}
 }
 
 func (a *API) Credentials(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +128,49 @@ func (a *API) CredentialByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (a *API) Buckets(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		a.listBuckets(w, r)
+	case http.MethodPost:
+		a.createBucket(w, r)
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *API) BucketByName(w http.ResponseWriter, r *http.Request) {
+	tail := strings.TrimPrefix(r.URL.Path, "/api/admin/buckets/")
+	if tail == "" {
+		writeJSONError(w, http.StatusNotFound, "bucket not found")
+		return
+	}
+
+	if strings.HasSuffix(tail, "/acl") {
+		name := strings.TrimSuffix(tail, "/acl")
+		if name == "" || strings.Contains(name, "/") {
+			writeJSONError(w, http.StatusNotFound, "bucket not found")
+			return
+		}
+		if r.Method != http.MethodPut {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		a.updateBucketACL(w, r, name)
+		return
+	}
+
+	if strings.Contains(tail, "/") {
+		writeJSONError(w, http.StatusNotFound, "bucket not found")
+		return
+	}
+	if r.Method != http.MethodDelete {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	a.deleteBucket(w, r, tail)
 }
 
 func (a *API) DashboardSummary(w http.ResponseWriter, r *http.Request) {
@@ -195,6 +254,79 @@ func (a *API) listCredentials(w http.ResponseWriter, _ *http.Request) {
 		items = append(items, credentialToResponse(cred))
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+func (a *API) listBuckets(w http.ResponseWriter, _ *http.Request) {
+	if a.buckets == nil {
+		writeJSONError(w, http.StatusInternalServerError, "bucket store is not configured")
+		return
+	}
+	buckets, err := a.buckets.List()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "query buckets failed")
+		return
+	}
+	items := make([]bucketResponse, 0, len(buckets))
+	for _, bucket := range buckets {
+		items = append(items, bucketToResponse(bucket))
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (a *API) createBucket(w http.ResponseWriter, r *http.Request) {
+	if a.buckets == nil {
+		writeJSONError(w, http.StatusInternalServerError, "bucket store is not configured")
+		return
+	}
+	var req createBucketRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	name := req.Name
+	if err := a.buckets.Create(name); err != nil {
+		a.writeBucketStoreError(w, err, "create bucket failed")
+		return
+	}
+	bucket, ok := a.findBucketByName(w, name)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusCreated, bucket)
+}
+
+func (a *API) deleteBucket(w http.ResponseWriter, _ *http.Request, name string) {
+	if a.buckets == nil {
+		writeJSONError(w, http.StatusInternalServerError, "bucket store is not configured")
+		return
+	}
+	if err := a.buckets.Delete(name); err != nil {
+		a.writeBucketStoreError(w, err, "delete bucket failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *API) updateBucketACL(w http.ResponseWriter, r *http.Request, name string) {
+	if a.buckets == nil {
+		writeJSONError(w, http.StatusInternalServerError, "bucket store is not configured")
+		return
+	}
+	var req updateBucketACLRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	acl := req.ACL
+	if err := a.buckets.SetACL(name, acl); err != nil {
+		a.writeBucketStoreError(w, err, "update bucket acl failed")
+		return
+	}
+	bucket, ok := a.findBucketByName(w, name)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, bucket)
 }
 
 func (a *API) createCredential(w http.ResponseWriter, r *http.Request) {
@@ -318,6 +450,36 @@ func (a *API) findCredential(w http.ResponseWriter, idOrAccessKey string) (dbpkg
 	return cred, true
 }
 
+func (a *API) findBucketByName(w http.ResponseWriter, name string) (bucketResponse, bool) {
+	buckets, err := a.buckets.List()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "query buckets failed")
+		return bucketResponse{}, false
+	}
+	for _, bucket := range buckets {
+		if bucket.Name == name {
+			return bucketToResponse(bucket), true
+		}
+	}
+	writeJSONError(w, http.StatusNotFound, "bucket not found")
+	return bucketResponse{}, false
+}
+
+func (a *API) writeBucketStoreError(w http.ResponseWriter, err error, fallback string) {
+	switch {
+	case errors.Is(err, storage.ErrInvalidBucketName):
+		writeJSONError(w, http.StatusBadRequest, "invalid bucket name")
+	case errors.Is(err, storage.ErrInvalidACL):
+		writeJSONError(w, http.StatusBadRequest, "acl must be private or public-read")
+	case errors.Is(err, storage.ErrBucketNotEmpty):
+		writeJSONError(w, http.StatusConflict, "bucket not empty")
+	case errors.Is(err, storage.ErrNoSuchBucket):
+		writeJSONError(w, http.StatusNotFound, "bucket not found")
+	default:
+		writeJSONError(w, http.StatusInternalServerError, fallback)
+	}
+}
+
 func (a *API) invalidate(accessKey string) {
 	if a.invalidator != nil {
 		a.invalidator.Invalidate(accessKey)
@@ -326,6 +488,10 @@ func (a *API) invalidate(accessKey string) {
 
 func credentialToResponse(cred dbpkg.Credential) credentialResponse {
 	return credentialResponse{ID: cred.ID, AccessKey: cred.AccessKey, Name: cred.Name, Status: cred.Status, QuotaBytes: cred.QuotaBytes, UsedBytes: cred.UsedBytes, CreatedAt: cred.CreatedAt}
+}
+
+func bucketToResponse(bucket dbpkg.Bucket) bucketResponse {
+	return bucketResponse{Name: bucket.Name, ACL: bucket.ACL, CreatedAt: bucket.CreatedAt}
 }
 
 func randomAccessKey() (string, error) {

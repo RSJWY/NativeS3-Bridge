@@ -3,7 +3,7 @@
   "name": "bucket-admin-ui",
   "title": "管理后台桶管理界面（列表/建删/公开开关）",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

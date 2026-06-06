@@ -15,6 +15,14 @@ export interface CreatedCredential extends Credential {
   secret_key: string
 }
 
+export type BucketACL = 'private' | 'public-read'
+
+export interface Bucket {
+  name: string
+  acl: BucketACL
+  created_at: string
+}
+
 export interface DashboardSummary {
   total_credentials: number
   total_quota_bytes: number
@@ -111,6 +119,24 @@ export const adminApi = {
   },
   deleteCredential(id: number) {
     return apiFetch<{ ok: boolean }>(`/api/admin/credentials/${id}`, { method: 'DELETE' })
+  },
+  listBuckets() {
+    return apiFetch<Bucket[]>('/api/admin/buckets')
+  },
+  createBucket(input: { name: string }) {
+    return apiFetch<Bucket>('/api/admin/buckets', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    })
+  },
+  deleteBucket(name: string) {
+    return apiFetch<{ ok: boolean }>(`/api/admin/buckets/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  },
+  setBucketACL(name: string, acl: BucketACL) {
+    return apiFetch<Bucket>(`/api/admin/buckets/${encodeURIComponent(name)}/acl`, {
+      method: 'PUT',
+      body: JSON.stringify({ acl })
+    })
   },
   dashboardSummary() {
     return apiFetch<DashboardSummary>('/api/admin/dashboard/summary')
