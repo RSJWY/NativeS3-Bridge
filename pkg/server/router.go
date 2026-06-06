@@ -54,11 +54,25 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 		switch req.Method {
 		case http.MethodPut:
 			r.bucketHandler.CreateBucket(w, req, bucket)
+		case http.MethodPost:
+			if hasQuery(req, "delete") {
+				r.objectHandler.DeleteObjects(w, req, bucket)
+				return
+			}
+			handlers.WriteS3Error(w, "MethodNotAllowed", http.StatusMethodNotAllowed, req.URL.Path)
 		case http.MethodDelete:
 			r.bucketHandler.DeleteBucket(w, req, bucket)
 		case http.MethodHead:
 			r.bucketHandler.HeadBucket(w, req, bucket)
 		case http.MethodGet:
+			if hasQuery(req, "location") {
+				r.bucketHandler.GetBucketLocation(w, req, bucket)
+				return
+			}
+			if hasQuery(req, "versioning") {
+				r.bucketHandler.GetBucketVersioning(w, req, bucket)
+				return
+			}
 			if hasQuery(req, "uploads") {
 				r.multipartHandler.ListUploads(w, req, bucket)
 				return
@@ -107,6 +121,10 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 
 	switch req.Method {
 	case http.MethodPut:
+		if req.Header.Get("x-amz-copy-source") != "" {
+			r.objectHandler.Copy(w, req, bucket, key)
+			return
+		}
 		r.objectHandler.Put(w, req, bucket, key)
 	case http.MethodGet:
 		r.objectHandler.Get(w, req, bucket, key)
@@ -217,7 +235,7 @@ func hasAnonymousBlockedSubresource(r *http.Request) bool {
 func Quota(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bucket, key := parseS3Path(r.URL.Path)
-		if r.Method == http.MethodPut && bucket != "" && key != "" && !hasQuery(r, "tagging") && r.URL.Query().Get("uploadId") == "" {
+		if r.Method == http.MethodPut && bucket != "" && key != "" && !hasQuery(r, "tagging") && r.URL.Query().Get("uploadId") == "" && r.Header.Get("x-amz-copy-source") == "" {
 			id, ok := auth.IdentityFromContext(r.Context())
 			if !ok || id == nil {
 				handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)

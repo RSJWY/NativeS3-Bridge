@@ -156,6 +156,48 @@ func TestFileBackendListBucketsFiltersHiddenAndInvalidDirs(t *testing.T) {
 	}
 }
 
+func TestFileBackendCopyObjectPreservesBytesMetadataAndTags(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	if _, err := backend.PutObjectWithMetadata("test-bucket", "dir/source.txt", stringsReader("copy me"), "text/plain", map[string]string{"author": "alice"}); err != nil {
+		t.Fatalf("put source: %v", err)
+	}
+	if err := backend.PutObjectTags("test-bucket", "dir/source.txt", map[string]string{"env": "test"}); err != nil {
+		t.Fatalf("tag source: %v", err)
+	}
+
+	info, err := backend.CopyObject("test-bucket", "dir/source.txt", "test-bucket", "dir/copy.txt")
+	if err != nil {
+		t.Fatalf("copy object: %v", err)
+	}
+	if info.Size != int64(len("copy me")) || info.ETag != md5Hex("copy me") {
+		t.Fatalf("copy info = %+v", info)
+	}
+	data, err := os.ReadFile(filepath.Join(backend.root, "test-bucket", "dir", "copy.txt"))
+	if err != nil {
+		t.Fatalf("read copy: %v", err)
+	}
+	if string(data) != "copy me" {
+		t.Fatalf("copy bytes = %q", string(data))
+	}
+	head, err := backend.HeadObject("test-bucket", "dir/copy.txt")
+	if err != nil {
+		t.Fatalf("head copy: %v", err)
+	}
+	if head.ContentType != "text/plain" || head.Metadata["author"] != "alice" {
+		t.Fatalf("copy metadata = content-type %q metadata %+v", head.ContentType, head.Metadata)
+	}
+	tags, err := backend.GetObjectTags("test-bucket", "dir/copy.txt")
+	if err != nil {
+		t.Fatalf("get copy tags: %v", err)
+	}
+	if tags["env"] != "test" {
+		t.Fatalf("copy tags = %+v", tags)
+	}
+}
+
 func md5Hex(s string) string {
 	sum := md5.Sum([]byte(s))
 	return hex.EncodeToString(sum[:])

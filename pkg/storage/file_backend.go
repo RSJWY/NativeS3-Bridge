@@ -209,6 +209,101 @@ func (b *FileBackend) DeleteObject(bucket, key string) error {
 	return err
 }
 
+func (b *FileBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (ObjectInfo, error) {
+	srcInfo, err := b.HeadObject(srcBucket, srcKey)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	srcPath, err := ResolveObjectPath(b.root, srcBucket, srcKey)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	dstPath, err := ResolveObjectPath(b.root, dstBucket, dstKey)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	if err := b.ensureBucketExists(dstBucket); err != nil {
+		return ObjectInfo{}, err
+	}
+	sidecar, exists, err := ReadSidecar(srcPath, b.metadataSuffix)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	if !exists {
+		sidecar = Sidecar{
+			ContentType: srcInfo.ContentType,
+			Metadata:    cloneStringMap(srcInfo.Metadata),
+			Tags:        map[string]string{},
+		}
+	}
+	if sidecar.ContentType == "" {
+		sidecar.ContentType = srcInfo.ContentType
+	}
+	if sidecar.Metadata == nil {
+		sidecar.Metadata = map[string]string{}
+	}
+	if sidecar.Tags == nil {
+		sidecar.Tags = map[string]string{}
+	}
+
+	in, err := os.Open(srcPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ObjectInfo{}, ErrNoSuchKey
+		}
+		return ObjectInfo{}, err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return ObjectInfo{}, err
+	}
+
+	tmp := dstPath + ".tmp-" + randomHex(8)
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	h := md5.New()
+	size, copyErr := io.Copy(io.MultiWriter(out, h), in)
+	syncErr := out.Sync()
+	closeErr := out.Close()
+	if copyErr != nil || syncErr != nil || closeErr != nil {
+		_ = os.Remove(tmp)
+		return ObjectInfo{}, firstErr(copyErr, syncErr, closeErr)
+	}
+	if err := os.Rename(tmp, dstPath); err != nil {
+		_ = os.Remove(tmp)
+		return ObjectInfo{}, err
+	}
+
+	stat, err := os.Stat(dstPath)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	etag := hex.EncodeToString(h.Sum(nil))
+	metadata := cloneStringMap(sidecar.Metadata)
+	contentType := normalizeContentType(sidecar.ContentType, dstKey)
+	if err := WriteSidecar(dstPath, b.metadataSuffix, Sidecar{
+		ETag:        etag,
+		ContentType: contentType,
+		Metadata:    metadata,
+		Tags:        cloneStringMap(sidecar.Tags),
+		Size:        size,
+		UploadedAt:  time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return ObjectInfo{}, err
+	}
+	b.setContentType(dstPath, contentType)
+	return ObjectInfo{
+		Key:          filepath.ToSlash(dstKey),
+		Size:         size,
+		ETag:         etag,
+		LastModified: stat.ModTime().UTC(),
+		ContentType:  contentType,
+		Metadata:     metadata,
+	}, nil
+}
+
 func (b *FileBackend) PutObjectTags(bucket, key string, tags map[string]string) error {
 	info, target, sidecar, err := b.sidecarForExistingObject(bucket, key)
 	if err != nil {
