@@ -16,6 +16,8 @@ import (
 
 type Middleware func(http.Handler) http.Handler
 
+type ACLLookup func(bucket string) (acl string, exists bool, err error)
+
 type Router struct {
 	objectHandler    *handlers.ObjectHandler
 	bucketHandler    *handlers.BucketHandler
@@ -28,7 +30,7 @@ func NewRouter(backend storage.Backend, multipartStore *storage.MultipartStore, 
 		objectHandler:    handlers.NewObjectHandlerWithHooks(backend, commit, emitter),
 		bucketHandler:    handlers.NewBucketHandler(backend, bucketStore),
 		multipartHandler: handlers.NewMultipartHandlerWithHooks(multipartStore, commit, emitter),
-		chain:            []Middleware{Recover, Logging, Auth(authenticator), Quota},
+		chain:            []Middleware{Recover, Logging, Auth(authenticator, bucketStore.GetACL), Quota},
 	}
 	var h http.Handler = http.HandlerFunc(r.dispatch)
 	for i := len(r.chain) - 1; i >= 0; i-- {
@@ -154,18 +156,62 @@ func Logging(next http.Handler) http.Handler {
 	})
 }
 
-func Auth(authenticator auth.Authenticator) Middleware {
+func Auth(authenticator auth.Authenticator, aclLookup ACLLookup) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id, err := authenticator.Verify(r)
-			if err != nil {
-				code := auth.ErrorCode(err)
-				handlers.WriteS3Error(w, code, http.StatusForbidden, r.URL.Path)
+			if hasCredentials(r) {
+				id, err := authenticator.Verify(r)
+				if err != nil {
+					code := auth.ErrorCode(err)
+					handlers.WriteS3Error(w, code, http.StatusForbidden, r.URL.Path)
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), id)))
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), id)))
+
+			bucket, key := parseS3Path(r.URL.Path)
+			if !isAnonymousObjectRead(r, bucket, key) || aclLookup == nil {
+				handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+				return
+			}
+			acl, exists, err := aclLookup(bucket)
+			if err != nil {
+				slog.Error("lookup bucket acl", "bucket", bucket, "error", err)
+				handlers.WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
+				return
+			}
+			if !exists || acl != storage.ACLPublicRead {
+				handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), auth.AnonymousIdentity())))
 		})
 	}
+}
+
+func hasCredentials(r *http.Request) bool {
+	return r.Header.Get("Authorization") != "" || auth.HasPresignQuery(r)
+}
+
+func isAnonymousObjectRead(r *http.Request, bucket, key string) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if bucket == "" || key == "" {
+		return false
+	}
+	return !hasAnonymousBlockedSubresource(r)
+}
+
+func hasAnonymousBlockedSubresource(r *http.Request) bool {
+	query := r.URL.Query()
+	for _, key := range []string{"tagging", "uploads", "uploadId", "acl", "tags"} {
+		if _, ok := query[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func Quota(next http.Handler) http.Handler {

@@ -108,3 +108,81 @@ if cached && time.Now().Before(entry.expiresAt) {
     return &cred, nil
 }
 ```
+
+---
+
+## Scenario: Anonymous Public-Read Object Downloads
+
+### 1. Scope / Trigger
+
+- Trigger: any change to S3 auth middleware, bucket ACL lookup, anonymous identity handling, object GET/HEAD dispatch, or GET usage accounting.
+- Goal: support managed `public-read` buckets for anonymous single-object downloads without weakening the private-bucket or signed-request security model.
+
+### 2. Signatures
+
+- `func HasPresignQuery(r *http.Request) bool`
+- `func Auth(authenticator auth.Authenticator, aclLookup server.ACLLookup) server.Middleware`
+- `type ACLLookup func(bucket string) (acl string, exists bool, err error)`
+- `func AnonymousIdentity() *auth.Identity`
+- `func IsAnonymous(id *auth.Identity) bool`
+- `func (s *storage.BucketStore) GetACL(name string) (acl string, exists bool, err error)`
+- `func (s *storage.BucketStore) SetACL(name, acl string) error`
+
+### 3. Contracts
+
+- A request has credentials when it includes an `Authorization` header or a complete query presign set detected by `auth.HasPresignQuery`; credentialed requests must continue through `authenticator.Verify` and must not use the anonymous ACL branch.
+- A request is eligible for anonymous public-read only when method is `GET` or `HEAD`, path parses to `bucket != ""` and `key != ""`, and query does not contain management/write subresources such as `tagging`, `uploads`, `uploadId`, `acl`, or `tags`.
+- Anonymous eligible requests call `BucketStore.GetACL(bucket)`. `exists=false` means historical/unregistered bucket and must be treated as private.
+- Anonymous access is allowed only for `exists=true && acl == storage.ACLPublicRead`; allowed requests receive `auth.AnonymousIdentity()` in context before reaching quota and object handlers.
+- Anonymous object reads must not call `quota.Commit` or write `request_stats` for `credential_id=0`. Signed GETs continue to count as normal.
+- ACL cache invalidation is in-process. `BucketStore.SetACL` invalidates the running store immediately; direct DB updates do not invalidate another already-running `BucketStore` and are only suitable for smoke checks after restart or TTL expiry.
+
+### 4. Validation & Error Matrix
+
+- Anonymous private bucket object GET/HEAD -> HTTP 403 `AccessDenied` XML.
+- Anonymous public-read object GET/HEAD -> object handler response, including `206` for valid Range requests.
+- Anonymous unregistered/historical bucket object GET/HEAD -> HTTP 403 `AccessDenied` XML.
+- Anonymous bucket-level GET/ListObjectsV2 -> HTTP 403 `AccessDenied` XML, even when bucket is public-read.
+- Anonymous PUT/DELETE/POST/multipart/tagging/ACL subresource -> HTTP 403 `AccessDenied` XML, even when bucket is public-read.
+- ACL lookup DB error -> HTTP 500 `InternalError` XML and a structured server log entry; do not leak DB details to the client.
+- Credentialed header SigV4 or presigned requests -> unchanged `authenticator.Verify` behavior and existing S3 auth error codes.
+
+### 5. Good/Base/Bad Cases
+
+- Good: `curl http://host/public-bucket/known/key.txt` returns `200` only after the same process observes `SetACL(public-bucket, public-read)`.
+- Good: `curl -I http://host/public-bucket/known/key.txt` returns `Content-Length`, `ETag`, and any `x-amz-meta-*` headers without requiring credentials.
+- Base: a filesystem bucket with no `buckets` table row remains anonymous-private and returns `403`, while signed access proceeds normally.
+- Bad: allowing anonymous `GET /public-bucket` to list objects because the bucket ACL is public-read.
+- Bad: treating a partial or malformed presign query as anonymous; only `HasPresignQuery` identifies credentialed presign requests, otherwise anonymous rules apply and will normally deny unsafe paths.
+
+### 6. Tests Required
+
+- Unit test anonymous matrix for method, path shape, ACL result, credential presence, and blocked subresources.
+- Unit test credentialed requests bypass ACL lookup and call `authenticator.Verify` exactly once.
+- Unit test anonymous identities pass through quota for GET/HEAD and do not call usage commit.
+- Integration smoke with real `aws-cli` for signed create bucket, PUT, HEAD, GET, LIST, DELETE, and presigned GET to prove signed behavior is unchanged.
+- Integration smoke with real `curl` for anonymous private GET 403 XML, public-read GET 200 byte match, HEAD metadata headers, Range 206 byte match, List/PUT/DELETE 403, and SetACL back to private causing the next anonymous GET to return 403 through the same `BucketStore` instance.
+
+### 7. Wrong vs Correct
+
+Wrong:
+
+```go
+if bucketACL == storage.ACLPublicRead && r.Method == http.MethodGet {
+    next.ServeHTTP(w, r) // also allows ListObjectsV2 and ?tagging reads.
+}
+```
+
+Correct:
+
+```go
+bucket, key := parseS3Path(r.URL.Path)
+if !hasCredentials(r) && isAnonymousObjectRead(r, bucket, key) {
+    acl, exists, err := aclLookup(bucket)
+    if err == nil && exists && acl == storage.ACLPublicRead {
+        next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), auth.AnonymousIdentity())))
+        return
+    }
+}
+handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+```

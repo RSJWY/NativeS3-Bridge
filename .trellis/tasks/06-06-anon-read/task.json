@@ -3,7 +3,7 @@
   "name": "anon-read",
   "title": "匿名公开下载鉴权改造（公开桶放行 GET/HEAD）",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

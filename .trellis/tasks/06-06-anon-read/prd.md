@@ -42,15 +42,15 @@
 - 不实现对象级 ACL。
 
 ## Acceptance Criteria
-- [ ] `go build ./...` / `go vet ./...` / `go test ./...` 全绿。
-- [ ] private 桶匿名 `curl -s -o /dev/null -w '%{http_code}' http://host:9000/b/k` → 403，响应体为标准 `<Error>` XML。
-- [ ] public-read 桶匿名 GET 对象 → 200，下载内容与磁盘字节一致。
-- [ ] public-read 桶匿名 HEAD 对象 → 200，返回 Content-Length/ETag/`x-amz-meta-*`。
-- [ ] public-read 桶匿名 Range 请求 → 206，区间字节正确。
-- [ ] public-read 桶匿名 `PUT` → 403；匿名 `DELETE` → 403；匿名 `GET /{bucket}`(列举) → 403。
-- [ ] 带合法签名的所有操作（GET/PUT/HEAD/DELETE/List/multipart/预签名）在 private 与 public-read 桶下行为与改造前一致（回归通过）。
-- [ ] 匿名 GET 不污染按密钥用量统计（或按 design 既定策略，单测验证）。
-- [ ] 单测覆盖：匿名放行判定矩阵（method × 是否带凭证 × ACL × 是否对象级）。
+- [x] `go build ./...` / `go vet ./...` / `go test ./...` 全绿。
+- [x] private 桶匿名 `curl -s -o /dev/null -w '%{http_code}' http://host:9000/b/k` → 403，响应体为标准 `<Error>` XML。
+- [x] public-read 桶匿名 GET 对象 → 200，下载内容与磁盘字节一致。
+- [x] public-read 桶匿名 HEAD 对象 → 200，返回 Content-Length/ETag/`x-amz-meta-*`。
+- [x] public-read 桶匿名 Range 请求 → 206，区间字节正确。
+- [x] public-read 桶匿名 `PUT` → 403；匿名 `DELETE` → 403；匿名 `GET /{bucket}`(列举) → 403。
+- [x] 带合法签名的所有操作（GET/PUT/HEAD/DELETE/List/multipart/预签名）在 private 与 public-read 桶下行为与改造前一致（回归通过）。
+- [x] 匿名 GET 不污染按密钥用量统计（或按 design 既定策略，单测验证）。
+- [x] 单测覆盖：匿名放行判定矩阵（method × 是否带凭证 × ACL × 是否对象级）。
 
 ## Notes
 - 中间件链顺序敏感：`Auth` 决定放行/拒绝，`Quota` 仅管 PUT。改造须保证匿名 GET 走过 `Auth`（放行注入匿名身份）后，`Quota` 不误拦。design 须画出新的判定流程图。

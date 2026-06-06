@@ -12,6 +12,8 @@ type Identity struct {
 	UsedBytes    int64
 }
 
+const AnonymousAccessKey = "anonymous"
+
 type Authenticator interface {
 	Verify(r *http.Request) (*Identity, error)
 }
@@ -27,4 +29,12 @@ func WithIdentity(ctx context.Context, id *Identity) context.Context {
 func IdentityFromContext(ctx context.Context) (*Identity, bool) {
 	id, ok := ctx.Value(identityContextKey).(*Identity)
 	return id, ok
+}
+
+func AnonymousIdentity() *Identity {
+	return &Identity{CredentialID: 0, AccessKey: AnonymousAccessKey}
+}
+
+func IsAnonymous(id *Identity) bool {
+	return id != nil && id.CredentialID == 0
 }

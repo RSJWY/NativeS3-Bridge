@@ -361,6 +361,9 @@ func (h *ObjectHandler) commitUsage(r *http.Request, deltaBytes int64, op quota.
 	if !ok || id == nil {
 		return
 	}
+	if auth.IsAnonymous(id) {
+		return
+	}
 	if err := h.commit(id.CredentialID, deltaBytes, op); err != nil {
 		slog.Warn("commit usage", "credential_id", id.CredentialID, "op", op, "delta_bytes", deltaBytes, "error", err)
 	}
