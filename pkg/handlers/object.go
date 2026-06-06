@@ -346,6 +346,8 @@ func writeStorageError(w http.ResponseWriter, err error, resource string) {
 		WriteS3Error(w, "NoSuchKey", http.StatusNotFound, resource)
 	case errors.Is(err, storage.ErrInvalidRange):
 		WriteS3Error(w, "InvalidRange", http.StatusRequestedRangeNotSatisfiable, resource)
+	case errors.Is(err, storage.ErrBucketNotEmpty):
+		WriteS3Error(w, "BucketNotEmpty", http.StatusConflict, resource)
 	default:
 		WriteS3Error(w, "InternalError", http.StatusInternalServerError, resource)
 	}

@@ -11,7 +11,7 @@ func TestMigrateCreatesTables(t *testing.T) {
 		t.Fatalf("migrate db: %v", err)
 	}
 
-	for _, table := range []string{"credentials", "request_stats", "hook_configs"} {
+	for _, table := range []string{"credentials", "request_stats", "hook_configs", "buckets"} {
 		if !gdb.Migrator().HasTable(table) {
 			t.Fatalf("expected table %q to exist", table)
 		}

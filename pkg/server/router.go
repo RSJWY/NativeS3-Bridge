@@ -23,10 +23,10 @@ type Router struct {
 	chain            []Middleware
 }
 
-func NewRouter(backend storage.Backend, multipartStore *storage.MultipartStore, authenticator auth.Authenticator, commit handlers.UsageCommitter, emitter handlers.EventEmitter) http.Handler {
+func NewRouter(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, commit handlers.UsageCommitter, emitter handlers.EventEmitter) http.Handler {
 	r := &Router{
 		objectHandler:    handlers.NewObjectHandlerWithHooks(backend, commit, emitter),
-		bucketHandler:    handlers.NewBucketHandler(backend),
+		bucketHandler:    handlers.NewBucketHandler(backend, bucketStore),
 		multipartHandler: handlers.NewMultipartHandlerWithHooks(multipartStore, commit, emitter),
 		chain:            []Middleware{Recover, Logging, Auth(authenticator), Quota},
 	}
@@ -50,6 +50,10 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 
 	if key == "" {
 		switch req.Method {
+		case http.MethodPut:
+			r.bucketHandler.CreateBucket(w, req, bucket)
+		case http.MethodDelete:
+			r.bucketHandler.DeleteBucket(w, req, bucket)
 		case http.MethodHead:
 			r.bucketHandler.HeadBucket(w, req, bucket)
 		case http.MethodGet:

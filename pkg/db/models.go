@@ -32,3 +32,11 @@ type HookConfig struct {
 	Enabled   bool   `gorm:"not null;default:true"`
 	CreatedAt time.Time
 }
+
+type Bucket struct {
+	ID        uint   `gorm:"primaryKey"`
+	Name      string `gorm:"uniqueIndex;size:63;not null"`
+	ACL       string `gorm:"size:16;not null;default:private"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}

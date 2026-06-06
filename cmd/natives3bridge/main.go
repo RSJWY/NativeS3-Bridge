@@ -72,6 +72,7 @@ func main() {
 		slog.Error("init multipart store", "error", err)
 		os.Exit(1)
 	}
+	bucketStore := storage.NewBucketStore(gdb, cfg.Storage.DataRoot, storage.DefaultBucketACLCacheTTL)
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -84,7 +85,7 @@ func main() {
 	hookManager := hooks.NewManager(gdb, hooks.Config{QueueSize: cfg.Hooks.QueueSize, Workers: cfg.Hooks.Workers, MaxRetry: cfg.Hooks.MaxRetry, Timeout: cfg.Hooks.Timeout})
 	hookManager.Start()
 	defer hookManager.Stop()
-	s3Server := server.New(cfg.Server, backend, multipartStore, authenticator, func(credID uint, deltaBytes int64, op quota.Op) error {
+	s3Server := server.New(cfg.Server, backend, multipartStore, bucketStore, authenticator, func(credID uint, deltaBytes int64, op quota.Op) error {
 		return quota.Commit(gdb, credID, deltaBytes, op)
 	}, hookManager)
 	adminServer, err := webadmin.NewServer(cfg.Server, cfg.WebAdmin, gdb, credentialStore)

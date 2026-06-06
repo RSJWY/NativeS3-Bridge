@@ -8,11 +8,12 @@ import (
 )
 
 type BucketHandler struct {
-	backend storage.Backend
+	backend     storage.Backend
+	bucketStore *storage.BucketStore
 }
 
-func NewBucketHandler(backend storage.Backend) *BucketHandler {
-	return &BucketHandler{backend: backend}
+func NewBucketHandler(backend storage.Backend, bucketStore *storage.BucketStore) *BucketHandler {
+	return &BucketHandler{backend: backend, bucketStore: bucketStore}
 }
 
 func (h *BucketHandler) ListBuckets(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +46,37 @@ func (h *BucketHandler) HeadBucket(w http.ResponseWriter, r *http.Request, bucke
 	}
 	SetStandardHeaders(w)
 	w.WriteHeader(http.StatusOK)
+}
+
+func (h *BucketHandler) CreateBucket(w http.ResponseWriter, r *http.Request, bucket string) {
+	if err := storage.ValidateBucketName(bucket); err != nil {
+		WriteS3Error(w, "InvalidBucketName", http.StatusBadRequest, r.URL.Path)
+		return
+	}
+	if err := h.bucketStore.Create(bucket); err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	SetStandardHeaders(w)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *BucketHandler) DeleteBucket(w http.ResponseWriter, r *http.Request, bucket string) {
+	listed, err := h.backend.ListObjects(bucket, "", "", "", 1)
+	if err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	if len(listed.Objects) > 0 || len(listed.CommonPrefixes) > 0 {
+		WriteS3Error(w, "BucketNotEmpty", http.StatusConflict, r.URL.Path)
+		return
+	}
+	if err := h.bucketStore.Delete(bucket); err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	SetStandardHeaders(w)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type listAllMyBucketsResult struct {

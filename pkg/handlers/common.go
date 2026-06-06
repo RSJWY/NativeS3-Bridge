@@ -88,6 +88,8 @@ func errorMessage(code string) string {
 		return "The difference between the request time and the server time is too large."
 	case "QuotaExceeded":
 		return "The requested object exceeds the credential quota."
+	case "BucketNotEmpty":
+		return "The bucket you tried to delete is not empty."
 	case "NoSuchUpload":
 		return "The specified multipart upload does not exist."
 	case "InvalidPart":
