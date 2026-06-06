@@ -3,6 +3,8 @@ package handlers
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -173,6 +175,188 @@ func TestCopyObjectCopiesDataCommitsUsageAndEmitsEvent(t *testing.T) {
 	}
 }
 
+func TestPutObjectWithContentMD5Success(t *testing.T) {
+	backend, err := storage.NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	body := "md5 verified"
+	md5Sum := md5.Sum([]byte(body))
+	var commits []int64
+	emitter := &recordingEmitter{}
+	h := NewObjectHandlerWithHooks(backend, func(_ uint, deltaBytes int64, op quota.Op) error {
+		if op != quota.OpPut {
+			t.Fatalf("op = %v, want put", op)
+		}
+		commits = append(commits, deltaBytes)
+		return nil
+	}, emitter)
+	req := newSignedPutRequest("/test-bucket/md5.txt", body)
+	req.Header.Set("Content-MD5", base64.StdEncoding.EncodeToString(md5Sum[:]))
+	rr := httptest.NewRecorder()
+
+	h.Put(rr, req, "test-bucket", "md5.txt")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("ETag") != `"`+md5Hex(body)+`"` {
+		t.Fatalf("etag = %q, want quoted md5", rr.Header().Get("ETag"))
+	}
+	if len(commits) != 1 || commits[0] != int64(len(body)) {
+		t.Fatalf("commits = %+v, want uploaded size", commits)
+	}
+	if len(emitter.events) != 1 || emitter.events[0].Type != hooks.ObjectCreated || emitter.events[0].Key != "md5.txt" {
+		t.Fatalf("events = %+v", emitter.events)
+	}
+}
+
+func TestPutObjectWithBadContentMD5DoesNotCommitEmitOrCreateObject(t *testing.T) {
+	backend, err := storage.NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	committed := false
+	emitter := &recordingEmitter{}
+	h := NewObjectHandlerWithHooks(backend, func(_ uint, _ int64, _ quota.Op) error {
+		committed = true
+		return nil
+	}, emitter)
+	req := newSignedPutRequest("/test-bucket/bad-md5.txt", "corrupted")
+	req.Header.Set("Content-MD5", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xff}, 16)))
+	rr := httptest.NewRecorder()
+
+	h.Put(rr, req, "test-bucket", "bad-md5.txt")
+
+	if rr.Code != http.StatusBadRequest || errorCodeFromResponse(t, rr) != "BadDigest" {
+		t.Fatalf("status/code = %d/%s, body = %s", rr.Code, errorCodeFromResponse(t, rr), rr.Body.String())
+	}
+	if committed {
+		t.Fatal("usage commit should not run on bad digest")
+	}
+	if len(emitter.events) != 0 {
+		t.Fatalf("events = %+v, want none", emitter.events)
+	}
+	if _, err := backend.HeadObject("test-bucket", "bad-md5.txt"); !errors.Is(err, storage.ErrNoSuchKey) {
+		t.Fatalf("head bad object err = %v, want ErrNoSuchKey", err)
+	}
+}
+
+func TestPutObjectWithBadContentMD5PreservesOverwrite(t *testing.T) {
+	backend, err := storage.NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	if _, err := backend.PutObject("test-bucket", "keep.txt", strings.NewReader("original"), "text/plain"); err != nil {
+		t.Fatalf("put original: %v", err)
+	}
+	h := NewObjectHandler(backend, nil)
+	req := newSignedPutRequest("/test-bucket/keep.txt", "replacement")
+	req.Header.Set("Content-MD5", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xff}, 16)))
+	rr := httptest.NewRecorder()
+
+	h.Put(rr, req, "test-bucket", "keep.txt")
+
+	if rr.Code != http.StatusBadRequest || errorCodeFromResponse(t, rr) != "BadDigest" {
+		t.Fatalf("status/code = %d/%s, body = %s", rr.Code, errorCodeFromResponse(t, rr), rr.Body.String())
+	}
+	rc, info, err := backend.GetObject("test-bucket", "keep.txt", nil)
+	if err != nil {
+		t.Fatalf("get preserved object: %v", err)
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read preserved object: %v", err)
+	}
+	if string(data) != "original" || info.ETag != md5Hex("original") {
+		t.Fatalf("preserved object = %q %+v", string(data), info)
+	}
+}
+
+func TestPutObjectWithSHA256Digest(t *testing.T) {
+	backend, err := storage.NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	h := NewObjectHandler(backend, nil)
+	body := "sha verified"
+	shaSum := sha256.Sum256([]byte(body))
+	req := newSignedPutRequest("/test-bucket/sha.txt", body)
+	req.Header.Set("x-amz-content-sha256", hex.EncodeToString(shaSum[:]))
+	rr := httptest.NewRecorder()
+
+	h.Put(rr, req, "test-bucket", "sha.txt")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	badReq := newSignedPutRequest("/test-bucket/bad-sha.txt", body)
+	badReq.Header.Set("x-amz-content-sha256", strings.Repeat("0", 64))
+	badRR := httptest.NewRecorder()
+
+	h.Put(badRR, badReq, "test-bucket", "bad-sha.txt")
+
+	if badRR.Code != http.StatusBadRequest || errorCodeFromResponse(t, badRR) != "BadDigest" {
+		t.Fatalf("status/code = %d/%s, body = %s", badRR.Code, errorCodeFromResponse(t, badRR), badRR.Body.String())
+	}
+	if _, err := backend.HeadObject("test-bucket", "bad-sha.txt"); !errors.Is(err, storage.ErrNoSuchKey) {
+		t.Fatalf("head bad sha object err = %v, want ErrNoSuchKey", err)
+	}
+}
+
+func TestPutObjectIgnoresUnsignedPayloadSHA256Sentinel(t *testing.T) {
+	backend, err := storage.NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	h := NewObjectHandler(backend, nil)
+	req := newSignedPutRequest("/test-bucket/unsigned.txt", "unsigned payload body")
+	req.Header.Set("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+	rr := httptest.NewRecorder()
+
+	h.Put(rr, req, "test-bucket", "unsigned.txt")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPutObjectRejectsMalformedDigestHeaders(t *testing.T) {
+	backend, err := storage.NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	h := NewObjectHandler(backend, nil)
+	req := newSignedPutRequest("/test-bucket/bad-header.txt", "body")
+	req.Header.Set("Content-MD5", "not base64")
+	rr := httptest.NewRecorder()
+
+	h.Put(rr, req, "test-bucket", "bad-header.txt")
+
+	if rr.Code != http.StatusBadRequest || errorCodeFromResponse(t, rr) != "InvalidDigest" {
+		t.Fatalf("status/code = %d/%s, body = %s", rr.Code, errorCodeFromResponse(t, rr), rr.Body.String())
+	}
+	shortMD5Req := newSignedPutRequest("/test-bucket/short-md5-header.txt", "body")
+	shortMD5Req.Header.Set("Content-MD5", base64.StdEncoding.EncodeToString([]byte{1, 2, 3}))
+	shortMD5RR := httptest.NewRecorder()
+
+	h.Put(shortMD5RR, shortMD5Req, "test-bucket", "short-md5-header.txt")
+
+	if shortMD5RR.Code != http.StatusBadRequest || errorCodeFromResponse(t, shortMD5RR) != "InvalidDigest" {
+		t.Fatalf("status/code = %d/%s, body = %s", shortMD5RR.Code, errorCodeFromResponse(t, shortMD5RR), shortMD5RR.Body.String())
+	}
+	shaReq := newSignedPutRequest("/test-bucket/bad-sha-header.txt", "body")
+	shaReq.Header.Set("x-amz-content-sha256", strings.Repeat("z", 64))
+	shaRR := httptest.NewRecorder()
+
+	h.Put(shaRR, shaReq, "test-bucket", "bad-sha-header.txt")
+
+	if shaRR.Code != http.StatusBadRequest || errorCodeFromResponse(t, shaRR) != "InvalidDigest" {
+		t.Fatalf("status/code = %d/%s, body = %s", shaRR.Code, errorCodeFromResponse(t, shaRR), shaRR.Body.String())
+	}
+}
+
 func TestParseCopySource(t *testing.T) {
 	bucket, key, err := parseCopySource("/test-bucket/dir%20name/source%3Ffile.txt?versionId=ignored")
 	if err != nil {
@@ -189,6 +373,20 @@ type recordingEmitter struct {
 
 func (r *recordingEmitter) Emit(event hooks.Event) {
 	r.events = append(r.events, event)
+}
+
+func newSignedPutRequest(path, body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+	return req.WithContext(auth.WithIdentity(req.Context(), &auth.Identity{CredentialID: 7, AccessKey: "ak", QuotaBytes: 1000}))
+}
+
+func errorCodeFromResponse(t *testing.T, rr *httptest.ResponseRecorder) string {
+	t.Helper()
+	var s3Err S3Error
+	if err := xml.Unmarshal(rr.Body.Bytes(), &s3Err); err != nil {
+		t.Fatalf("unmarshal s3 error: %v", err)
+	}
+	return s3Err.Code
 }
 
 func md5Hex(s string) string {

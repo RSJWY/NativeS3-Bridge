@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -44,7 +46,16 @@ func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key 
 		err  error
 	)
 	metadata := extractUserMetadata(r.Header)
+	putOptions, err := parsePutObjectOptions(r, metadata)
+	if err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
 	if backend, ok := h.backend.(interface {
+		PutObjectWithOptions(string, string, io.Reader, storage.PutObjectOptions) (storage.ObjectInfo, error)
+	}); ok {
+		info, err = backend.PutObjectWithOptions(bucket, key, r.Body, putOptions)
+	} else if backend, ok := h.backend.(interface {
 		PutObjectWithMetadata(string, string, io.Reader, string, map[string]string) (storage.ObjectInfo, error)
 	}); ok {
 		info, err = backend.PutObjectWithMetadata(bucket, key, r.Body, r.Header.Get("Content-Type"), metadata)
@@ -422,6 +433,43 @@ func extractUserMetadata(header http.Header) map[string]string {
 	return metadata
 }
 
+func parsePutObjectOptions(r *http.Request, metadata map[string]string) (storage.PutObjectOptions, error) {
+	opts := storage.PutObjectOptions{
+		ContentType: r.Header.Get("Content-Type"),
+		Metadata:    metadata,
+	}
+	if raw := r.Header.Get("Content-MD5"); raw != "" {
+		decoded, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil || len(decoded) != md5DigestSize {
+			return storage.PutObjectOptions{}, storage.ErrInvalidDigest
+		}
+		opts.ContentMD5 = decoded
+	}
+	if raw := r.Header.Get("x-amz-content-sha256"); raw != "" && isConcretePayloadSHA256(raw) {
+		opts.ContentSHA256 = strings.ToLower(raw)
+	} else if raw != "" && !isIgnoredPayloadSHA256(raw) {
+		return storage.PutObjectOptions{}, storage.ErrInvalidDigest
+	}
+	return opts, nil
+}
+
+func isConcretePayloadSHA256(value string) bool {
+	if len(value) != sha256HexSize {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func isIgnoredPayloadSHA256(value string) bool {
+	switch value {
+	case "UNSIGNED-PAYLOAD", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD", "STREAMING-UNSIGNED-PAYLOAD-TRAILER", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER":
+		return true
+	default:
+		return false
+	}
+}
+
 func parseRangeHeader(header string) (*storage.Range, bool, error) {
 	if header == "" {
 		return nil, false, nil
@@ -485,12 +533,21 @@ func writeStorageError(w http.ResponseWriter, err error, resource string) {
 		WriteS3Error(w, "NoSuchKey", http.StatusNotFound, resource)
 	case errors.Is(err, storage.ErrInvalidRange):
 		WriteS3Error(w, "InvalidRange", http.StatusRequestedRangeNotSatisfiable, resource)
+	case errors.Is(err, storage.ErrBadDigest):
+		WriteS3Error(w, "BadDigest", http.StatusBadRequest, resource)
+	case errors.Is(err, storage.ErrInvalidDigest):
+		WriteS3Error(w, "InvalidDigest", http.StatusBadRequest, resource)
 	case errors.Is(err, storage.ErrBucketNotEmpty):
 		WriteS3Error(w, "BucketNotEmpty", http.StatusConflict, resource)
 	default:
 		WriteS3Error(w, "InternalError", http.StatusInternalServerError, resource)
 	}
 }
+
+const (
+	md5DigestSize = 16
+	sha256HexSize = 64
+)
 
 func (h *ObjectHandler) commitUsage(r *http.Request, deltaBytes int64, op quota.Op) {
 	if h.commit == nil {

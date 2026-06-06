@@ -17,6 +17,8 @@
 - `func ResolveObjectPath(root, bucket, key string) (string, error)`
 - `func NewFileBackend(root string) (*FileBackend, error)`
 - `func (b *FileBackend) PutObject(bucket, key string, r io.Reader, contentType string) (ObjectInfo, error)`
+- `type PutObjectOptions struct { ContentType string; Metadata map[string]string; ContentMD5 []byte; ContentSHA256 string }`
+- `func (b *FileBackend) PutObjectWithOptions(bucket, key string, r io.Reader, opts PutObjectOptions) (ObjectInfo, error)`
 - `func (b *FileBackend) GetObject(bucket, key string, rng *Range) (io.ReadCloser, ObjectInfo, error)`
 - `func (b *FileBackend) HeadObject(bucket, key string) (ObjectInfo, error)`
 - `func (b *FileBackend) DeleteObject(bucket, key string) error`
@@ -28,6 +30,10 @@
 - Bucket names must match `^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`.
 - Object keys must not contain `..` path segments and must resolve under `data_root/bucket` after `path.Clean` and absolute-path prefix checks.
 - `PutObject` must create parent directories, stream the request body once into `<target>.tmp-<random>`, call `fsync`, close, then `os.Rename` to the final native file path.
+- `PutObjectWithOptions` is the storage capability for single-part client digest validation. `PutObject` and `PutObjectWithMetadata` delegate to it; the core `Backend` interface stays stable and handlers should detect the capability optionally.
+- `Content-MD5` is decoded at the handler boundary into exactly 16 bytes. Storage compares it with the computed MD5 after copy/fsync/close and before `os.Rename`; mismatch returns `ErrBadDigest` and removes the temp file.
+- A concrete `x-amz-content-sha256` is a 64-character hex SHA-256 string, normalized at the handler boundary. Storage computes SHA-256 only when an expected value is provided, compares before `os.Rename`, and returns `ErrBadDigest` on mismatch.
+- SigV4 compatibility sentinels such as `UNSIGNED-PAYLOAD` must not be treated as object checksums and must not trigger body comparison.
 - The final on-disk file must be the original object bytes; no chunking, container format, encoding, or sidecar dependency is allowed for reading the native file.
 - Single-part ETag is the lowercase hex MD5 of the object bytes, returned quoted at HTTP handler boundaries.
 - `GetObject` must return an `io.ReadCloser` and handlers must stream with `io.Copy`; do not load whole objects into memory for downloads.
@@ -42,18 +48,24 @@
 - Missing bucket on `HeadObject`, `DeleteObject`, or `ListObjects` -> `ErrNoSuchBucket` -> HTTP `404 NoSuchBucket` XML.
 - Missing object in an existing bucket -> `ErrNoSuchKey` -> HTTP `404 NoSuchKey` XML.
 - Invalid or unsatisfiable Range -> `ErrInvalidRange` -> HTTP `416 InvalidRange` XML.
+- Malformed digest input such as invalid base64, wrong MD5 byte length, or non-hex concrete SHA-256 -> `ErrInvalidDigest` -> HTTP `400 InvalidDigest` XML.
+- Decoded client digest that does not match the streamed object bytes -> `ErrBadDigest` -> HTTP `400 BadDigest` XML; the final object path is not replaced and quota/hooks are not committed.
 - Internal filesystem errors -> HTTP `500 InternalError` XML; do not leak internal paths or raw errors in the response body.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: `PutObject("test-bucket", "dir/a.txt", r, "text/plain")` creates `data_root/test-bucket/dir/a.txt` with byte-for-byte identical native contents and a quoted MD5 ETag in HTTP responses.
+- Good: `PUT` with matching `Content-MD5` or concrete `x-amz-content-sha256` succeeds with the same lowercase MD5 ETag; `x-amz-content-sha256: UNSIGNED-PAYLOAD` remains accepted without checksum comparison.
 - Base: `ListObjects("test-bucket", "dir/", "/", "", 1000)` returns immediate files under `dir/` as `Contents` and nested folders as `CommonPrefixes`.
+- Bad: comparing a client digest after `os.Rename`, because a mismatch could overwrite an existing valid object.
 - Bad: accepting `dir/../escape.txt`, writing chunk files as the final object, or returning path traversal failures as `InternalError`.
 
 ### 6. Tests Required
 
 - Unit tests for invalid bucket names and `..` object keys returning the expected storage errors.
 - Unit tests asserting `PutObject` writes exact native bytes and MD5 ETag.
+- Unit tests for `PutObjectWithOptions` digest success, `ErrBadDigest` mismatch cleanup, overwrite preservation, and `ErrInvalidDigest` malformed inputs.
+- Handler tests for `Content-MD5` success/mismatch, concrete SHA-256 success/mismatch, `UNSIGNED-PAYLOAD` compatibility, and no quota commit or ObjectCreated hook on digest failure.
 - Unit tests for `HeadObject` size, ETag, LastModified UTC, and Content-Type behavior.
 - Unit tests for `GetObject` with Range returning the correct byte slice and full object metadata.
 - Unit tests for `DeleteObject` removal plus post-delete `ErrNoSuchKey` in an existing bucket.
@@ -90,6 +102,10 @@ closeErr := f.Close()
 if copyErr != nil || syncErr != nil || closeErr != nil {
     _ = os.Remove(tmp)
     return ObjectInfo{}, firstErr(copyErr, syncErr, closeErr)
+}
+if expectedMD5 != nil && !bytes.Equal(h.Sum(nil), expectedMD5) {
+    _ = os.Remove(tmp)
+    return ObjectInfo{}, ErrBadDigest
 }
 if err := os.Rename(tmp, target); err != nil {
     _ = os.Remove(tmp)
