@@ -22,8 +22,12 @@ type Server struct {
 	tls        config.TLSConfig
 }
 
-func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb *gorm.DB, credentialStore *s3auth.CredentialStore, bucketStore *storage.BucketStore) (*Server, error) {
-	authenticator := NewAuth(webCfg, serverCfg.TLS.Enabled)
+func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb *gorm.DB, credentialStore *s3auth.CredentialStore, bucketStore *storage.BucketStore, trustForwarded ...bool) (*Server, error) {
+	effectiveTLS := serverCfg.EffectiveAdminTLS()
+	authenticator := NewAuth(webCfg, effectiveTLS.Enabled)
+	if len(trustForwarded) > 0 {
+		authenticator.trustForwarded = trustForwarded[0]
+	}
 	api := NewAPI(gdb, credentialStore, bucketStore)
 	staticFS, err := fs.Sub(ui.DistFS, "dist")
 	if err != nil {
@@ -50,7 +54,7 @@ func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb 
 			Handler:           mux,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		tls: serverCfg.TLS,
+		tls: effectiveTLS,
 	}, nil
 }
 

@@ -10,25 +10,40 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Storage  StorageConfig  `yaml:"storage"`
-	Database DatabaseConfig `yaml:"database"`
-	Hooks    HooksConfig    `yaml:"hooks"`
-	WebAdmin WebAdminConfig `yaml:"webadmin"`
-	Region   string         `yaml:"region"`
-	LogLevel string         `yaml:"log_level"`
+	Server    ServerConfig    `yaml:"server"`
+	Storage   StorageConfig   `yaml:"storage"`
+	Database  DatabaseConfig  `yaml:"database"`
+	Hooks     HooksConfig     `yaml:"hooks"`
+	WebAdmin  WebAdminConfig  `yaml:"webadmin"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	Region    string          `yaml:"region"`
+	LogLevel  string          `yaml:"log_level"`
 }
 
 type ServerConfig struct {
-	S3Addr    string    `yaml:"s3_addr"`
-	AdminAddr string    `yaml:"admin_addr"`
-	TLS       TLSConfig `yaml:"tls"`
+	S3Addr    string     `yaml:"s3_addr"`
+	AdminAddr string     `yaml:"admin_addr"`
+	TLS       TLSConfig  `yaml:"tls"`
+	AdminTLS  *TLSConfig `yaml:"admin_tls"`
 }
 
 type TLSConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
+}
+
+func (c ServerConfig) EffectiveAdminTLS() TLSConfig {
+	if c.AdminTLS == nil {
+		return c.TLS
+	}
+	return *c.AdminTLS
+}
+
+type RateLimitConfig struct {
+	AnonymousRPS   float64 `yaml:"anonymous_rps"`
+	AnonymousBurst int     `yaml:"anonymous_burst"`
+	TrustForwarded bool    `yaml:"trust_forwarded"`
 }
 
 type StorageConfig struct {
@@ -52,10 +67,12 @@ type HooksConfig struct {
 }
 
 type WebAdminConfig struct {
-	PasswordHash           string `yaml:"password_hash"`
-	AdminBootstrapPassword string `yaml:"admin_bootstrap_password"`
-	SessionSecret          string `yaml:"session_secret"`
-	SessionTTLMinutes      int    `yaml:"session_ttl_minutes"`
+	PasswordHash           string        `yaml:"password_hash"`
+	AdminBootstrapPassword string        `yaml:"admin_bootstrap_password"`
+	SessionSecret          string        `yaml:"session_secret"`
+	SessionTTLMinutes      int           `yaml:"session_ttl_minutes"`
+	LoginMaxFailures       int           `yaml:"login_max_failures"`
+	LoginLockoutWindow     time.Duration `yaml:"login_lockout_window"`
 }
 
 func Load(path string) (*Config, error) {
@@ -117,6 +134,18 @@ func (c *Config) applyDefaults() {
 	if c.WebAdmin.SessionTTLMinutes == 0 {
 		c.WebAdmin.SessionTTLMinutes = 720
 	}
+	if c.WebAdmin.LoginMaxFailures == 0 {
+		c.WebAdmin.LoginMaxFailures = 5
+	}
+	if c.WebAdmin.LoginLockoutWindow == 0 {
+		c.WebAdmin.LoginLockoutWindow = 15 * time.Minute
+	}
+	if c.RateLimit.AnonymousRPS <= 0 {
+		c.RateLimit.AnonymousRPS = 10
+	}
+	if c.RateLimit.AnonymousBurst <= 0 {
+		c.RateLimit.AnonymousBurst = 20
+	}
 }
 
 func (c *Config) Validate() error {
@@ -128,6 +157,13 @@ func (c *Config) Validate() error {
 	}
 	if c.WebAdmin.SessionSecret == "" {
 		return fmt.Errorf("webadmin.session_secret is required")
+	}
+	if c.Server.TLS.Enabled && (c.Server.TLS.CertFile == "" || c.Server.TLS.KeyFile == "") {
+		return fmt.Errorf("server.tls cert_file and key_file are required when enabled")
+	}
+	adminTLS := c.Server.EffectiveAdminTLS()
+	if adminTLS.Enabled && (adminTLS.CertFile == "" || adminTLS.KeyFile == "") {
+		return fmt.Errorf("server.admin_tls cert_file and key_file are required when enabled")
 	}
 
 	switch c.Database.Driver {

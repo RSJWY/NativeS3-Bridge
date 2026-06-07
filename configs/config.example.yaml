@@ -5,6 +5,12 @@ server:
     enabled: false
     cert_file: ""
     key_file: ""
+  # Omit admin_tls to inherit server.tls for backward compatibility.
+  # Uncomment to enable/disable TLS independently for the admin port.
+  # admin_tls:
+  #   enabled: false
+  #   cert_file: ""
+  #   key_file: ""
 
 storage:
   data_root: "./data"
@@ -30,6 +36,13 @@ webadmin:
   admin_bootstrap_password: ""
   session_secret: "change-me-32bytes-random"
   session_ttl_minutes: 720
+  login_max_failures: 5
+  login_lockout_window: "15m"
+
+rate_limit:
+  anonymous_rps: 10
+  anonymous_burst: 20
+  trust_forwarded: false
 
 region: "us-east-1"
 log_level: "info"

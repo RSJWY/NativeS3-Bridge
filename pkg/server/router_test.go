@@ -1,12 +1,19 @@
 package server
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
+	dbpkg "github.com/RSJWY/NativeS3-Bridge/pkg/db"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/quota"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
+	"gorm.io/gorm"
 )
 
 type stubAuthenticator struct {
@@ -113,4 +120,153 @@ func TestAuthSignedRequestsBypassAnonymousACL(t *testing.T) {
 	if aclCalls != 0 {
 		t.Fatalf("ACL calls = %d, want 0", aclCalls)
 	}
+}
+
+func TestAnonRateLimitReturnsSlowDown(t *testing.T) {
+	h := AnonRateLimit(config.RateLimitConfig{AnonymousRPS: 1, AnonymousBurst: 1})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	first := httptest.NewRequest(http.MethodGet, "/bucket/key.txt", nil)
+	first.RemoteAddr = "192.0.2.1:1234"
+	firstRR := httptest.NewRecorder()
+	h.ServeHTTP(firstRR, first)
+	if firstRR.Code != http.StatusNoContent {
+		t.Fatalf("first status = %d, want 204", firstRR.Code)
+	}
+
+	second := httptest.NewRequest(http.MethodGet, "/bucket/key.txt", nil)
+	second.RemoteAddr = "192.0.2.1:1234"
+	secondRR := httptest.NewRecorder()
+	h.ServeHTTP(secondRR, second)
+	if secondRR.Code != http.StatusServiceUnavailable {
+		t.Fatalf("second status = %d, want 503; body=%s", secondRR.Code, secondRR.Body.String())
+	}
+	if !strings.Contains(secondRR.Body.String(), "<Code>SlowDown</Code>") {
+		t.Fatalf("body = %s, want SlowDown XML", secondRR.Body.String())
+	}
+}
+
+func TestAnonRateLimitSignedAndNonObjectReadsBypass(t *testing.T) {
+	calls := 0
+	h := AnonRateLimit(config.RateLimitConfig{AnonymousRPS: 1, AnonymousBurst: 1})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for _, req := range []*http.Request{
+		headerSignedRequest(http.MethodGet, "/bucket/key.txt"),
+		headerSignedRequest(http.MethodGet, "/bucket/key.txt"),
+		httptest.NewRequest(http.MethodGet, "/bucket", nil),
+		httptest.NewRequest(http.MethodPut, "/bucket/key.txt", nil),
+	} {
+		req.RemoteAddr = "192.0.2.1:1234"
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204 for %s %s; body=%s", rr.Code, req.Method, req.URL.String(), rr.Body.String())
+		}
+	}
+	if calls != 4 {
+		t.Fatalf("calls = %d, want 4", calls)
+	}
+}
+
+func TestAnonRateLimitDefaultIgnoresForwardedHeaders(t *testing.T) {
+	h := AnonRateLimit(config.RateLimitConfig{AnonymousRPS: 1, AnonymousBurst: 1})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/bucket/key.txt", nil)
+		req.RemoteAddr = "192.0.2.1:1234"
+		req.Header.Set("X-Forwarded-For", "203.0.113."+string(rune('1'+i)))
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if i == 0 && rr.Code != http.StatusNoContent {
+			t.Fatalf("first status = %d, want 204", rr.Code)
+		}
+		if i == 1 && rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("second status = %d, want 503 when forwarded headers are ignored", rr.Code)
+		}
+	}
+}
+
+func TestAnonRateLimitTrustForwardedUsesForwardedIP(t *testing.T) {
+	h := AnonRateLimit(config.RateLimitConfig{AnonymousRPS: 1, AnonymousBurst: 1, TrustForwarded: true})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for i, xff := range []string{"203.0.113.1", "203.0.113.2"} {
+		req := httptest.NewRequest(http.MethodGet, "/bucket/key.txt", nil)
+		req.RemoteAddr = "192.0.2.1:1234"
+		req.Header.Set("X-Forwarded-For", xff)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("request %d status = %d, want 204", i, rr.Code)
+		}
+	}
+}
+
+func TestRouterAnonymousRateLimitAndQuotaSkip(t *testing.T) {
+	gdb := newServerTestDB(t)
+	dataRoot := t.TempDir()
+	backend, err := storage.NewFileBackend(dataRoot)
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, dataRoot, storage.DefaultBucketACLCacheTTL)
+	if err := bucketStore.Create("test-bucket"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := bucketStore.SetACL("test-bucket", storage.ACLPublicRead); err != nil {
+		t.Fatalf("set acl: %v", err)
+	}
+	if _, err := backend.PutObject("test-bucket", "key.txt", bytes.NewBufferString("hello"), "text/plain"); err != nil {
+		t.Fatalf("put object: %v", err)
+	}
+
+	commitCalls := 0
+	router := NewRouter(backend, nil, bucketStore, &stubAuthenticator{}, func(uint, int64, quota.Op) error {
+		commitCalls++
+		return nil
+	}, nil, config.RateLimitConfig{AnonymousRPS: 1, AnonymousBurst: 1})
+
+	first := httptest.NewRequest(http.MethodGet, "/test-bucket/key.txt", nil)
+	first.RemoteAddr = "192.0.2.1:1234"
+	firstRR := httptest.NewRecorder()
+	router.ServeHTTP(firstRR, first)
+	if firstRR.Code != http.StatusOK || firstRR.Body.String() != "hello" {
+		t.Fatalf("first status/body = %d/%q, want 200 hello", firstRR.Code, firstRR.Body.String())
+	}
+	if commitCalls != 0 {
+		t.Fatalf("anonymous GET committed usage %d times, want 0", commitCalls)
+	}
+
+	second := httptest.NewRequest(http.MethodGet, "/test-bucket/key.txt", nil)
+	second.RemoteAddr = "192.0.2.1:1234"
+	secondRR := httptest.NewRecorder()
+	router.ServeHTTP(secondRR, second)
+	if secondRR.Code != http.StatusServiceUnavailable {
+		t.Fatalf("second status = %d, want 503; body=%s", secondRR.Code, secondRR.Body.String())
+	}
+}
+
+func headerSignedRequest(method, target string) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc")
+	return req
+}
+
+func newServerTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	gdb, err := dbpkg.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := dbpkg.Migrate(gdb); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+	return gdb
 }

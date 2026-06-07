@@ -18,11 +18,11 @@ type Server struct {
 	tls        config.TLSConfig
 }
 
-func New(cfg config.ServerConfig, backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, commit handlers.UsageCommitter, emitter handlers.EventEmitter) *Server {
+func New(cfg config.ServerConfig, rateLimit config.RateLimitConfig, backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, commit handlers.UsageCommitter, emitter handlers.EventEmitter) *Server {
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              cfg.S3Addr,
-			Handler:           NewRouter(backend, multipartStore, bucketStore, authenticator, commit, emitter),
+			Handler:           NewRouter(backend, multipartStore, bucketStore, authenticator, commit, emitter, rateLimit),
 			ReadHeaderTimeout: 10 * time.Second,
 		},
 		tls: cfg.TLS,

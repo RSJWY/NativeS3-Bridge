@@ -161,6 +161,10 @@ server:
     enabled: false              # 生产建议启用，或在前置反代终止 HTTPS
     cert_file: ""
     key_file: ""
+  admin_tls:                    # 可省略；省略时管理端口继承 server.tls
+    enabled: false              # 可独立于 S3 端口启用/关闭管理端口 TLS
+    cert_file: ""
+    key_file: ""
 
 storage:
   data_root: "./data"                 # 所有 bucket 的根目录
@@ -186,6 +190,13 @@ webadmin:
   admin_bootstrap_password: ""  # 仅首次启动用于生成 hash，生成后请清空
   session_secret: "change-me-32bytes-random"
   session_ttl_minutes: 720
+  login_max_failures: 5          # 同一来源 IP 连续失败达到阈值后锁定
+  login_lockout_window: "15m"    # 登录失败锁定窗口
+
+rate_limit:
+  anonymous_rps: 10              # 匿名对象 GET/HEAD 每 IP 每秒请求数
+  anonymous_burst: 20            # 匿名对象 GET/HEAD 每 IP 突发桶容量
+  trust_forwarded: false         # 仅在可信反向代理后开启，信任 X-Forwarded-For/X-Real-IP
 
 region: "us-east-1"             # SigV4 region
 log_level: "info"               # debug | info | warn | error
@@ -292,13 +303,27 @@ curl -b cookie.txt http://127.0.0.1:9001/api/admin/dashboard/summary
 
 ## 安全提示
 
-- **管理后台 TLS**：当 `server.tls.enabled` 为 `false` 时，管理界面与 session cookie 以明文 HTTP 提供，仅适用于受信任的局域网或开发环境。启动时会打印警告：
+- **管理后台 TLS 直连**：`server.admin_tls` 可独立控制管理端口 TLS；省略 `admin_tls` 时继承 `server.tls`，保持旧配置行为不变。生产直连管理端口时建议显式配置管理端口证书：
+
+  ```yaml
+  server:
+    tls:
+      enabled: false
+    admin_tls:
+      enabled: true
+      cert_file: "/etc/natives3bridge/admin.crt"
+      key_file: "/etc/natives3bridge/admin.key"
+  ```
+
+  启用 `admin_tls.enabled` 但缺少 `cert_file` 或 `key_file` 时，服务会在配置校验阶段拒绝启动。管理端口 TLS 启用后，admin session cookie 会自动设置 `Secure=true`。
+- **反向代理部署**：也可以让管理端口只监听内网明文 HTTP，由 Nginx/Caddy 等可信反向代理终止 HTTPS。此时不要把 `admin_addr` 暴露到公网；只有当代理会覆盖并校验转发头时，才开启 `rate_limit.trust_forwarded: true`，让登录锁定和匿名限流按真实客户端 IP 计算。
+- **明文管理端口警告**：当有效 admin TLS 为关闭状态时，管理界面与 session cookie 以明文 HTTP 提供，仅适用于受信任的局域网或开发环境。启动时会打印警告：
 
   ```text
   admin UI served over plain HTTP; enable TLS for production
   ```
-
-  生产环境请启用 TLS，或将管理端口置于终止 HTTPS 的可信反向代理之后。
+- **登录节流**：`webadmin.login_max_failures` 和 `webadmin.login_lockout_window` 控制同一来源 IP 的登录失败锁定；锁定期间登录接口返回 `429` 与 `Retry-After`，不会继续进行密码校验。
+- **匿名下载限流**：public-read 桶的匿名对象 `GET`/`HEAD` 受 `rate_limit.anonymous_rps` 与 `rate_limit.anonymous_burst` 限制，超限返回 S3 XML `503 SlowDown`。带签名请求不受该匿名限流影响，仍按密钥配额体系处理。
 - **会话密钥**：务必将 `webadmin.session_secret` 改为足够长的随机值。
 - **首启密码**：生成 `password_hash` 后清空 `admin_bootstrap_password`。
 - **分段临时目录**：生产环境建议将 `storage.multipart_tmp` 配置到 `data_root` 之外的独立路径。

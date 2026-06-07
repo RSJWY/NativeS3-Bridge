@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,12 +21,14 @@ import (
 const sessionCookieName = "natives3_admin_session"
 
 type Auth struct {
-	passwordHash []byte
-	sessionKey   []byte
-	ttl          time.Duration
-	failureDelay time.Duration
-	cookieSecure bool
-	now          func() time.Time
+	passwordHash   []byte
+	sessionKey     []byte
+	ttl            time.Duration
+	failureDelay   time.Duration
+	cookieSecure   bool
+	trustForwarded bool
+	limiter        *loginLimiter
+	now            func() time.Time
 }
 
 type loginRequest struct {
@@ -58,7 +62,7 @@ func NewAuth(cfg config.WebAdminConfig, secureCookie ...bool) *Auth {
 	if cfg.PasswordHash == "" {
 		slog.Warn("webadmin password_hash is empty; admin login is disabled until a bcrypt hash is configured")
 	}
-	return &Auth{
+	a := &Auth{
 		passwordHash: []byte(cfg.PasswordHash),
 		sessionKey:   []byte(cfg.SessionSecret),
 		ttl:          ttl,
@@ -66,11 +70,20 @@ func NewAuth(cfg config.WebAdminConfig, secureCookie ...bool) *Auth {
 		cookieSecure: secure,
 		now:          time.Now,
 	}
+	a.limiter = newLoginLimiter(cfg.LoginMaxFailures, cfg.LoginLockoutWindow, a.now)
+	return a
 }
 
 func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	ip := clientIP(r, a.trustForwarded)
+	if locked, retryAfter := a.limiter.locked(ip); locked {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+		writeJSONError(w, http.StatusTooManyRequests, "too many login attempts")
 		return
 	}
 
@@ -80,10 +93,12 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.passwordHash == nil || bcrypt.CompareHashAndPassword(a.passwordHash, []byte(req.Password)) != nil {
+		a.limiter.recordFailure(ip)
 		time.Sleep(a.failureDelay)
 		writeJSONError(w, http.StatusUnauthorized, "invalid password")
 		return
 	}
+	a.limiter.recordSuccess(ip)
 
 	expires := a.now().UTC().Add(a.ttl)
 	value, err := a.signSession(sessionPayload{ExpiresAt: expires.Unix()})
