@@ -1,1 +1,4 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file":".trellis/spec/backend/index.md","reason":"Backend spec entry point for quality review."}
+{"file":".trellis/spec/backend/storage-guidelines.md","reason":"Review storage atomicity, ETag, S3 error mapping, and required tests against project contracts."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Review S3 XML error code/message behavior for BadDigest and InvalidDigest."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Backend quality checklist location for final verification."}

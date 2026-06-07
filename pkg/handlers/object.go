@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"crypto/md5"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -38,12 +41,23 @@ func NewObjectHandlerWithHooks(backend storage.Backend, commit UsageCommitter, e
 }
 
 func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	var (
-		info storage.ObjectInfo
-		err  error
-	)
+	expectedMD5, err := parseContentMD5(r.Header.Get("Content-MD5"))
+	if err != nil {
+		WriteS3Error(w, "InvalidDigest", http.StatusBadRequest, r.URL.Path)
+		return
+	}
+
+	var info storage.ObjectInfo
 	metadata := extractUserMetadata(r.Header)
 	if backend, ok := h.backend.(interface {
+		PutObjectWithOptions(string, string, io.Reader, storage.PutOptions) (storage.ObjectInfo, error)
+	}); ok {
+		info, err = backend.PutObjectWithOptions(bucket, key, r.Body, storage.PutOptions{
+			ContentType: r.Header.Get("Content-Type"),
+			Metadata:    metadata,
+			ExpectedMD5: expectedMD5,
+		})
+	} else if backend, ok := h.backend.(interface {
 		PutObjectWithMetadata(string, string, io.Reader, string, map[string]string) (storage.ObjectInfo, error)
 	}); ok {
 		info, err = backend.PutObjectWithMetadata(bucket, key, r.Body, r.Header.Get("Content-Type"), metadata)
@@ -309,6 +323,20 @@ func extractUserMetadata(header http.Header) map[string]string {
 	return metadata
 }
 
+// parseContentMD5 decodes the optional Content-MD5 header (base64 of the raw
+// 16-byte MD5 digest) into a hex string the backend can compare against. Empty
+// header means "no integrity check requested"; a malformed value is an error.
+func parseContentMD5(header string) (string, error) {
+	if header == "" {
+		return "", nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(header))
+	if err != nil || len(raw) != md5.Size {
+		return "", storage.ErrBadDigest
+	}
+	return hex.EncodeToString(raw), nil
+}
+
 func parseRangeHeader(header string) (*storage.Range, bool, error) {
 	if header == "" {
 		return nil, false, nil
@@ -348,6 +376,8 @@ func writeStorageError(w http.ResponseWriter, err error, resource string) {
 		WriteS3Error(w, "InvalidRange", http.StatusRequestedRangeNotSatisfiable, resource)
 	case errors.Is(err, storage.ErrBucketNotEmpty):
 		WriteS3Error(w, "BucketNotEmpty", http.StatusConflict, resource)
+	case errors.Is(err, storage.ErrBadDigest):
+		WriteS3Error(w, "BadDigest", http.StatusBadRequest, resource)
 	default:
 		WriteS3Error(w, "InternalError", http.StatusInternalServerError, resource)
 	}

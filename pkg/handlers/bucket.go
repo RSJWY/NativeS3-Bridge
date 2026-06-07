@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/xml"
 	"errors"
 	"net/http"
 
@@ -98,4 +99,36 @@ type bucketsContainer struct {
 type bucketItem struct {
 	Name         string `xml:"Name"`
 	CreationDate string `xml:"CreationDate"`
+}
+
+// GetBucketLocation answers GET /{bucket}?location, an SDK init probe. Returns
+// an empty LocationConstraint, which clients interpret as us-east-1.
+func (h *BucketHandler) GetBucketLocation(w http.ResponseWriter, r *http.Request, bucket string) {
+	if _, err := h.backend.ListObjects(bucket, "", "", "", 1); err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	WriteXML(w, http.StatusOK, locationConstraint{XMLNS: "http://s3.amazonaws.com/doc/2006-03-01/"})
+}
+
+// GetBucketVersioning answers GET /{bucket}?versioning. Versioning is not
+// supported, so an empty VersioningConfiguration (status unset) is returned.
+func (h *BucketHandler) GetBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
+	if _, err := h.backend.ListObjects(bucket, "", "", "", 1); err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	WriteXML(w, http.StatusOK, versioningConfiguration{XMLNS: "http://s3.amazonaws.com/doc/2006-03-01/"})
+}
+
+type locationConstraint struct {
+	XMLName  xml.Name `xml:"LocationConstraint"`
+	XMLNS    string   `xml:"xmlns,attr"`
+	Location string   `xml:",chardata"`
+}
+
+type versioningConfiguration struct {
+	XMLName xml.Name `xml:"VersioningConfiguration"`
+	XMLNS   string   `xml:"xmlns,attr"`
+	Status  string   `xml:"Status,omitempty"`
 }

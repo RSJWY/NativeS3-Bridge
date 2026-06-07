@@ -92,6 +92,14 @@ func errorMessage(code string) string {
 		return "Please reduce your request rate."
 	case "BucketNotEmpty":
 		return "The bucket you tried to delete is not empty."
+	case "BadDigest":
+		return "The Content-MD5 you specified did not match what we received."
+	case "InvalidDigest":
+		return "The Content-MD5 you specified is not valid."
+	case "MalformedXML":
+		return "The XML you provided was not well-formed or did not validate."
+	case "InvalidRequest":
+		return "The request is not valid."
 	case "NoSuchUpload":
 		return "The specified multipart upload does not exist."
 	case "InvalidPart":

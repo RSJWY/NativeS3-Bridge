@@ -20,7 +20,18 @@ var (
 	ErrNoSuchBucket = errors.New("no such bucket")
 	ErrNoSuchKey    = errors.New("no such key")
 	ErrInvalidRange = errors.New("invalid range")
+	ErrBadDigest    = errors.New("content md5 does not match")
 )
+
+// PutOptions carries optional write-time settings for PutObjectWithOptions.
+// ExpectedMD5, when non-empty, is the hex-encoded MD5 the caller expects; the
+// backend verifies the computed digest against it before publishing the object
+// (rename), so a mismatch never produces a visible half-written/corrupt object.
+type PutOptions struct {
+	ContentType string
+	Metadata    map[string]string
+	ExpectedMD5 string
+}
 
 type FileBackend struct {
 	root           string
@@ -52,6 +63,10 @@ func (b *FileBackend) PutObject(bucket, key string, r io.Reader, contentType str
 }
 
 func (b *FileBackend) PutObjectWithMetadata(bucket, key string, r io.Reader, contentType string, metadata map[string]string) (ObjectInfo, error) {
+	return b.PutObjectWithOptions(bucket, key, r, PutOptions{ContentType: contentType, Metadata: metadata})
+}
+
+func (b *FileBackend) PutObjectWithOptions(bucket, key string, r io.Reader, opts PutOptions) (ObjectInfo, error) {
 	target, err := ResolveObjectPath(b.root, bucket, key)
 	if err != nil {
 		return ObjectInfo{}, err
@@ -74,6 +89,13 @@ func (b *FileBackend) PutObjectWithMetadata(bucket, key string, r io.Reader, con
 		_ = os.Remove(tmp)
 		return ObjectInfo{}, firstErr(copyErr, syncErr, closeErr)
 	}
+	etag := hex.EncodeToString(h.Sum(nil))
+	// Integrity gate: verify the computed digest BEFORE rename so a corrupt
+	// upload is rejected and the destination object is never published.
+	if opts.ExpectedMD5 != "" && !strings.EqualFold(opts.ExpectedMD5, etag) {
+		_ = os.Remove(tmp)
+		return ObjectInfo{}, ErrBadDigest
+	}
 	if err := os.Rename(tmp, target); err != nil {
 		_ = os.Remove(tmp)
 		return ObjectInfo{}, err
@@ -83,9 +105,8 @@ func (b *FileBackend) PutObjectWithMetadata(bucket, key string, r io.Reader, con
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	resolvedContentType := normalizeContentType(contentType, key)
-	etag := hex.EncodeToString(h.Sum(nil))
-	meta := cloneStringMap(metadata)
+	resolvedContentType := normalizeContentType(opts.ContentType, key)
+	meta := cloneStringMap(opts.Metadata)
 	if err := WriteSidecar(target, b.metadataSuffix, Sidecar{
 		ETag:        etag,
 		ContentType: resolvedContentType,

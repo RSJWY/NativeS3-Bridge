@@ -77,7 +77,21 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 			r.bucketHandler.DeleteBucket(w, req, bucket)
 		case http.MethodHead:
 			r.bucketHandler.HeadBucket(w, req, bucket)
+		case http.MethodPost:
+			if hasQuery(req, "delete") {
+				r.objectHandler.DeleteObjects(w, req, bucket)
+				return
+			}
+			handlers.WriteS3Error(w, "MethodNotAllowed", http.StatusMethodNotAllowed, req.URL.Path)
 		case http.MethodGet:
+			if hasQuery(req, "location") {
+				r.bucketHandler.GetBucketLocation(w, req, bucket)
+				return
+			}
+			if hasQuery(req, "versioning") {
+				r.bucketHandler.GetBucketVersioning(w, req, bucket)
+				return
+			}
 			if hasQuery(req, "uploads") {
 				r.multipartHandler.ListUploads(w, req, bucket)
 				return
@@ -126,6 +140,10 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 
 	switch req.Method {
 	case http.MethodPut:
+		if handlers.IsCopyRequest(req) {
+			r.objectHandler.Copy(w, req, bucket, key)
+			return
+		}
 		r.objectHandler.Put(w, req, bucket, key)
 	case http.MethodGet:
 		r.objectHandler.Get(w, req, bucket, key)
