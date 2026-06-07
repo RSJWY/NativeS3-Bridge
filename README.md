@@ -95,6 +95,22 @@ go build -o natives3bridge ./cmd/natives3bridge
 
 > 如果 `pkg/webadmin/ui/dist/` 已存在有效构建产物，可直接 `go build` 跳过前端步骤。
 
+### GitHub Tag 发布
+
+仓库包含 GitHub Actions 发布流程：向 GitHub 推送任意 tag 会触发构建，并创建对应 GitHub Release。
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Release 流程会执行：
+
+- `npm ci && npm run build` 构建并嵌入 Web 管理后台。
+- `go vet ./...` 与 `go test ./...`。
+- 交叉编译 `linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`、`windows/amd64`。
+- 上传 `.tar.gz` 二进制包和 `checksums.txt` 到 GitHub Release。
+
 ### 3. 准备配置
 
 二进制默认读取 `configs/config.yaml`（可用 `-config` 覆盖）。仓库未提供该文件，请从示例复制：
