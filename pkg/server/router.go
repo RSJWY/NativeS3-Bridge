@@ -2,10 +2,12 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
@@ -18,6 +20,8 @@ import (
 type Middleware func(http.Handler) http.Handler
 
 type ACLLookup func(bucket string) (acl string, exists bool, err error)
+
+var s3RequestIDCounter uint64
 
 type Router struct {
 	objectHandler    *handlers.ObjectHandler
@@ -188,9 +192,18 @@ func Recover(next http.Handler) http.Handler {
 func Logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
+		requestID := newS3RequestID(started)
+		w.Header().Set("x-amz-request-id", requestID)
+		defer func() {
+			slog.Info("s3 request", "request_id", requestID, "method", r.Method, "path", r.URL.Path, "elapsed", time.Since(started))
+		}()
 		next.ServeHTTP(w, r)
-		slog.Info("s3 request", "method", r.Method, "path", r.URL.Path, "elapsed", time.Since(started))
 	})
+}
+
+func newS3RequestID(t time.Time) string {
+	seq := atomic.AddUint64(&s3RequestIDCounter, 1)
+	return fmt.Sprintf("req-%016x-%08x", t.UTC().UnixNano(), seq&0xffffffff)
 }
 
 func Auth(authenticator auth.Authenticator, aclLookup ACLLookup) Middleware {

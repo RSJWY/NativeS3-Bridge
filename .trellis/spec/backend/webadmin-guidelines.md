@@ -122,7 +122,114 @@ writeJSON(w, http.StatusOK, credentialToResponse(cred)) // no secret_key field
 
 ---
 
+## Scenario: Operational Health And Metrics Endpoints
+
+### 1. Scope / Trigger
+
+
+- Trigger: any change to `pkg/webadmin/ops.go`, admin listener route registration, health/readiness endpoints, or Prometheus metrics output.
+- Goal: expose container/probe and Prometheus endpoints on the admin listener without weakening `/api/admin/*` session protection or leaking sensitive data.
+
+### 2. Signatures
+
+
+- `func NewOpsHandler(gdb *gorm.DB) *OpsHandler`
+- `func (o *OpsHandler) Healthz(w http.ResponseWriter, r *http.Request)`
+- `func (o *OpsHandler) Readyz(w http.ResponseWriter, r *http.Request)`
+- `func (o *OpsHandler) Metrics(w http.ResponseWriter, r *http.Request)`
+- Admin listener routes: `GET /healthz`, `GET /readyz`, `GET /metrics`.
+
+### 3. Contracts
+
+
+- Ops endpoints are registered on the admin listener before the SPA fallback and outside `Auth.Middleware`; they must not be mounted on the S3 listener.
+- `/healthz` is a liveness probe only: it returns HTTP `200`, `Content-Type: text/plain; charset=utf-8`, and body `ok`; it must not ping or query the database.
+- `/readyz` is a readiness probe: it pings the underlying `gorm.DB` SQL handle and returns `200 ready` when reachable or `503 database unavailable` when the handle is nil, closed, or cannot ping.
+- `/metrics` returns HTTP `200`, `Content-Type: text/plain; version=0.0.4; charset=utf-8`, and Prometheus text exposition format.
+- Metrics are derived from persistent aggregate data only: `request_stats` for S3 operation/byte counters, `credentials` for credential count and quota/used totals, `buckets` for bucket count, and DB reachability for `natives3_database_up`.
+- Metrics must not include credential secrets, admin session values, request payload data, object names, bucket names, or access keys.
+- Current metric names are:
+  - `natives3_requests_total{op="put|get|delete"}`
+  - `natives3_bytes_in_total`
+  - `natives3_bytes_out_total`
+  - `natives3_credentials`
+  - `natives3_buckets`
+  - `natives3_quota_bytes_total`
+  - `natives3_used_bytes_total`
+  - `natives3_database_up`
+
+### 4. Validation & Error Matrix
+
+
+- Non-`GET` request to an ops endpoint -> HTTP `405`, `Allow: GET`, `Content-Type: text/plain; charset=utf-8`, body `method not allowed`.
+- Nil `gorm.DB`, unavailable SQL handle, or failed `Ping` on `/readyz` -> HTTP `503` with body `database unavailable`.
+- Nil/closed DB or aggregate query failure on `/metrics` -> HTTP `200` and `natives3_database_up 0`; do not panic or return SQL/internal error details.
+- Missing admin session on `/metrics`, `/healthz`, or `/readyz` -> still served normally; missing admin session on `/api/admin/*` -> HTTP `401` JSON `{"error":"unauthorized"}`.
+
+### 5. Good/Base/Bad Cases
+
+
+- Good: `/metrics` can be scraped without a cookie and `/api/admin/credentials` still returns `401` without a valid admin session.
+- Good: closing the test SQL handle makes `/readyz` return `503` and `/metrics` include `natives3_database_up 0` without panicking.
+- Base: an empty database returns zero-valued counters and `natives3_database_up 1` when the DB can ping.
+- Bad: wrapping ops endpoints with admin auth, because Kubernetes probes and Prometheus scrapers may not have an admin cookie.
+- Bad: registering ops endpoints after the SPA fallback, because `/metrics` or `/readyz` could incorrectly serve `index.html`.
+- Bad: emitting labels containing bucket names, access keys, object keys, or other high-cardinality/sensitive values.
+
+### 6. Tests Required
+
+
+- Unit tests for `/healthz` response code, content type, body, and no DB dependency.
+- Unit tests for `/readyz` success and nil/closed DB failure behavior.
+- Unit tests for `/metrics` content type, metric names, operation labels, non-zero aggregate values from `credentials`, `request_stats`, and `buckets`, plus DB-down degradation.
+- Route integration test proving unauthenticated ops endpoints are reachable while `/api/admin/*` remains session-protected.
+- Run `gofmt`, `go build ./...`, `go vet ./...`, and `go test ./...` after changes.
+
+### 7. Wrong vs Correct
+
+Wrong:
+
+```go
+mux.Handle("/metrics", auth.Middleware(http.HandlerFunc(ops.Metrics))) // probe/scraper needs admin cookie
+```
+
+Correct:
+
+```go
+mux.HandleFunc("/metrics", ops.Metrics)
+mux.Handle("/api/admin/credentials", auth.Middleware(http.HandlerFunc(api.Credentials)))
+```
+
+Wrong:
+
+```go
+mux.HandleFunc("/", spa.Serve)
+mux.HandleFunc("/readyz", ops.Readyz) // unreachable because fallback was registered first
+```
+
+Correct:
+
+```go
+mux.HandleFunc("/readyz", ops.Readyz)
+mux.HandleFunc("/", spa.Serve)
+```
+
+Wrong:
+
+```go
+fmt.Fprintf(w, "natives3_bucket_used_bytes{bucket=%q} %d\n", bucket.Name, used)
+```
+
+Correct:
+
+```go
+fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
+```
+
+---
+
 ## Common Mistakes
 
 - Do not rely on `configs/config.sqlite.yaml` for admin login smoke unless it has a password configured. Use a temporary local config with `admin_bootstrap_password` for validation.
 - Do not commit built `dist/assets/*`; keep only `.gitkeep` tracked. Build artifacts are regenerated before embedding and are ignored by `.gitignore`.
+- Do not add sensitive or high-cardinality labels to `/metrics`; keep labels limited to bounded operational dimensions such as S3 operation names.

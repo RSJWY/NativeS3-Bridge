@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"encoding/xml"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -119,6 +121,72 @@ func TestAuthSignedRequestsBypassAnonymousACL(t *testing.T) {
 	}
 	if aclCalls != 0 {
 		t.Fatalf("ACL calls = %d, want 0", aclCalls)
+	}
+}
+
+func TestLoggingAddsRequestIDHeaderAndLogField(t *testing.T) {
+	var logBuf bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	h := Logging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodHead, "/bucket/key.txt", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	requestID := rr.Header().Get("x-amz-request-id")
+	assertGeneratedRequestID(t, requestID)
+	logLine := logBuf.String()
+	for _, want := range []string{
+		`"request_id":"` + requestID + `"`,
+		`"method":"HEAD"`,
+		`"path":"/bucket/key.txt"`,
+		`"elapsed":`,
+	} {
+		if !strings.Contains(logLine, want) {
+			t.Fatalf("log entry = %s, want %s", logLine, want)
+		}
+	}
+}
+
+func TestRouterSuccessIncludesGeneratedRequestID(t *testing.T) {
+	router, _, _ := newOpsTestRouter(t)
+	req := headerSignedRequest(http.MethodPut, "/test-bucket/request-id.txt")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, withBody(req, "body"))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	assertGeneratedRequestID(t, rr.Header().Get("x-amz-request-id"))
+}
+
+func TestRouterErrorBodyUsesGeneratedRequestID(t *testing.T) {
+	router, _, _ := newOpsTestRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/test-bucket/private.txt", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rr.Code, rr.Body.String())
+	}
+	requestID := rr.Header().Get("x-amz-request-id")
+	assertGeneratedRequestID(t, requestID)
+	var parsed struct {
+		Code      string `xml:"Code"`
+		RequestID string `xml:"RequestId"`
+	}
+	if err := xml.Unmarshal(rr.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("parse s3 error xml: %v; body=%s", err, rr.Body.String())
+	}
+	if parsed.Code != auth.CodeAccessDenied {
+		t.Fatalf("error code = %q, want %q", parsed.Code, auth.CodeAccessDenied)
+	}
+	if parsed.RequestID != requestID {
+		t.Fatalf("xml request id = %q, want response header %q", parsed.RequestID, requestID)
 	}
 }
 
@@ -269,4 +337,17 @@ func newServerTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("migrate db: %v", err)
 	}
 	return gdb
+}
+
+func assertGeneratedRequestID(t *testing.T, requestID string) {
+	t.Helper()
+	if !strings.HasPrefix(requestID, "req-") || len(requestID) != len("req-0000000000000000-00000000") {
+		t.Fatalf("request id = %q, want generated req-<time>-<seq> format", requestID)
+	}
+	for _, r := range strings.TrimPrefix(requestID, "req-") {
+		if (r >= 'a' && r <= 'f') || (r >= '0' && r <= '9') || r == '-' {
+			continue
+		}
+		t.Fatalf("request id = %q contains unsafe character %q", requestID, r)
+	}
 }

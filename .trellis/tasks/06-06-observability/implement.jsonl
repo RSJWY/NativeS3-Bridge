@@ -1,1 +1,4 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Admin listener route placement, unauthenticated ops boundary, and validation commands for webadmin backend changes."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Metrics read existing GORM models and must stay portable across supported database drivers."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"S3 access log request ID correlation belongs to backend logging conventions."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Ops endpoints and metrics cross HTTP, database, and monitoring boundaries."}
