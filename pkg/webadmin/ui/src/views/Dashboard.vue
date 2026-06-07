@@ -5,7 +5,9 @@
         <h1>仪表盘</h1>
         <p class="muted">查看容量使用、密钥用量排行和最近 30 天请求趋势。</p>
       </div>
-      <button class="secondary-button" type="button" @click="load">刷新</button>
+      <button class="secondary-button" type="button" :disabled="loading" @click="load">
+        {{ loading ? '刷新中…' : '刷新' }}
+      </button>
     </div>
 
     <div v-if="error" class="notice error-notice">{{ error }}</div>
@@ -32,15 +34,27 @@
     <section class="chart-grid">
       <div class="panel chart-panel">
         <h2>容量使用率</h2>
-        <div ref="usageChartEl" class="chart-box"></div>
+        <div class="chart-frame">
+          <div ref="usageChartEl" class="chart-box"></div>
+          <div v-if="loading" class="chart-state">加载中…</div>
+          <div v-else-if="!hasCapacityData" class="chart-state">暂无容量使用数据</div>
+        </div>
       </div>
       <div class="panel chart-panel">
         <h2>各密钥用量排行</h2>
-        <div ref="rankingChartEl" class="chart-box"></div>
+        <div class="chart-frame">
+          <div ref="rankingChartEl" class="chart-box"></div>
+          <div v-if="loading" class="chart-state">加载中…</div>
+          <div v-else-if="!hasRankingData" class="chart-state">暂无密钥用量数据</div>
+        </div>
       </div>
       <div class="panel chart-panel chart-wide">
         <h2>请求次数趋势</h2>
-        <div ref="trendChartEl" class="chart-box"></div>
+        <div class="chart-frame">
+          <div ref="trendChartEl" class="chart-box"></div>
+          <div v-if="loading" class="chart-state">加载中…</div>
+          <div v-else-if="!hasTrendData" class="chart-state">暂无请求趋势数据</div>
+        </div>
       </div>
     </section>
   </section>
@@ -51,7 +65,7 @@ import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { adminApi, type DashboardSummary, type RequestTrendItem, type UsageRankingItem } from '../api/client'
 import { formatBytes, formatQuota, usagePercent } from '../utils/format'
 
@@ -61,12 +75,21 @@ const summary = ref<DashboardSummary | null>(null)
 const ranking = ref<UsageRankingItem[]>([])
 const trend = ref<RequestTrendItem[]>([])
 const error = ref('')
+const loading = ref(false)
 const usageChartEl = ref<HTMLDivElement | null>(null)
 const rankingChartEl = ref<HTMLDivElement | null>(null)
 const trendChartEl = ref<HTMLDivElement | null>(null)
 let usageChart: echarts.ECharts | null = null
 let rankingChart: echarts.ECharts | null = null
 let trendChart: echarts.ECharts | null = null
+
+const hasCapacityData = computed(() => {
+  const total = summary.value?.total_quota_bytes ?? 0
+  const used = summary.value?.total_used_bytes ?? 0
+  return total > 0 || used > 0
+})
+const hasRankingData = computed(() => ranking.value.some((item) => item.used_bytes > 0))
+const hasTrendData = computed(() => trend.value.some((item) => item.put_count > 0 || item.get_count > 0 || item.delete_count > 0))
 
 onMounted(async () => {
   window.addEventListener('resize', resizeCharts)
@@ -81,6 +104,8 @@ onBeforeUnmount(() => {
 })
 
 async function load() {
+  if (loading.value) return
+  loading.value = true
   error.value = ''
   try {
     const [summaryResult, rankingResult, trendResult] = await Promise.all([
@@ -91,10 +116,12 @@ async function load() {
     summary.value = summaryResult
     ranking.value = rankingResult
     trend.value = trendResult
-    await nextTick()
-    renderCharts()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载仪表盘失败'
+  } finally {
+    loading.value = false
+    await nextTick()
+    renderCharts()
   }
 }
 
@@ -105,10 +132,10 @@ function renderCharts() {
 }
 
 function renderUsageChart() {
-  if (!usageChartEl.value || !summary.value) return
+  if (!usageChartEl.value) return
   usageChart ||= echarts.init(usageChartEl.value)
-  const total = summary.value.total_quota_bytes
-  const used = summary.value.total_used_bytes
+  const total = summary.value?.total_quota_bytes ?? 0
+  const used = summary.value?.total_used_bytes ?? 0
   const remaining = Math.max(total - used, 0)
   usageChart.setOption({
     tooltip: { formatter: ({ name, value }: { name: string; value: number }) => `${name}: ${formatBytes(value)}` },
@@ -119,10 +146,20 @@ function renderUsageChart() {
         radius: ['50%', '72%'],
         center: ['50%', '44%'],
         label: { formatter: '{b}' },
-        data: total > 0 ? [{ name: '已用', value: used }, { name: '剩余', value: remaining }] : [{ name: '已用', value: used }]
+        data: getUsageChartData(total, used, remaining)
       }
     ]
   })
+}
+
+function getUsageChartData(total: number, used: number, remaining: number) {
+  if (!hasCapacityData.value) {
+    return []
+  }
+  if (total > 0) {
+    return [{ name: '已用', value: used }, { name: '剩余', value: remaining }]
+  }
+  return [{ name: '已用', value: used }]
 }
 
 function renderRankingChart() {

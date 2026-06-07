@@ -33,6 +33,7 @@
 - Quota input is raw bytes. Empty input means `0` (unlimited); invalid, negative, non-finite, or unsafe numbers must block submit with a visible error instead of becoming unlimited silently.
 - Dashboard must render three real ECharts charts from API data: capacity usage donut, usage ranking bar chart, request trend line chart.
 - UI styling should stay functional and restrained: normal sidebar, simple cards/tables/forms, no gradients, no glass shells, no decorative hero copy, no oversized radii.
+- Reuse shared visual state classes instead of one-off styles: wrap wide tables in `.table-scroll`, use `.state-row` for loading/empty table rows, use `.status-badge` for credential status, and use `.chart-state` overlays for dashboard loading/empty chart states.
 
 ### 4. Validation & Error Matrix
 
@@ -45,6 +46,7 @@
 - Bucket non-empty delete -> visible error that the bucket is not empty and objects must be removed first.
 - Missing dashboard data -> render empty charts/zero values without throwing.
 - Mobile viewport under 900px -> sidebar becomes top navigation and charts/tables remain reachable.
+- Wide credential or bucket tables on narrow viewports -> horizontal scrolling within `.table-scroll`, not page-level overflow.
 
 ### 5. Good/Base/Bad Cases
 
@@ -121,3 +123,4 @@ try {
 
 - Do not add Pinia for this UI unless the scope grows beyond login state and server-fetched page data; the current convention is a lightweight composable.
 - Do not import full alternative chart packages. ECharts is frozen, and dashboard charts should use the API payloads rather than placeholder data.
+- Do not create page-specific loading/empty table styles when `.state-row` and `.table-scroll` already cover the pattern; divergent one-offs make the admin pages feel inconsistent.

@@ -13,16 +13,24 @@
       <form class="inline-form" @submit.prevent="create">
         <div class="form-field">
           <label for="bucket-name">新建桶</label>
-          <input id="bucket-name" v-model="newBucketName" type="text" autocomplete="off" placeholder="例如：photos-archive" />
+          <input
+            id="bucket-name"
+            v-model="newBucketName"
+            type="text"
+            autocomplete="off"
+            placeholder="例如：photos-archive"
+            :disabled="bucketMutating"
+          />
           <p class="muted">名称需为 3-63 位小写字母、数字或连字符，并以字母或数字开头和结尾。</p>
         </div>
-        <button class="primary-button" type="submit" :disabled="creating">{{ creating ? '创建中…' : '新建桶' }}</button>
+        <button class="primary-button" type="submit" :disabled="bucketMutating">{{ creating ? '创建中…' : '新建桶' }}</button>
       </form>
       <p v-if="formError" class="error-text">{{ formError }}</p>
     </section>
 
     <section class="panel">
-      <table class="data-table">
+      <div class="table-scroll">
+        <table class="data-table">
         <thead>
           <tr>
             <th>名称</th>
@@ -32,10 +40,10 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-if="loading">
+          <tr v-if="loading" class="state-row">
             <td colspan="4">加载中…</td>
           </tr>
-          <tr v-else-if="buckets.length === 0">
+          <tr v-else-if="buckets.length === 0" class="state-row">
             <td colspan="4">暂无 bucket。</td>
           </tr>
           <tr v-for="bucket in buckets" :key="bucket.name">
@@ -52,25 +60,26 @@
               <select
                 :id="`acl-${bucket.name}`"
                 :value="bucket.acl"
-                :disabled="updatingACL === bucket.name"
+                :disabled="bucketMutating"
                 @change="changeACL(bucket, $event)"
               >
                 <option value="private">私有</option>
                 <option value="public-read">公开下载</option>
               </select>
-              <button class="danger-button" type="button" :disabled="deleting === bucket.name" @click="remove(bucket)">
+              <button class="danger-button" type="button" :disabled="bucketMutating" @click="remove(bucket)">
                 {{ deleting === bucket.name ? '删除中…' : '删除' }}
               </button>
             </td>
           </tr>
         </tbody>
-      </table>
+        </table>
+      </div>
     </section>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { adminApi, type Bucket, type BucketACL } from '../api/client'
 
 const buckets = ref<Bucket[]>([])
@@ -81,6 +90,7 @@ const updatingACL = ref('')
 const error = ref('')
 const formError = ref('')
 const newBucketName = ref('')
+const bucketMutating = computed(() => creating.value || deleting.value !== '' || updatingACL.value !== '')
 
 onMounted(load)
 
@@ -97,9 +107,14 @@ async function load() {
 }
 
 async function create() {
+  if (bucketMutating.value) return
   const name = newBucketName.value.trim()
   if (!name) {
     formError.value = '请输入桶名称'
+    return
+  }
+  if (!isValidBucketName(name)) {
+    formError.value = '桶名称不合法：需为 3-63 位小写字母、数字或连字符，并以字母或数字开头和结尾。'
     return
   }
   creating.value = true
@@ -116,6 +131,7 @@ async function create() {
 }
 
 async function changeACL(bucket: Bucket, event: Event) {
+  if (updatingACL.value || deleting.value) return
   const target = event.target as HTMLSelectElement
   const nextACL = target.value as BucketACL
   if (nextACL === bucket.acl) {
@@ -135,6 +151,7 @@ async function changeACL(bucket: Bucket, event: Event) {
 }
 
 async function remove(bucket: Bucket) {
+  if (deleting.value || updatingACL.value) return
   if (!window.confirm(`确认删除桶 ${bucket.name}？仅空桶可以删除，非空桶会保留数据并返回失败。`)) {
     return
   }
@@ -156,6 +173,10 @@ function aclText(acl: BucketACL) {
 
 function formatDate(value: string) {
   return new Date(value).toLocaleString()
+}
+
+function isValidBucketName(name: string) {
+  return /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(name)
 }
 
 function toBucketError(err: unknown, fallback: string) {
