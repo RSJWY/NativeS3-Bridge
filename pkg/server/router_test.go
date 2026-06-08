@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/xml"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -342,9 +343,74 @@ func TestRouterAnonymousRateLimitAndQuotaSkip(t *testing.T) {
 	}
 }
 
+func TestRouterPutCreatesBucketMetadataForImplicitNativeBucket(t *testing.T) {
+	gdb := newServerTestDB(t)
+	dataRoot := t.TempDir()
+	backend, err := storage.NewFileBackend(dataRoot)
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, dataRoot, storage.DefaultBucketACLCacheTTL)
+	router := NewRouter(backend, nil, bucketStore, &stubAuthenticator{}, func(uint, int64, quota.Op) error { return nil }, nil, config.RateLimitConfig{})
+
+	req := headerSignedRequest(http.MethodPut, "/implicit-bucket/key.txt")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, requestBody(req, "hello"))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	acl, exists, err := bucketStore.GetACL("implicit-bucket")
+	if err != nil {
+		t.Fatalf("get acl: %v", err)
+	}
+	if !exists || acl != storage.ACLPrivate {
+		t.Fatalf("acl = %q exists=%v, want private true", acl, exists)
+	}
+	if _, err := backend.HeadObject("implicit-bucket", "key.txt"); err != nil {
+		t.Fatalf("object not stored: %v", err)
+	}
+}
+
+func TestRouterMultipartCreateCreatesBucketMetadataForImplicitNativeBucket(t *testing.T) {
+	gdb := newServerTestDB(t)
+	dataRoot := t.TempDir()
+	backend, err := storage.NewFileBackend(dataRoot)
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	multipartStore, err := storage.NewMultipartStore(dataRoot, filepath.Join(dataRoot, ".multipart"), storage.DefaultMetadataSuffix)
+	if err != nil {
+		t.Fatalf("new multipart store: %v", err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, dataRoot, storage.DefaultBucketACLCacheTTL)
+	router := NewRouter(backend, multipartStore, bucketStore, &stubAuthenticator{}, func(uint, int64, quota.Op) error { return nil }, nil, config.RateLimitConfig{})
+
+	req := headerSignedRequest(http.MethodPost, "/implicit-multipart/big.bin?uploads")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	acl, exists, err := bucketStore.GetACL("implicit-multipart")
+	if err != nil {
+		t.Fatalf("get acl: %v", err)
+	}
+	if !exists || acl != storage.ACLPrivate {
+		t.Fatalf("acl = %q exists=%v, want private true", acl, exists)
+	}
+}
+
 func headerSignedRequest(method, target string) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
 	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc")
+	return req
+}
+
+func requestBody(req *http.Request, body string) *http.Request {
+	req.Body = io.NopCloser(strings.NewReader(body))
+	req.ContentLength = int64(len(body))
 	return req
 }
 

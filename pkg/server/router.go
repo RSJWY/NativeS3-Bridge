@@ -27,6 +27,7 @@ type Router struct {
 	objectHandler    *handlers.ObjectHandler
 	bucketHandler    *handlers.BucketHandler
 	multipartHandler *handlers.MultipartHandler
+	bucketStore      *storage.BucketStore
 	chain            []Middleware
 }
 
@@ -35,6 +36,7 @@ func NewRouter(backend storage.Backend, multipartStore *storage.MultipartStore, 
 		objectHandler:    handlers.NewObjectHandlerWithHooks(backend, commit, emitter),
 		bucketHandler:    handlers.NewBucketHandler(backend, bucketStore),
 		multipartHandler: handlers.NewMultipartHandlerWithHooks(multipartStore, commit, emitter),
+		bucketStore:      bucketStore,
 		chain:            []Middleware{Recover, Logging, AnonRateLimit(rateLimit), Auth(authenticator, bucketStore.GetACL), Quota},
 	}
 	var h http.Handler = http.HandlerFunc(r.dispatch)
@@ -107,6 +109,13 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if r.shouldEnsureBucketMetadata(req, bucket, key) {
+		if err := r.bucketStore.Create(bucket); err != nil {
+			writeBucketMetadataError(w, err, req.URL.Path)
+			return
+		}
+	}
+
 	if hasQuery(req, "tagging") {
 		switch req.Method {
 		case http.MethodPut:
@@ -160,9 +169,30 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func (r *Router) shouldEnsureBucketMetadata(req *http.Request, bucket, key string) bool {
+	if r.bucketStore == nil || bucket == "" || key == "" {
+		return false
+	}
+	if req.Method == http.MethodPut && !hasQuery(req, "tagging") && req.URL.Query().Get("uploadId") == "" {
+		return true
+	}
+	return req.Method == http.MethodPost && hasQuery(req, "uploads")
+}
+
 func hasQuery(r *http.Request, key string) bool {
 	_, ok := r.URL.Query()[key]
 	return ok
+}
+
+func writeBucketMetadataError(w http.ResponseWriter, err error, resource string) {
+	switch {
+	case errors.Is(err, storage.ErrInvalidBucketName):
+		handlers.WriteS3Error(w, "InvalidBucketName", http.StatusBadRequest, resource)
+	case errors.Is(err, storage.ErrInvalidPath):
+		handlers.WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, resource)
+	default:
+		handlers.WriteS3Error(w, "InternalError", http.StatusInternalServerError, resource)
+	}
 }
 
 func parseS3Path(rawPath string) (string, string) {
