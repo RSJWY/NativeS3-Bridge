@@ -2,6 +2,7 @@ package storage
 
 import (
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -156,6 +157,126 @@ func TestFileBackendListBucketsFiltersHiddenAndInvalidDirs(t *testing.T) {
 	}
 }
 
+func TestFileBackendCopyObjectPreservesBytesMetadataAndTags(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	if _, err := backend.PutObjectWithMetadata("test-bucket", "dir/source.txt", stringsReader("copy me"), "text/plain", map[string]string{"author": "alice"}); err != nil {
+		t.Fatalf("put source: %v", err)
+	}
+	if err := backend.PutObjectTags("test-bucket", "dir/source.txt", map[string]string{"env": "test"}); err != nil {
+		t.Fatalf("tag source: %v", err)
+	}
+
+	info, err := backend.CopyObject("test-bucket", "dir/source.txt", "test-bucket", "dir/copy.txt")
+	if err != nil {
+		t.Fatalf("copy object: %v", err)
+	}
+	if info.Size != int64(len("copy me")) || info.ETag != md5Hex("copy me") {
+		t.Fatalf("copy info = %+v", info)
+	}
+	data, err := os.ReadFile(filepath.Join(backend.root, "test-bucket", "dir", "copy.txt"))
+	if err != nil {
+		t.Fatalf("read copy: %v", err)
+	}
+	if string(data) != "copy me" {
+		t.Fatalf("copy bytes = %q", string(data))
+	}
+	head, err := backend.HeadObject("test-bucket", "dir/copy.txt")
+	if err != nil {
+		t.Fatalf("head copy: %v", err)
+	}
+	if head.ContentType != "text/plain" || head.Metadata["author"] != "alice" {
+		t.Fatalf("copy metadata = content-type %q metadata %+v", head.ContentType, head.Metadata)
+	}
+	tags, err := backend.GetObjectTags("test-bucket", "dir/copy.txt")
+	if err != nil {
+		t.Fatalf("get copy tags: %v", err)
+	}
+	if tags["env"] != "test" {
+		t.Fatalf("copy tags = %+v", tags)
+	}
+}
+
+func TestFileBackendPutObjectWithOptionsValidatesDigests(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	body := "verified object"
+	md5Sum := md5.Sum([]byte(body))
+	sha256Sum := sha256.Sum256([]byte(body))
+
+	info, err := backend.PutObjectWithOptions("test-bucket", "verified.txt", stringsReader(body), PutObjectOptions{
+		ContentType:   "text/plain",
+		ContentMD5:    md5Sum[:],
+		ContentSHA256: hex.EncodeToString(sha256Sum[:]),
+	})
+	if err != nil {
+		t.Fatalf("put object with digests: %v", err)
+	}
+	if info.ETag != md5Hex(body) {
+		t.Fatalf("etag = %q, want %q", info.ETag, md5Hex(body))
+	}
+	data, err := os.ReadFile(filepath.Join(backend.root, "test-bucket", "verified.txt"))
+	if err != nil {
+		t.Fatalf("read object: %v", err)
+	}
+	if string(data) != body {
+		t.Fatalf("native bytes = %q, want %q", string(data), body)
+	}
+}
+
+func TestFileBackendPutObjectWithOptionsBadDigestCleansTempAndPreservesExistingObject(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	if _, err := backend.PutObject("test-bucket", "keep.txt", stringsReader("original"), "text/plain"); err != nil {
+		t.Fatalf("put original: %v", err)
+	}
+	badMD5 := bytesOf(16, 0xff)
+
+	_, err = backend.PutObjectWithOptions("test-bucket", "keep.txt", stringsReader("replacement"), PutObjectOptions{ContentMD5: badMD5})
+	if !errors.Is(err, ErrBadDigest) {
+		t.Fatalf("overwrite err = %v, want ErrBadDigest", err)
+	}
+	data, err := os.ReadFile(filepath.Join(backend.root, "test-bucket", "keep.txt"))
+	if err != nil {
+		t.Fatalf("read preserved object: %v", err)
+	}
+	if string(data) != "original" {
+		t.Fatalf("preserved bytes = %q, want original", string(data))
+	}
+	assertNoTempFiles(t, filepath.Join(backend.root, "test-bucket", "keep.txt"))
+
+	_, err = backend.PutObjectWithOptions("test-bucket", "new.txt", stringsReader("new"), PutObjectOptions{ContentMD5: badMD5})
+	if !errors.Is(err, ErrBadDigest) {
+		t.Fatalf("new key err = %v, want ErrBadDigest", err)
+	}
+	if _, err := os.Stat(filepath.Join(backend.root, "test-bucket", "new.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bad digest created final object or unexpected stat error: %v", err)
+	}
+	assertNoTempFiles(t, filepath.Join(backend.root, "test-bucket", "new.txt"))
+}
+
+func TestFileBackendPutObjectWithOptionsInvalidDigest(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+
+	_, err = backend.PutObjectWithOptions("test-bucket", "bad-md5.txt", stringsReader("body"), PutObjectOptions{ContentMD5: []byte{1, 2, 3}})
+	if !errors.Is(err, ErrInvalidDigest) {
+		t.Fatalf("short md5 err = %v, want ErrInvalidDigest", err)
+	}
+	_, err = backend.PutObjectWithOptions("test-bucket", "bad-sha.txt", stringsReader("body"), PutObjectOptions{ContentSHA256: "not-hex"})
+	if !errors.Is(err, ErrInvalidDigest) {
+		t.Fatalf("bad sha err = %v, want ErrInvalidDigest", err)
+	}
+}
+
 func md5Hex(s string) string {
 	sum := md5.Sum([]byte(s))
 	return hex.EncodeToString(sum[:])
@@ -175,4 +296,23 @@ func gotKeys(objects []ObjectInfo) string {
 
 func gotPrefixes(prefixes []string) string {
 	return strings.Join(prefixes, ",")
+}
+
+func bytesOf(size int, value byte) []byte {
+	out := make([]byte, size)
+	for i := range out {
+		out[i] = value
+	}
+	return out
+}
+
+func assertNoTempFiles(t *testing.T, target string) {
+	t.Helper()
+	matches, err := filepath.Glob(target + ".tmp-*")
+	if err != nil {
+		t.Fatalf("glob temp files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temp files remain: %v", matches)
+	}
 }

@@ -137,3 +137,69 @@ Implemented single-password webadmin API, embedded Vue3/Vite/ECharts admin UI, c
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: S3 协议补全：DeleteObjects、CopyObject 与桶子资源探测
+
+**Date**: 2026-06-06
+**Task**: S3 协议补全：DeleteObjects、CopyObject 与桶子资源探测
+**Branch**: `06-06-s3-ops-completion`
+
+### Summary
+
+实现并验收 06-06-s3-ops-completion：POST ?delete 批量删除（幂等、按存在对象扣用量与发事件、支持 Quiet）、PUT x-amz-copy-source 服务端流式拷贝（保留 ETag/content-type/元数据/标签、写前配额校验、修复 0 字节静默错误）、GET ?location 与 ?versioning 返回正确子资源 XML。go test ./... 全绿；aws-cli 2.34.62 端到端烟雾测试覆盖字节相等、元数据/标签保留、批量删除幂等、桶探测与缺失桶 NoSuchBucket/NoSuchKey 错误语义。已在分支 06-06-s3-ops-completion 提交并推送 origin。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `163782e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 6: Validate single-part PUT digests
+
+**Date**: 2026-06-07
+**Task**: Validate single-part PUT digests
+**Branch**: `06-06-s3-ops-completion`
+
+### Summary
+
+Implemented storage and handler digest validation for single-part PutObject, including Content-MD5 and concrete x-amz-content-sha256 checks before atomic rename; added BadDigest/InvalidDigest mappings, regressions for cleanup/overwrite/quota/hooks, updated backend storage spec, and verified go test ./pkg/storage ./pkg/handlers plus go test ./....
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `db51d0f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

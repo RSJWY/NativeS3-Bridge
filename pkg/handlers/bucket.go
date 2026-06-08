@@ -48,6 +48,22 @@ func (h *BucketHandler) HeadBucket(w http.ResponseWriter, r *http.Request, bucke
 	w.WriteHeader(http.StatusOK)
 }
 
+func (h *BucketHandler) GetBucketLocation(w http.ResponseWriter, r *http.Request, bucket string) {
+	if err := h.ensureBucketExists(bucket, r.URL.Path); err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	WriteXML(w, http.StatusOK, locationConstraint{XMLNS: "http://s3.amazonaws.com/doc/2006-03-01/"})
+}
+
+func (h *BucketHandler) GetBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
+	if err := h.ensureBucketExists(bucket, r.URL.Path); err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	WriteXML(w, http.StatusOK, versioningConfiguration{XMLNS: "http://s3.amazonaws.com/doc/2006-03-01/"})
+}
+
 func (h *BucketHandler) CreateBucket(w http.ResponseWriter, r *http.Request, bucket string) {
 	if err := storage.ValidateBucketName(bucket); err != nil {
 		WriteS3Error(w, "InvalidBucketName", http.StatusBadRequest, r.URL.Path)
@@ -79,6 +95,11 @@ func (h *BucketHandler) DeleteBucket(w http.ResponseWriter, r *http.Request, buc
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *BucketHandler) ensureBucketExists(bucket, resource string) error {
+	_, err := h.backend.ListObjects(bucket, "", "", "", 0)
+	return err
+}
+
 type listAllMyBucketsResult struct {
 	XMLName struct{}         `xml:"ListAllMyBucketsResult"`
 	XMLNS   string           `xml:"xmlns,attr"`
@@ -98,4 +119,14 @@ type bucketsContainer struct {
 type bucketItem struct {
 	Name         string `xml:"Name"`
 	CreationDate string `xml:"CreationDate"`
+}
+
+type locationConstraint struct {
+	XMLName struct{} `xml:"LocationConstraint"`
+	XMLNS   string   `xml:"xmlns,attr"`
+}
+
+type versioningConfiguration struct {
+	XMLName struct{} `xml:"VersioningConfiguration"`
+	XMLNS   string   `xml:"xmlns,attr"`
 }

@@ -122,6 +122,27 @@ func TestAuthSignedRequestsBypassAnonymousACL(t *testing.T) {
 	}
 }
 
+func TestQuotaSkipsCopyObjectRequestBodyLength(t *testing.T) {
+	reached := false
+	h := Quota(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPut, "/bucket/copy.txt", nil)
+	req.ContentLength = -1
+	req.Header.Set("x-amz-copy-source", "bucket/source.txt")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if !reached {
+		t.Fatalf("copy object request did not reach handler; status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
+	}
+}
+
 func TestAnonRateLimitReturnsSlowDown(t *testing.T) {
 	h := AnonRateLimit(config.RateLimitConfig{AnonymousRPS: 1, AnonymousBurst: 1})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

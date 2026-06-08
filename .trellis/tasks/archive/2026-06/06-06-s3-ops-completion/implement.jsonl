@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/storage-guidelines.md","reason":"S3 storage, object bytes, ETag, sidecar, delete, list, and error mapping contracts for implementation."}
+{"file":".trellis/spec/backend/auth-quota-guidelines.md","reason":"Quota accounting, anonymous access boundaries, and signed-request behavior affected by CopyObject and DeleteObjects."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Request routing, handler contracts, storage behavior, quota, and hooks span multiple backend layers."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse existing XML, storage error, quota, and hook patterns rather than duplicating incompatible logic."}

@@ -1,0 +1,2 @@
+{"file":".trellis/spec/backend/storage-guidelines.md","reason":"Native object storage contracts for atomic PutObject, MD5 ETag, sidecars, CopyObject, and test expectations."}
+{"file":".trellis/spec/backend/auth-quota-guidelines.md","reason":"SigV4 x-amz-content-sha256 compatibility and quota commit behavior that must not regress on failed PUT validation."}

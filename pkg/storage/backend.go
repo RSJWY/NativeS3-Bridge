@@ -31,6 +31,13 @@ type Range struct {
 	End   int64
 }
 
+type PutObjectOptions struct {
+	ContentType   string
+	Metadata      map[string]string
+	ContentMD5    []byte
+	ContentSHA256 string
+}
+
 type Backend interface {
 	PutObject(bucket, key string, r io.Reader, contentType string) (ObjectInfo, error)
 	GetObject(bucket, key string, rng *Range) (io.ReadCloser, ObjectInfo, error)

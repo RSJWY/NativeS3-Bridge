@@ -1,0 +1,2 @@
+{"file":".trellis/spec/backend/storage-guidelines.md","reason":"Verify atomic native file write, MD5 ETag, error mapping, sidecar behavior, and storage regression coverage."}
+{"file":".trellis/spec/backend/auth-quota-guidelines.md","reason":"Verify failed checksum validation does not commit quota/hooks and does not break SigV4 payload hash compatibility."}

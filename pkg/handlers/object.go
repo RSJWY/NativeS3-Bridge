@@ -1,12 +1,15 @@
 package handlers
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -43,7 +46,16 @@ func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key 
 		err  error
 	)
 	metadata := extractUserMetadata(r.Header)
+	putOptions, err := parsePutObjectOptions(r, metadata)
+	if err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
 	if backend, ok := h.backend.(interface {
+		PutObjectWithOptions(string, string, io.Reader, storage.PutObjectOptions) (storage.ObjectInfo, error)
+	}); ok {
+		info, err = backend.PutObjectWithOptions(bucket, key, r.Body, putOptions)
+	} else if backend, ok := h.backend.(interface {
 		PutObjectWithMetadata(string, string, io.Reader, string, map[string]string) (storage.ObjectInfo, error)
 	}); ok {
 		info, err = backend.PutObjectWithMetadata(bucket, key, r.Body, r.Header.Get("Content-Type"), metadata)
@@ -132,6 +144,90 @@ func (h *ObjectHandler) Delete(w http.ResponseWriter, r *http.Request, bucket, k
 	if deleted {
 		h.emitObjectEvent(r, hooks.ObjectDeleted, bucket, key, storage.ObjectInfo{Key: key, Size: deletedSize, ETag: info.ETag, Metadata: info.Metadata})
 	}
+}
+
+func (h *ObjectHandler) DeleteObjects(w http.ResponseWriter, r *http.Request, bucket string) {
+	var req deleteObjectsRequest
+	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+		WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
+		return
+	}
+	if len(req.Objects) == 0 {
+		WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
+		return
+	}
+	resp := deleteObjectsResult{XMLNS: "http://s3.amazonaws.com/doc/2006-03-01/"}
+	for _, obj := range req.Objects {
+		if obj.Key == "" {
+			WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
+			return
+		}
+		info, headErr := h.backend.HeadObject(bucket, obj.Key)
+		if headErr != nil {
+			if !errors.Is(headErr, storage.ErrNoSuchKey) {
+				writeStorageError(w, headErr, r.URL.Path)
+				return
+			}
+		} else {
+			if err := h.backend.DeleteObject(bucket, obj.Key); err != nil {
+				writeStorageError(w, err, r.URL.Path)
+				return
+			}
+			h.commitUsage(r, -info.Size, quota.OpDelete)
+			h.emitObjectEvent(r, hooks.ObjectDeleted, bucket, obj.Key, storage.ObjectInfo{Key: obj.Key, Size: info.Size, ETag: info.ETag, Metadata: info.Metadata})
+		}
+		if !req.Quiet {
+			resp.Deleted = append(resp.Deleted, deletedObject{Key: obj.Key})
+		}
+	}
+	WriteXML(w, http.StatusOK, resp)
+}
+
+func (h *ObjectHandler) Copy(w http.ResponseWriter, r *http.Request, dstBucket, dstKey string) {
+	srcBucket, srcKey, err := parseCopySource(r.Header.Get("x-amz-copy-source"))
+	if err != nil {
+		WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
+		return
+	}
+	srcInfo, err := h.backend.HeadObject(srcBucket, srcKey)
+	if err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	if _, err := h.backend.ListObjects(dstBucket, "", "", "", 0); err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	if id, ok := auth.IdentityFromContext(r.Context()); !ok || id == nil {
+		WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+		return
+	} else if err := quota.Check(id, srcInfo.Size); err != nil {
+		if errors.Is(err, quota.ErrQuotaExceeded) {
+			WriteS3Error(w, "QuotaExceeded", http.StatusForbidden, r.URL.Path)
+			return
+		}
+		WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+		return
+	}
+	backend, ok := h.backend.(interface {
+		CopyObject(string, string, string, string) (storage.ObjectInfo, error)
+	})
+	if !ok {
+		WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
+		return
+	}
+	info, err := backend.CopyObject(srcBucket, srcKey, dstBucket, dstKey)
+	if err != nil {
+		writeStorageError(w, err, r.URL.Path)
+		return
+	}
+	WriteXML(w, http.StatusOK, copyObjectResult{
+		XMLNS:        "http://s3.amazonaws.com/doc/2006-03-01/",
+		LastModified: formatS3Time(info.LastModified),
+		ETag:         quoteETag(info.ETag),
+	})
+	h.commitUsage(r, info.Size, quota.OpPut)
+	h.emitObjectEvent(r, hooks.ObjectCreated, dstBucket, dstKey, info)
 }
 
 func (h *ObjectHandler) PutTagging(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -270,6 +366,34 @@ type commonPrefix struct {
 	Prefix string `xml:"Prefix"`
 }
 
+type deleteObjectsRequest struct {
+	XMLName xml.Name              `xml:"Delete"`
+	Objects []deleteObjectRequest `xml:"Object"`
+	Quiet   bool                  `xml:"Quiet"`
+}
+
+type deleteObjectRequest struct {
+	Key       string `xml:"Key"`
+	VersionID string `xml:"VersionId"`
+}
+
+type deleteObjectsResult struct {
+	XMLName struct{}        `xml:"DeleteResult"`
+	XMLNS   string          `xml:"xmlns,attr"`
+	Deleted []deletedObject `xml:"Deleted,omitempty"`
+}
+
+type deletedObject struct {
+	Key string `xml:"Key"`
+}
+
+type copyObjectResult struct {
+	XMLName      struct{} `xml:"CopyObjectResult"`
+	XMLNS        string   `xml:"xmlns,attr"`
+	LastModified string   `xml:"LastModified"`
+	ETag         string   `xml:"ETag"`
+}
+
 type taggingRequest struct {
 	XMLName xml.Name `xml:"Tagging"`
 	TagSet  tagSet   `xml:"TagSet"`
@@ -309,6 +433,43 @@ func extractUserMetadata(header http.Header) map[string]string {
 	return metadata
 }
 
+func parsePutObjectOptions(r *http.Request, metadata map[string]string) (storage.PutObjectOptions, error) {
+	opts := storage.PutObjectOptions{
+		ContentType: r.Header.Get("Content-Type"),
+		Metadata:    metadata,
+	}
+	if raw := r.Header.Get("Content-MD5"); raw != "" {
+		decoded, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil || len(decoded) != md5DigestSize {
+			return storage.PutObjectOptions{}, storage.ErrInvalidDigest
+		}
+		opts.ContentMD5 = decoded
+	}
+	if raw := r.Header.Get("x-amz-content-sha256"); raw != "" && isConcretePayloadSHA256(raw) {
+		opts.ContentSHA256 = strings.ToLower(raw)
+	} else if raw != "" && !isIgnoredPayloadSHA256(raw) {
+		return storage.PutObjectOptions{}, storage.ErrInvalidDigest
+	}
+	return opts, nil
+}
+
+func isConcretePayloadSHA256(value string) bool {
+	if len(value) != sha256HexSize {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func isIgnoredPayloadSHA256(value string) bool {
+	switch value {
+	case "UNSIGNED-PAYLOAD", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD", "STREAMING-UNSIGNED-PAYLOAD-TRAILER", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER":
+		return true
+	default:
+		return false
+	}
+}
+
 func parseRangeHeader(header string) (*storage.Range, bool, error) {
 	if header == "" {
 		return nil, false, nil
@@ -334,6 +495,32 @@ func parseRangeHeader(header string) (*storage.Range, bool, error) {
 	return &storage.Range{Start: start, End: end}, true, nil
 }
 
+func parseCopySource(raw string) (string, string, error) {
+	if raw == "" {
+		return "", "", storage.ErrInvalidPath
+	}
+	trimmed := strings.TrimPrefix(raw, "/")
+	if idx := strings.Index(trimmed, "?"); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+	parts := strings.SplitN(trimmed, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", storage.ErrInvalidPath
+	}
+	bucket, err := url.PathUnescape(parts[0])
+	if err != nil {
+		return "", "", err
+	}
+	key, err := url.PathUnescape(parts[1])
+	if err != nil {
+		return "", "", err
+	}
+	if bucket == "" || key == "" {
+		return "", "", storage.ErrInvalidPath
+	}
+	return bucket, key, nil
+}
+
 func writeStorageError(w http.ResponseWriter, err error, resource string) {
 	switch {
 	case errors.Is(err, storage.ErrInvalidBucketName):
@@ -346,12 +533,21 @@ func writeStorageError(w http.ResponseWriter, err error, resource string) {
 		WriteS3Error(w, "NoSuchKey", http.StatusNotFound, resource)
 	case errors.Is(err, storage.ErrInvalidRange):
 		WriteS3Error(w, "InvalidRange", http.StatusRequestedRangeNotSatisfiable, resource)
+	case errors.Is(err, storage.ErrBadDigest):
+		WriteS3Error(w, "BadDigest", http.StatusBadRequest, resource)
+	case errors.Is(err, storage.ErrInvalidDigest):
+		WriteS3Error(w, "InvalidDigest", http.StatusBadRequest, resource)
 	case errors.Is(err, storage.ErrBucketNotEmpty):
 		WriteS3Error(w, "BucketNotEmpty", http.StatusConflict, resource)
 	default:
 		WriteS3Error(w, "InternalError", http.StatusInternalServerError, resource)
 	}
 }
+
+const (
+	md5DigestSize = 16
+	sha256HexSize = 64
+)
 
 func (h *ObjectHandler) commitUsage(r *http.Request, deltaBytes int64, op quota.Op) {
 	if h.commit == nil {

@@ -17,6 +17,8 @@
 - `func ResolveObjectPath(root, bucket, key string) (string, error)`
 - `func NewFileBackend(root string) (*FileBackend, error)`
 - `func (b *FileBackend) PutObject(bucket, key string, r io.Reader, contentType string) (ObjectInfo, error)`
+- `type PutObjectOptions struct { ContentType string; Metadata map[string]string; ContentMD5 []byte; ContentSHA256 string }`
+- `func (b *FileBackend) PutObjectWithOptions(bucket, key string, r io.Reader, opts PutObjectOptions) (ObjectInfo, error)`
 - `func (b *FileBackend) GetObject(bucket, key string, rng *Range) (io.ReadCloser, ObjectInfo, error)`
 - `func (b *FileBackend) HeadObject(bucket, key string) (ObjectInfo, error)`
 - `func (b *FileBackend) DeleteObject(bucket, key string) error`
@@ -28,6 +30,10 @@
 - Bucket names must match `^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`.
 - Object keys must not contain `..` path segments and must resolve under `data_root/bucket` after `path.Clean` and absolute-path prefix checks.
 - `PutObject` must create parent directories, stream the request body once into `<target>.tmp-<random>`, call `fsync`, close, then `os.Rename` to the final native file path.
+- `PutObjectWithOptions` is the storage capability for single-part client digest validation. `PutObject` and `PutObjectWithMetadata` delegate to it; the core `Backend` interface stays stable and handlers should detect the capability optionally.
+- `Content-MD5` is decoded at the handler boundary into exactly 16 bytes. Storage compares it with the computed MD5 after copy/fsync/close and before `os.Rename`; mismatch returns `ErrBadDigest` and removes the temp file.
+- A concrete `x-amz-content-sha256` is a 64-character hex SHA-256 string, normalized at the handler boundary. Storage computes SHA-256 only when an expected value is provided, compares before `os.Rename`, and returns `ErrBadDigest` on mismatch.
+- SigV4 compatibility sentinels such as `UNSIGNED-PAYLOAD` must not be treated as object checksums and must not trigger body comparison.
 - The final on-disk file must be the original object bytes; no chunking, container format, encoding, or sidecar dependency is allowed for reading the native file.
 - Single-part ETag is the lowercase hex MD5 of the object bytes, returned quoted at HTTP handler boundaries.
 - `GetObject` must return an `io.ReadCloser` and handlers must stream with `io.Copy`; do not load whole objects into memory for downloads.
@@ -42,18 +48,24 @@
 - Missing bucket on `HeadObject`, `DeleteObject`, or `ListObjects` -> `ErrNoSuchBucket` -> HTTP `404 NoSuchBucket` XML.
 - Missing object in an existing bucket -> `ErrNoSuchKey` -> HTTP `404 NoSuchKey` XML.
 - Invalid or unsatisfiable Range -> `ErrInvalidRange` -> HTTP `416 InvalidRange` XML.
+- Malformed digest input such as invalid base64, wrong MD5 byte length, or non-hex concrete SHA-256 -> `ErrInvalidDigest` -> HTTP `400 InvalidDigest` XML.
+- Decoded client digest that does not match the streamed object bytes -> `ErrBadDigest` -> HTTP `400 BadDigest` XML; the final object path is not replaced and quota/hooks are not committed.
 - Internal filesystem errors -> HTTP `500 InternalError` XML; do not leak internal paths or raw errors in the response body.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: `PutObject("test-bucket", "dir/a.txt", r, "text/plain")` creates `data_root/test-bucket/dir/a.txt` with byte-for-byte identical native contents and a quoted MD5 ETag in HTTP responses.
+- Good: `PUT` with matching `Content-MD5` or concrete `x-amz-content-sha256` succeeds with the same lowercase MD5 ETag; `x-amz-content-sha256: UNSIGNED-PAYLOAD` remains accepted without checksum comparison.
 - Base: `ListObjects("test-bucket", "dir/", "/", "", 1000)` returns immediate files under `dir/` as `Contents` and nested folders as `CommonPrefixes`.
+- Bad: comparing a client digest after `os.Rename`, because a mismatch could overwrite an existing valid object.
 - Bad: accepting `dir/../escape.txt`, writing chunk files as the final object, or returning path traversal failures as `InternalError`.
 
 ### 6. Tests Required
 
 - Unit tests for invalid bucket names and `..` object keys returning the expected storage errors.
 - Unit tests asserting `PutObject` writes exact native bytes and MD5 ETag.
+- Unit tests for `PutObjectWithOptions` digest success, `ErrBadDigest` mismatch cleanup, overwrite preservation, and `ErrInvalidDigest` malformed inputs.
+- Handler tests for `Content-MD5` success/mismatch, concrete SHA-256 success/mismatch, `UNSIGNED-PAYLOAD` compatibility, and no quota commit or ObjectCreated hook on digest failure.
 - Unit tests for `HeadObject` size, ETag, LastModified UTC, and Content-Type behavior.
 - Unit tests for `GetObject` with Range returning the correct byte slice and full object metadata.
 - Unit tests for `DeleteObject` removal plus post-delete `ErrNoSuchKey` in an existing bucket.
@@ -91,6 +103,10 @@ if copyErr != nil || syncErr != nil || closeErr != nil {
     _ = os.Remove(tmp)
     return ObjectInfo{}, firstErr(copyErr, syncErr, closeErr)
 }
+if expectedMD5 != nil && !bytes.Equal(h.Sum(nil), expectedMD5) {
+    _ = os.Remove(tmp)
+    return ObjectInfo{}, ErrBadDigest
+}
 if err := os.Rename(tmp, target); err != nil {
     _ = os.Remove(tmp)
     return ObjectInfo{}, err
@@ -103,6 +119,100 @@ if err := os.Rename(tmp, target); err != nil {
 - Do not convert `maxKeys == 0` to the default page size. `max-keys=0` should return no entries and indicate truncation when entries exist.
 - Do not persist S3 Content-Type by inventing a sidecar in the core objects task. Durable object metadata belongs to the later metadata sidecar task; core storage may only infer by extension or preserve same-process values in memory.
 - Do not return `NoSuchKey` for missing buckets on bucket-scoped operations. Preserve `NoSuchBucket` so handlers emit the correct S3 XML.
+
+## Scenario: S3 Compatibility Operations
+
+### 1. Scope / Trigger
+
+- Trigger: any change to S3 route dispatch or handlers for bucket subresources, multi-object operations, or server-side object copy.
+- Goal: keep aws-cli/SDK compatibility without weakening native object storage, quota accounting, public-read boundaries, or hook emission.
+
+### 2. Signatures
+
+- Route: `POST /{bucket}?delete` -> DeleteObjects.
+- Route: `PUT /{bucket}/{key}` with `x-amz-copy-source` -> CopyObject, before normal PutObject.
+- Route: `GET /{bucket}?location` -> GetBucketLocation.
+- Route: `GET /{bucket}?versioning` -> GetBucketVersioning.
+- Storage capability: `func (b *FileBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (ObjectInfo, error)`.
+
+### 3. Contracts
+
+- DeleteObjects accepts AWS `<Delete>` XML with one or more `<Object><Key>...</Key></Object>` entries and optional `<Quiet>true</Quiet>`.
+- DeleteObjects returns `<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`; when quiet is false, include `<Deleted><Key>...</Key></Deleted>` for existing and missing keys.
+- DeleteObjects ignores `VersionId` because object versioning is not implemented.
+- CopyObject parses `x-amz-copy-source` as `bucket/key` or `/bucket/key`, strips source query parameters such as `versionId`, and URL path-unescapes bucket/key once.
+- CopyObject streams source bytes to a destination temp file, computes the copied object's MD5 ETag, then renames to the native destination path. Do not route copy requests through normal PutObject, because aws-cli sends a zero-length request body.
+- CopyObject preserves source sidecar content type, user metadata, and tags by default. Missing source sidecar falls back to `HeadObject` metadata and empty tags.
+- CopyObject quota uses source object size, not request Content-Length. Middleware must skip normal PUT Content-Length quota for copy requests; the handler checks quota before storage copy and commits `OpPut` after successful copy.
+- `?location` returns empty `LocationConstraint` XML for the default `us-east-1` behavior, which aws-cli parses as `null`.
+- `?versioning` returns empty `VersioningConfiguration` XML to represent disabled/unconfigured versioning.
+- Anonymous public-read still applies only to object `GET`/`HEAD`; DeleteObjects and CopyObject remain signed-only.
+
+### 4. Validation & Error Matrix
+
+- Malformed DeleteObjects XML, empty object list, or empty key -> HTTP `400 InvalidArgument` XML.
+- DeleteObjects missing key in existing bucket -> successful deleted entry, no usage commit, no hook event.
+- DeleteObjects missing bucket -> HTTP `404 NoSuchBucket` XML.
+- Malformed or empty `x-amz-copy-source` -> HTTP `400 InvalidArgument` XML.
+- CopyObject missing source bucket or destination bucket -> HTTP `404 NoSuchBucket` XML.
+- CopyObject missing source object -> HTTP `404 NoSuchKey` XML.
+- CopyObject over quota -> HTTP `403 QuotaExceeded` XML before writing destination bytes or committing usage.
+- `?location` or `?versioning` missing bucket -> HTTP `404 NoSuchBucket` XML, not a ListObjects response.
+
+### 5. Good/Base/Bad Cases
+
+- Good: `aws s3api copy-object --bucket b --key copy.txt --copy-source b/source.txt` creates `data_root/b/copy.txt` with byte-for-byte identical native bytes, copied metadata/tags, and MD5 ETag of copied bytes.
+- Good: `aws s3api delete-objects --bucket b --delete 'Objects=[{Key=a.txt},{Key=missing.txt}],Quiet=false'` returns two deleted entries and only decrements usage/emits hooks for `a.txt` if it existed.
+- Base: `aws s3api get-bucket-location --bucket b` returns `LocationConstraint: null` for `us-east-1`; `get-bucket-versioning` returns an empty parsed object.
+- Bad: letting `PUT` with `x-amz-copy-source` fall through to normal PutObject, which creates a 0-byte destination object and reports the empty MD5 ETag.
+- Bad: applying normal PUT request-body quota middleware to CopyObject, because copy requests often have unknown or zero body length while the stored object size comes from the source.
+
+### 6. Tests Required
+
+- Unit test storage `CopyObject` byte equality, MD5 ETag, content type, user metadata, tags, missing source bucket/key, missing destination bucket, and destination overwrite behavior.
+- Unit test handler CopyObject success response, quota rejection before copy, usage commit after success, and ObjectCreated hook emission.
+- Unit test DeleteObjects existing plus missing key, quiet mode, malformed XML/empty key, missing bucket, usage decrement, and ObjectDeleted hook emission only for existing keys.
+- Unit test route/middleware priority: `x-amz-copy-source` bypasses normal PUT quota middleware and dispatches before normal PutObject; tagging and multipart routes keep priority.
+- Unit test bucket probes return LocationConstraint/VersioningConfiguration and missing buckets return NoSuchBucket instead of ListBucketResult.
+- aws-cli smoke for `copy-object`, `get-object` byte compare, metadata/tags round trip, `delete-objects`, `get-bucket-location`, and `get-bucket-versioning`.
+
+### 7. Wrong vs Correct
+
+Wrong:
+
+```go
+if r.Method == http.MethodPut {
+    objectHandler.Put(w, r, bucket, key) // copy requests write an empty body
+}
+```
+
+Correct:
+
+```go
+if r.Method == http.MethodPut {
+    if r.Header.Get("x-amz-copy-source") != "" {
+        objectHandler.Copy(w, r, bucket, key)
+        return
+    }
+    objectHandler.Put(w, r, bucket, key)
+}
+```
+
+Wrong:
+
+```go
+if r.Method == http.MethodPut {
+    checkQuota(r.ContentLength)
+}
+```
+
+Correct:
+
+```go
+if r.Method == http.MethodPut && r.Header.Get("x-amz-copy-source") == "" {
+    checkQuota(contentLengthForQuota(r))
+}
+```
 
 ## Scenario: Multipart Uploads And Metadata Sidecars
 

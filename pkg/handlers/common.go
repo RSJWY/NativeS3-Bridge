@@ -76,6 +76,10 @@ func errorMessage(code string) string {
 		return "The specified bucket is not valid."
 	case "InvalidRange":
 		return "The requested range is not satisfiable."
+	case "BadDigest":
+		return "The Content-MD5 you specified did not match what we received."
+	case "InvalidDigest":
+		return "The Content-MD5 you specified was invalid."
 	case "MethodNotAllowed":
 		return "The specified method is not allowed."
 	case "AccessDenied":
