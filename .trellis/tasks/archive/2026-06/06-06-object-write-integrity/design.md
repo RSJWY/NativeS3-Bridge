@@ -1,69 +1,74 @@
-# Object Write Integrity Design
+# Design: Object Write Integrity
 
-## Scope
+## Architecture And Boundaries
 
-This task covers single-part object PUT through `pkg/handlers/object.go` and native filesystem writes in `pkg/storage/file_backend.go`. It preserves existing native object layout, sidecar metadata, quota accounting, hooks, and CopyObject behavior.
+The integrity gate belongs at two layers:
 
-## Current State
+1. HTTP handler layer parses and validates the optional `Content-MD5` header.
+2. File storage layer verifies the expected digest against bytes actually streamed to disk before publishing the temporary file with `rename`.
 
-- `FileBackend.PutObjectWithMetadata` already writes to `<target>.tmp-<random>`, computes MD5 while streaming, calls `fsync`, closes, and renames to the final object path.
-- `FileBackend.CopyObject` already uses the same temp-file/rename shape and recomputes MD5 ETag for the copied bytes.
-- `ObjectHandler.Put` does not parse checksum headers and can only call `PutObjectWithMetadata(bucket, key, body, contentType, metadata)`.
-- `writeStorageError` has no storage error path for checksum mismatch, and `errorMessage` has no `BadDigest` text.
-
-## Proposed Contract
-
-Add a storage-level PUT options path for checksum validation while leaving the existing `Backend` interface stable for simple implementations.
-
-Suggested shape:
+The existing `storage.Backend` interface remains unchanged. Any new write option is exposed through an optional interface, for example:
 
 ```go
-type PutObjectOptions struct {
-    ContentType    string
-    Metadata       map[string]string
-    ContentMD5     []byte
-    ContentSHA256  string
-}
-
-func (b *FileBackend) PutObjectWithOptions(bucket, key string, r io.Reader, opts PutObjectOptions) (ObjectInfo, error)
+PutObjectWithOptions(bucket, key string, r io.Reader, opts storage.PutOptions) (storage.ObjectInfo, error)
 ```
 
-Existing methods can delegate:
-
-```go
-PutObject(...) -> PutObjectWithOptions(...)
-PutObjectWithMetadata(...) -> PutObjectWithOptions(...)
-```
-
-`ObjectHandler.Put` should prefer a backend capability interface with `PutObjectWithOptions`, falling back to the existing methods only if unavailable.
+`ObjectHandler.Put` should prefer that optional interface when available, then fall back to `PutObjectWithMetadata` or `PutObject` for older backend implementations. This keeps external or test backend compatibility.
 
 ## Data Flow
 
-1. Handler extracts user metadata as today.
-2. Handler parses checksum headers:
-   - `Content-MD5`: base64 decode to exactly 16 bytes.
-   - `x-amz-content-sha256`: if it is a concrete lowercase/uppercase 64-character hex string, normalize to lowercase and pass it as expected SHA-256.
-   - Compatibility sentinels such as `UNSIGNED-PAYLOAD` are ignored for checksum comparison.
-3. Handler calls `PutObjectWithOptions` when supported.
-4. Storage streams request body once into the temp file while updating MD5 and SHA-256 hashers as needed.
-5. After copy, before rename, storage compares computed digests against expected values.
-6. On mismatch, storage closes/removes the temp file and returns a checksum error. The final target path is never renamed over.
-7. On success, storage renames the temp file, writes sidecar metadata, updates content type cache, and returns `ObjectInfo` with the MD5 ETag.
-8. Handler maps checksum mismatch to `BadDigest`, writes no success headers, and skips usage commit/hook emission because `Put` already returns on error.
+1. `ObjectHandler.Put` reads `Content-MD5` without consuming `r.Body`.
+2. Empty header means no expected digest.
+3. Non-empty header is trimmed, decoded with standard base64, and must decode to exactly `md5.Size` bytes.
+4. Invalid header returns `InvalidDigest` with HTTP 400 before any storage write.
+5. Valid header is converted to lowercase hex and passed to the file backend as `ExpectedMD5`.
+6. `FileBackend` writes to `<target>.tmp-<random>` with `O_CREATE|O_EXCL|O_WRONLY`, streams `r` through `io.MultiWriter(file, md5Hash)`, calls `f.Sync()`, then closes.
+7. If copy, sync, or close fails, remove the temp file and return the first error.
+8. Compute lowercase hex digest from the hash.
+9. If `ExpectedMD5` is non-empty and does not match the computed digest, remove the temp file and return `storage.ErrBadDigest` before `rename`.
+10. Only after the digest gate passes, `os.Rename(tmp, target)` publishes the object.
+11. Sidecar metadata is written only after the final object exists; digest mismatch must not write sidecar metadata.
 
-## Error Mapping
+## Error Contracts
 
-- Checksum mismatch should map to HTTP 400 S3 XML code `BadDigest`.
-- Malformed `Content-MD5` is the only remaining product ambiguity. AWS distinguishes malformed digest (`InvalidDigest`) from mismatch (`BadDigest`), but the task goal explicitly names `BadDigest` for mismatches. The recommended implementation is `InvalidDigest` for malformed base64/length and `BadDigest` for decoded digest mismatch.
-- Malformed concrete `x-amz-content-sha256` that is neither a known compatibility sentinel nor a 64-character hex digest should be treated as a bad digest input before writing.
+- Malformed `Content-MD5`: `InvalidDigest`, HTTP 400.
+- Well-formed but mismatched `Content-MD5`: `BadDigest`, HTTP 400.
+- Storage-level digest mismatch is represented by `storage.ErrBadDigest` so `writeStorageError` can map it to `BadDigest`.
+- Other filesystem errors continue to map to `InternalError` unless an existing storage sentinel applies.
+- Error response messages must be present in `pkg/handlers/common.go:errorMessage` for both `BadDigest` and `InvalidDigest`.
+
+## Atomicity And Cleanup
+
+The existing temp-file + rename shape is the correct base and should not be replaced.
+
+Required cleanup points:
+
+- `io.Copy` error: remove temp file.
+- `f.Sync` error: remove temp file after attempting close.
+- `f.Close` error: remove temp file.
+- digest mismatch: remove temp file before returning `ErrBadDigest`.
+- `os.Rename` error: remove temp file.
+
+Directory fsync trade-off:
+
+- `f.Sync()` protects file contents before rename, but POSIX durability of the rename directory entry can require opening and syncing the parent directory.
+- Adding best-effort parent directory fsync after successful rename improves crash durability, but a failure after rename cannot safely be handled by deleting the object because the object has already been published.
+- Recommended implementation: if code is touched in this area, add a small best-effort or explicit `syncDir(filepath.Dir(target))` after successful rename and before returning success. If it returns an error, surface the error as an internal write failure only if the object publication semantics are still acceptable and tests are adjusted. Otherwise document that the project currently guarantees atomic visibility, not full crash-durable directory-entry persistence.
 
 ## Compatibility Notes
 
-- Do not require checksum headers; existing clients with no checksum header must behave exactly as today.
-- Do not compare `UNSIGNED-PAYLOAD` to object bytes. It is a SigV4 compatibility marker, not a body checksum.
-- Keep single-part ETag as lowercase hex MD5. The SHA-256 validation path must not change ETag semantics.
-- Keep `Backend` interface source-compatible by adding an optional capability interface rather than changing the core `Backend` interface.
+- Do not require every backend implementation to understand `ExpectedMD5`.
+- Do not change multipart part upload behavior in this task. Multipart ETags are not raw object MD5 and are outside the requested `Content-MD5` single PUT scope.
+- Do not apply request `Content-MD5` validation to `PUT Object - Copy` unless product scope explicitly expands; copy requests have no client body bytes to compare against.
+- Do not read the full request body into memory. Integrity must remain streaming.
 
-## Rollback Shape
+## Existing Worktree Findings To Reuse
 
-The change should be localized to checksum parsing, optional PUT options, storage digest comparison, error mapping, and tests. If regressions appear, fallback is to route `ObjectHandler.Put` back to `PutObjectWithMetadata` and remove the new capability path while leaving existing atomic write behavior intact.
+During planning, related uncommitted code was observed:
+
+- `pkg/storage/file_backend.go` already has `PutOptions.ExpectedMD5`, `ErrBadDigest`, and pre-rename digest comparison.
+- `pkg/handlers/object.go` already has `parseContentMD5`, optional `PutObjectWithOptions` dispatch, `InvalidDigest` handling, and `BadDigest` storage error mapping.
+- `pkg/handlers/common.go` already has `BadDigest` and `InvalidDigest` messages.
+- `pkg/storage/integrity_test.go` and `pkg/server/ops_test.go` already contain partial coverage.
+
+Implementation should verify and complete these changes, not duplicate them.

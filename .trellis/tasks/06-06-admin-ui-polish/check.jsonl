@@ -1,1 +1,2 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Verify UI polish preserves Vue/Vite/ECharts stack, API/auth contracts, secret handling, bucket UX, responsive layout, and required build checks."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Verify repeated UI states use consistent styling/patterns rather than divergent one-off implementations."}

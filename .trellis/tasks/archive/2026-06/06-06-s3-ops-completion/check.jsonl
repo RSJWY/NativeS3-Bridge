@@ -1,3 +1,1 @@
-{"file":".trellis/spec/backend/storage-guidelines.md","reason":"Verify native object bytes, sidecar preservation, ETag behavior, and S3 error mapping after changes."}
-{"file":".trellis/spec/backend/auth-quota-guidelines.md","reason":"Verify CopyObject/DeleteObjects quota commits and anonymous access boundaries remain correct."}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check routing-to-handler-to-storage data flow and XML contract consistency."}
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}

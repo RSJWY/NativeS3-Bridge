@@ -5,13 +5,14 @@
         <h1>密钥管理</h1>
         <p class="muted">创建访问密钥，调整容量配额，启用或禁用 S3 访问。</p>
       </div>
-      <button class="primary-button" type="button" @click="openCreate">新建密钥</button>
+      <button class="primary-button" type="button" :disabled="loading || tableMutating" @click="openCreate">新建密钥</button>
     </div>
 
     <div v-if="error" class="notice error-notice">{{ error }}</div>
 
     <section class="panel">
-      <table class="data-table">
+      <div class="table-scroll">
+        <table class="data-table">
         <thead>
           <tr>
             <th>Access Key</th>
@@ -23,41 +24,48 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-if="loading">
+          <tr v-if="loading" class="state-row">
             <td colspan="6">加载中…</td>
           </tr>
-          <tr v-else-if="credentials.length === 0">
+          <tr v-else-if="credentials.length === 0" class="state-row">
             <td colspan="6">暂无密钥。</td>
           </tr>
           <tr v-for="credential in credentials" :key="credential.id">
             <td><code>{{ credential.access_key }}</code></td>
             <td>{{ credential.name || '未命名' }}</td>
-            <td>{{ credential.status === 'enabled' ? '启用' : '禁用' }}</td>
+            <td>
+              <span :class="['status-badge', credential.status === 'enabled' ? 'status-enabled' : 'status-disabled']">
+                {{ credential.status === 'enabled' ? '启用' : '禁用' }}
+              </span>
+            </td>
             <td>{{ formatBytes(credential.used_bytes) }} / {{ formatQuota(credential.quota_bytes) }}</td>
             <td>{{ new Date(credential.created_at).toLocaleString() }}</td>
             <td class="actions-cell">
-              <button class="secondary-button" type="button" @click="openEdit(credential)">编辑</button>
-              <button class="secondary-button" type="button" @click="toggleStatus(credential)">
-                {{ credential.status === 'enabled' ? '禁用' : '启用' }}
+              <button class="secondary-button" type="button" :disabled="tableMutating" @click="openEdit(credential)">编辑</button>
+              <button class="secondary-button" type="button" :disabled="tableMutating" @click="toggleStatus(credential)">
+                {{ togglingCredential === credential.id ? '更新中…' : credential.status === 'enabled' ? '禁用' : '启用' }}
               </button>
-              <button class="danger-button" type="button" @click="remove(credential)">删除</button>
+              <button class="danger-button" type="button" :disabled="tableMutating" @click="remove(credential)">
+                {{ deletingCredential === credential.id ? '删除中…' : '删除' }}
+              </button>
             </td>
           </tr>
         </tbody>
-      </table>
+        </table>
+      </div>
     </section>
 
     <div v-if="showForm" class="modal-backdrop" @click.self="closeForm">
       <form class="modal-card" @submit.prevent="saveForm">
         <h2>{{ editing ? '编辑密钥' : '新建密钥' }}</h2>
         <label for="credential-name">名称</label>
-        <input id="credential-name" v-model="form.name" type="text" maxlength="128" />
+        <input id="credential-name" v-model="form.name" type="text" maxlength="128" :disabled="saving" />
         <label for="quota-bytes">配额字节数（0 表示不限）</label>
-        <input id="quota-bytes" v-model="form.quotaBytes" type="number" min="0" step="1" />
+        <input id="quota-bytes" v-model="form.quotaBytes" type="number" min="0" step="1" :disabled="saving" />
         <p v-if="formError" class="error-text">{{ formError }}</p>
         <div class="modal-actions">
-          <button class="secondary-button" type="button" @click="closeForm">取消</button>
-          <button class="primary-button" type="submit" :disabled="saving">保存</button>
+          <button class="secondary-button" type="button" :disabled="saving" @click="closeForm">取消</button>
+          <button class="primary-button" type="submit" :disabled="saving">{{ saving ? '保存中…' : '保存' }}</button>
         </div>
       </form>
     </div>
@@ -79,19 +87,22 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { adminApi, type CreatedCredential, type Credential } from '../api/client'
 import { formatBytes, formatQuota, parseQuotaToBytes } from '../utils/format'
 
 const credentials = ref<Credential[]>([])
 const loading = ref(false)
 const saving = ref(false)
+const togglingCredential = ref<number | null>(null)
+const deletingCredential = ref<number | null>(null)
 const error = ref('')
 const formError = ref('')
 const showForm = ref(false)
 const editing = ref<Credential | null>(null)
 const created = ref<CreatedCredential | null>(null)
 const form = reactive({ name: '', quotaBytes: '0' })
+const tableMutating = computed(() => togglingCredential.value !== null || deletingCredential.value !== null)
 
 onMounted(load)
 
@@ -108,6 +119,7 @@ async function load() {
 }
 
 function openCreate() {
+  if (tableMutating.value) return
   editing.value = null
   form.name = ''
   form.quotaBytes = '0'
@@ -116,6 +128,7 @@ function openCreate() {
 }
 
 function openEdit(credential: Credential) {
+  if (tableMutating.value) return
   editing.value = credential
   form.name = credential.name
   form.quotaBytes = String(credential.quota_bytes)
@@ -124,10 +137,12 @@ function openEdit(credential: Credential) {
 }
 
 function closeForm() {
+  if (saving.value) return
   showForm.value = false
 }
 
 async function saveForm() {
+  if (saving.value) return
   const quota = parseQuotaToBytes(form.quotaBytes)
   if (quota === null) {
     formError.value = '配额必须是非负整数且不能超过安全范围'
@@ -151,26 +166,34 @@ async function saveForm() {
 }
 
 async function toggleStatus(credential: Credential) {
+  if (tableMutating.value) return
   const nextStatus = credential.status === 'enabled' ? 'disabled' : 'enabled'
+  togglingCredential.value = credential.id
   error.value = ''
   try {
     await adminApi.updateCredential(credential.id, { status: nextStatus })
     await load()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '更新状态失败'
+  } finally {
+    togglingCredential.value = null
   }
 }
 
 async function remove(credential: Credential) {
+  if (tableMutating.value) return
   if (!window.confirm(`确认删除密钥 ${credential.access_key}？`)) {
     return
   }
+  deletingCredential.value = credential.id
   error.value = ''
   try {
     await adminApi.deleteCredential(credential.id)
     await load()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '删除密钥失败'
+  } finally {
+    deletingCredential.value = null
   }
 }
 </script>

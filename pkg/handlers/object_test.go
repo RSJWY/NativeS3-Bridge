@@ -71,7 +71,7 @@ func TestDeleteObjectsDeletesExistingAndReportsMissing(t *testing.T) {
 	if len(emitter.events) != 1 || emitter.events[0].Type != hooks.ObjectDeleted || emitter.events[0].Key != "a.txt" {
 		t.Fatalf("events = %+v", emitter.events)
 	}
-	var resp deleteObjectsResult
+	var resp deleteResult
 	if err := xml.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}

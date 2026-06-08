@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/xml"
 	"errors"
 	"net/http"
 
@@ -122,11 +123,13 @@ type bucketItem struct {
 }
 
 type locationConstraint struct {
-	XMLName struct{} `xml:"LocationConstraint"`
-	XMLNS   string   `xml:"xmlns,attr"`
+	XMLName  xml.Name `xml:"LocationConstraint"`
+	XMLNS    string   `xml:"xmlns,attr"`
+	Location string   `xml:",chardata"`
 }
 
 type versioningConfiguration struct {
-	XMLName struct{} `xml:"VersioningConfiguration"`
+	XMLName xml.Name `xml:"VersioningConfiguration"`
 	XMLNS   string   `xml:"xmlns,attr"`
+	Status  string   `xml:"Status,omitempty"`
 }

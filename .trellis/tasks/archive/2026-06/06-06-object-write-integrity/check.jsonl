@@ -1,2 +1,4 @@
-{"file":".trellis/spec/backend/storage-guidelines.md","reason":"Verify atomic native file write, MD5 ETag, error mapping, sidecar behavior, and storage regression coverage."}
-{"file":".trellis/spec/backend/auth-quota-guidelines.md","reason":"Verify failed checksum validation does not commit quota/hooks and does not break SigV4 payload hash compatibility."}
+{"file":".trellis/spec/backend/index.md","reason":"Backend spec entry point for quality review."}
+{"file":".trellis/spec/backend/storage-guidelines.md","reason":"Review storage atomicity, ETag, S3 error mapping, and required tests against project contracts."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Review S3 XML error code/message behavior for BadDigest and InvalidDigest."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Backend quality checklist location for final verification."}
