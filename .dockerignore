@@ -1,0 +1,16 @@
+.git
+.github
+.trellis
+dist
+data
+state
+configs/config.yaml
+natives3.db
+*.db
+*.sqlite
+*.sqlite3
+.env
+natives3bridge
+*.tar.gz
+pkg/webadmin/ui/dist
+pkg/webadmin/ui/node_modules

@@ -1,8 +1,8 @@
 # NativeS3-Bridge
 
-> 轻量、高性能的本地 S3 桥接中间件。把操作系统上的**真实目录**透明映射为标准的 Amazon S3 兼容 API，配套一个 Vue3 单密码管理后台（含 ECharts 仪表盘），编译为**无外部运行时依赖的单文件二进制**，便于局域网跨平台一键部署。
+> 轻量、高性能的本地 S3 桥接中间件。把操作系统上的**真实目录**透明映射为标准的 Amazon S3 兼容 API，配套一个 Vue3 单密码管理后台（含 ECharts 仪表盘），可发布为**无外部运行时依赖的单文件二进制**或 Docker 镜像，便于局域网跨平台一键部署。
 
-NativeS3-Bridge exposes a local native directory tree through a standard S3-compatible API and ships with a single-password web admin UI (Vue3 + ECharts). It builds into a single dependency-free binary for cross-platform LAN deployment.
+NativeS3-Bridge exposes a local native directory tree through a standard S3-compatible API and ships with a single-password web admin UI (Vue3 + ECharts). It builds into a single dependency-free binary or Docker image for cross-platform LAN deployment.
 
 ---
 
@@ -54,6 +54,7 @@ NativeS3-Bridge exposes a local native directory tree through a standard S3-comp
 ```
 NativeS3-Bridge/
 ├── cmd/natives3bridge/main.go     # 唯一入口：装配各模块并启动
+├── Dockerfile                     # 多阶段构建容器镜像
 ├── pkg/
 │   ├── config/                    # YAML 配置加载 + 校验 + 默认值
 │   ├── db/                        # GORM 三驱动入口、模型、AutoMigrate
@@ -65,7 +66,7 @@ NativeS3-Bridge/
 │   ├── hooks/                     # 事件类型、异步分发管理器、Webhook
 │   └── webadmin/                  # 管理 API、单密码鉴权、go:embed 前端
 │       └── ui/                    # Vue3 + Vite 源码与 dist 构建产物
-├── configs/                       # 配置示例
+├── configs/                       # 配置示例（含 Docker 路径版本）
 ├── scripts/                       # 冒烟测试脚本
 └── README.md
 ```
@@ -97,7 +98,7 @@ go build -o natives3bridge ./cmd/natives3bridge
 
 ### GitHub Tag 发布
 
-仓库包含 GitHub Actions 发布流程：向 GitHub 推送任意 tag 会触发构建，并创建对应 GitHub Release。
+仓库包含 GitHub Actions 发布流程：向 GitHub 推送任意 tag 会触发构建，创建对应 GitHub Release，并发布 Docker 镜像到 GHCR。
 
 ```bash
 git tag v0.1.0
@@ -110,13 +111,29 @@ Release 流程会执行：
 - `go vet ./...` 与 `go test ./...`。
 - 交叉编译 `linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`、`windows/amd64`。
 - 上传 `.tar.gz` 二进制包和 `checksums.txt` 到 GitHub Release。
+- 构建并推送多架构 Docker 镜像 `linux/amd64`、`linux/arm64` 到 GHCR。
+
+也可以在 GitHub Actions 页面手动运行 `Release` workflow，输入一个已存在的 tag 进行构建发布。
+
+默认镜像地址会使用仓库名自动生成并转为小写。本仓库镜像为：
+
+```text
+ghcr.io/rsjwy/natives3-bridge:<tag>
+ghcr.io/rsjwy/natives3-bridge:latest
+```
 
 ### 3. 准备配置
 
-二进制默认读取 `configs/config.yaml`（可用 `-config` 覆盖）。仓库未提供该文件，请从示例复制：
+二进制默认读取 `configs/config.yaml`（可用 `-config` 覆盖）。仓库未提供该文件，请从示例复制。二进制部署使用普通示例：
 
 ```bash
-cp configs/config.example.yaml configs/config.yaml
+cp -n configs/config.example.yaml configs/config.yaml
+```
+
+Docker 部署建议使用容器路径示例，数据目录为 `/data`，SQLite 与分段临时目录位于 `/state`：
+
+```bash
+cp -n configs/config.docker.example.yaml configs/config.yaml
 ```
 
 编辑 `configs/config.yaml`，至少设置管理后台首次启动密码：
@@ -127,6 +144,8 @@ webadmin:
 ```
 
 ### 4. 启动
+
+二进制启动：
 
 ```bash
 # 方式 A：使用默认配置路径
@@ -139,6 +158,47 @@ webadmin:
 ./natives3bridge -config configs/config.yaml \
   -seed-access-key TESTKEY -seed-secret-key TESTSECRET -seed-quota-bytes 0
 ```
+
+Docker 启动：
+
+```bash
+mkdir -p data state
+sudo chown -R 10001:10001 data state
+
+docker run -d --name natives3bridge \
+  --restart unless-stopped \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v "$(pwd)/configs/config.yaml:/app/configs/config.yaml:ro" \
+  -v "$(pwd)/data:/data" \
+  -v "$(pwd)/state:/state" \
+  ghcr.io/rsjwy/natives3-bridge:latest
+```
+
+Docker Compose 示例：
+
+```yaml
+services:
+  natives3bridge:
+    image: ghcr.io/rsjwy/natives3-bridge:latest
+    container_name: natives3bridge
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./configs/config.yaml:/app/configs/config.yaml:ro
+      - ./data:/data
+      - ./state:/state
+```
+
+容器镜像默认执行：
+
+```bash
+natives3bridge -config /app/configs/config.yaml
+```
+
+使用宿主机目录挂载时，容器内默认用户为 UID/GID `10001:10001`。如果 `/data` 或 `/state` 无法写入，请调整宿主机目录属主或权限。
 
 启动后：
 - S3 API 监听 `server.s3_addr`（默认 `0.0.0.0:9000`）
