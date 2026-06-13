@@ -4,8 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag to build, for example v1.0.0"
+        description: "Release tag to publish, for example v1.0.0"
         required: true
+        type: string
+      source_ref:
+        description: "Optional branch, tag, or commit to build. Defaults to the commit that triggered the workflow."
+        required: false
         type: string
   push:
     tags:
@@ -30,25 +34,41 @@ jobs:
         shell: bash
         env:
           INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_SOURCE_REF: ${{ github.event.inputs.source_ref }}
         run: |
           set -euo pipefail
 
           tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
           tag="${tag#refs/tags/}"
-          ref="refs/tags/${tag}"
+          source_ref="${INPUT_SOURCE_REF:-${GITHUB_SHA}}"
           docker_tag="${tag//\//-}"
           docker_tag="${docker_tag//+/-}"
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
 
+          if [[ -z "${tag}" ]]; then
+            echo "::error::Release tag is required."
+            exit 1
+          fi
+
+          if ! git check-ref-format "refs/tags/${tag}"; then
+            echo "::error::Invalid release tag: ${tag}"
+            exit 1
+          fi
+
+          if [[ -z "${source_ref}" ]]; then
+            echo "::error::Source ref is required."
+            exit 1
+          fi
+
           printf 'tag=%s\n' "${tag}" >> "${GITHUB_OUTPUT}"
-          printf 'ref=%s\n' "${ref}" >> "${GITHUB_OUTPUT}"
+          printf 'source_ref=%s\n' "${source_ref}" >> "${GITHUB_OUTPUT}"
           printf 'docker_tag=%s\n' "${docker_tag}" >> "${GITHUB_OUTPUT}"
           printf 'image=%s\n' "${image}" >> "${GITHUB_OUTPUT}"
 
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v5
         with:
-          ref: ${{ steps.release.outputs.ref }}
+          ref: ${{ steps.release.outputs.source_ref }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -56,6 +76,27 @@ jobs:
         id: revision
         shell: bash
         run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate release tag target
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.revision.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          remote_ref="refs/tags/${RELEASE_TAG}"
+
+          if git ls-remote --exit-code --refs origin "${remote_ref}" >/dev/null; then
+            git fetch --force origin "${remote_ref}:${remote_ref}"
+            existing_sha="$(git rev-list -n 1 "${remote_ref}")"
+
+            if [[ "${existing_sha}" != "${RELEASE_SHA}" ]]; then
+              echo "::error::Tag ${RELEASE_TAG} already exists at ${existing_sha}, but this run checked out ${RELEASE_SHA}."
+              echo "::error::Select ${remote_ref} as source_ref to rebuild that tag, or use a new release tag."
+              exit 1
+            fi
+          fi
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -129,17 +170,17 @@ jobs:
         run: sha256sum * > checksums.txt
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -154,11 +195,12 @@ jobs:
             org.opencontainers.image.version=${{ steps.release.outputs.tag }}
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           fail_on_unmatched_files: true
           generate_release_notes: true
           tag_name: ${{ steps.release.outputs.tag }}
+          target_commitish: ${{ steps.revision.outputs.sha }}
           files: |
             dist/*.tar.gz
             dist/checksums.txt

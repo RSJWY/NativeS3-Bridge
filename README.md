@@ -113,7 +113,9 @@ Release 流程会执行：
 - 上传 `.tar.gz` 二进制包和 `checksums.txt` 到 GitHub Release。
 - 构建并推送多架构 Docker 镜像 `linux/amd64`、`linux/arm64` 到 GHCR。
 
-也可以在 GitHub Actions 页面手动运行 `Release` workflow，输入一个已存在的 tag 进行构建发布。
+也可以在 GitHub Actions 页面手动运行 `Release` workflow，输入要发布的 tag 进行构建发布。
+手动运行时默认使用触发 workflow 的提交作为源码；如果输入的发布 tag 还不存在，workflow 会在当前构建提交上创建该 tag。
+如需从指定分支、tag 或 commit 构建，可填写可选的 `source_ref` 输入。
 
 默认镜像地址会使用仓库名自动生成并转为小写。本仓库镜像为：
 
