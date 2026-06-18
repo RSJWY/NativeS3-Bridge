@@ -38,6 +38,25 @@ webadmin:
   session_ttl_minutes: 720
   login_max_failures: 5
   login_lockout_window: "15m"
+  totp:
+    enabled: false
+    issuer: "NativeS3-Bridge"
+    account: "admin"
+    # Generate a base32 TOTP secret out of band for public admin deployments.
+    secret: ""
+  captcha:
+    enabled: false
+    provider: "turnstile"
+    site_key: ""
+    secret_key: ""
+    verify_url: "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+    timeout: "3s"
+  ops:
+    public_healthz: true
+    public_readyz: false
+    public_metrics: false
+    # Set a random bearer token to allow Prometheus to scrape /metrics without making it public.
+    metrics_token: ""
 
 rate_limit:
   anonymous_rps: 10

@@ -1,10 +1,13 @@
 package webadmin
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
+	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
 	dbpkg "github.com/RSJWY/NativeS3-Bridge/pkg/db"
 	"gorm.io/gorm"
 )
@@ -16,15 +19,26 @@ var errOpsDBUnavailable = errors.New("database unavailable")
 // and Prometheus scrapers must reach them without admin credentials. They
 // expose only aggregate counters, no secrets.
 type OpsHandler struct {
-	db *gorm.DB
+	db  *gorm.DB
+	cfg config.OpsConfig
 }
 
-func NewOpsHandler(gdb *gorm.DB) *OpsHandler {
-	return &OpsHandler{db: gdb}
+func NewOpsHandler(gdb *gorm.DB, cfgs ...config.OpsConfig) *OpsHandler {
+	cfg := config.OpsConfig{PublicHealthz: true, PublicReadyz: true, PublicMetrics: true}
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+		if !cfg.PublicHealthz && !cfg.PublicReadyz && !cfg.PublicMetrics && cfg.MetricsToken == "" {
+			cfg.PublicHealthz = true
+		}
+	}
+	return &OpsHandler{db: gdb, cfg: cfg}
 }
 
 // Healthz is a liveness probe: the process is up and serving.
 func (o *OpsHandler) Healthz(w http.ResponseWriter, r *http.Request) {
+	if !o.allowPublic(w, r, o.cfg.PublicHealthz) {
+		return
+	}
 	if !requireGet(w, r) {
 		return
 	}
@@ -35,6 +49,9 @@ func (o *OpsHandler) Healthz(w http.ResponseWriter, r *http.Request) {
 
 // Readyz is a readiness probe: dependencies (the database) are reachable.
 func (o *OpsHandler) Readyz(w http.ResponseWriter, r *http.Request) {
+	if !o.allowPublic(w, r, o.cfg.PublicReadyz) {
+		return
+	}
 	if !requireGet(w, r) {
 		return
 	}
@@ -53,6 +70,9 @@ func (o *OpsHandler) Readyz(w http.ResponseWriter, r *http.Request) {
 // and credential/bucket tables. Hand-written exposition keeps the dependency
 // surface minimal (no client_golang).
 func (o *OpsHandler) Metrics(w http.ResponseWriter, r *http.Request) {
+	if !o.allowMetrics(w, r) {
+		return
+	}
 	if !requireGet(w, r) {
 		return
 	}
@@ -104,6 +124,33 @@ func (o *OpsHandler) Metrics(w http.ResponseWriter, r *http.Request) {
 	bw.gauge("natives3_quota_bytes_total", "Sum of configured quota bytes", quotaBytes)
 	bw.gauge("natives3_used_bytes_total", "Sum of used bytes across credentials", usedBytes)
 	bw.gauge("natives3_database_up", "1 if the database is reachable, else 0", dbUp)
+}
+
+func (o *OpsHandler) allowPublic(w http.ResponseWriter, r *http.Request, allowed bool) bool {
+	if allowed {
+		return true
+	}
+	http.NotFound(w, r)
+	return false
+}
+
+func (o *OpsHandler) allowMetrics(w http.ResponseWriter, r *http.Request) bool {
+	if o.cfg.PublicMetrics {
+		return true
+	}
+	if o.cfg.MetricsToken == "" {
+		http.NotFound(w, r)
+		return false
+	}
+	const prefix = "Bearer "
+	value := r.Header.Get("Authorization")
+	token := strings.TrimSpace(strings.TrimPrefix(value, prefix))
+	if !strings.HasPrefix(value, prefix) || subtle.ConstantTimeCompare([]byte(token), []byte(o.cfg.MetricsToken)) != 1 {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="natives3-metrics"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
 }
 
 func (o *OpsHandler) pingDB() error {

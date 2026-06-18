@@ -164,7 +164,7 @@ func TestOpsMetricsExposesPrometheus(t *testing.T) {
 	}
 }
 
-func TestNewServerRegistersUnauthenticatedOpsAndProtectedAdminAPI(t *testing.T) {
+func TestNewServerBlocksReadyzAndMetricsByDefaultAndProtectsAdminAPI(t *testing.T) {
 	gdb := newWebadminTestDB(t)
 	webCfg := config.WebAdminConfig{PasswordHash: mustPasswordHash(t), SessionSecret: "test-session-secret", SessionTTLMinutes: 10}
 	serverCfg := config.ServerConfig{AdminAddr: "127.0.0.1:0"}
@@ -177,8 +177,20 @@ func TestNewServerRegistersUnauthenticatedOpsAndProtectedAdminAPI(t *testing.T) 
 
 	rr := httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unauthenticated metrics status = %d, want 404", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unauthenticated readyz status = %d, want 404", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if rr.Code != http.StatusOK {
-		t.Fatalf("unauthenticated metrics status = %d, want 200", rr.Code)
+		t.Fatalf("unauthenticated healthz status = %d, want 200", rr.Code)
 	}
 
 	rr = httptest.NewRecorder()
@@ -187,4 +199,52 @@ func TestNewServerRegistersUnauthenticatedOpsAndProtectedAdminAPI(t *testing.T) 
 		t.Fatalf("unauthenticated admin API status = %d, want 401", rr.Code)
 	}
 	assertJSONError(t, rr.Body.Bytes(), "unauthorized")
+}
+
+func TestNewServerAllowsConfiguredOpsEndpoints(t *testing.T) {
+	gdb := newWebadminTestDB(t)
+	webCfg := config.WebAdminConfig{
+		PasswordHash:      mustPasswordHash(t),
+		SessionSecret:     "test-session-secret",
+		SessionTTLMinutes: 10,
+		Ops: config.OpsConfig{
+			PublicHealthz: true,
+			PublicReadyz:  true,
+			PublicMetrics: true,
+		},
+	}
+	serverCfg := config.ServerConfig{AdminAddr: "127.0.0.1:0"}
+	credentialStore := s3auth.NewCredentialStore(gdb, time.Second)
+	bucketStore := storage.NewBucketStore(gdb, t.TempDir(), time.Second)
+	srv, err := NewServer(serverCfg, webCfg, gdb, credentialStore, bucketStore)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	for _, path := range []string{"/readyz", "/metrics"} {
+		rr := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200; body=%s", path, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestMetricsTokenAllowsPrivateScrape(t *testing.T) {
+	gdb := newWebadminTestDB(t)
+	ops := NewOpsHandler(gdb, config.OpsConfig{PublicHealthz: true, MetricsToken: "test-token"})
+
+	rr := httptest.NewRecorder()
+	ops.Metrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token status = %d, want 401", rr.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	ops.Metrics(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid token status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
 }

@@ -1,9 +1,12 @@
 package config
 
 import (
+	"encoding/base32"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -73,6 +76,32 @@ type WebAdminConfig struct {
 	SessionTTLMinutes      int           `yaml:"session_ttl_minutes"`
 	LoginMaxFailures       int           `yaml:"login_max_failures"`
 	LoginLockoutWindow     time.Duration `yaml:"login_lockout_window"`
+	TOTP                   TOTPConfig    `yaml:"totp"`
+	Captcha                CaptchaConfig `yaml:"captcha"`
+	Ops                    OpsConfig     `yaml:"ops"`
+}
+
+type TOTPConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Issuer  string `yaml:"issuer"`
+	Account string `yaml:"account"`
+	Secret  string `yaml:"secret"`
+}
+
+type CaptchaConfig struct {
+	Enabled   bool          `yaml:"enabled"`
+	Provider  string        `yaml:"provider"`
+	SiteKey   string        `yaml:"site_key"`
+	SecretKey string        `yaml:"secret_key"`
+	VerifyURL string        `yaml:"verify_url"`
+	Timeout   time.Duration `yaml:"timeout"`
+}
+
+type OpsConfig struct {
+	PublicHealthz bool   `yaml:"public_healthz"`
+	PublicReadyz  bool   `yaml:"public_readyz"`
+	PublicMetrics bool   `yaml:"public_metrics"`
+	MetricsToken  string `yaml:"metrics_token"`
 }
 
 func Load(path string) (*Config, error) {
@@ -140,6 +169,22 @@ func (c *Config) applyDefaults() {
 	if c.WebAdmin.LoginLockoutWindow == 0 {
 		c.WebAdmin.LoginLockoutWindow = 15 * time.Minute
 	}
+	if c.WebAdmin.TOTP.Issuer == "" {
+		c.WebAdmin.TOTP.Issuer = "NativeS3-Bridge"
+	}
+	if c.WebAdmin.TOTP.Account == "" {
+		c.WebAdmin.TOTP.Account = "admin"
+	}
+	if c.WebAdmin.Captcha.Provider == "" {
+		c.WebAdmin.Captcha.Provider = "turnstile"
+	}
+	if c.WebAdmin.Captcha.VerifyURL == "" {
+		c.WebAdmin.Captcha.VerifyURL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+	}
+	if c.WebAdmin.Captcha.Timeout == 0 {
+		c.WebAdmin.Captcha.Timeout = 3 * time.Second
+	}
+	c.WebAdmin.Ops.PublicHealthz = true
 	if c.RateLimit.AnonymousRPS <= 0 {
 		c.RateLimit.AnonymousRPS = 10
 	}
@@ -165,6 +210,34 @@ func (c *Config) Validate() error {
 	if adminTLS.Enabled && (adminTLS.CertFile == "" || adminTLS.KeyFile == "") {
 		return fmt.Errorf("server.admin_tls cert_file and key_file are required when enabled")
 	}
+	if c.WebAdmin.TOTP.Enabled {
+		if _, err := decodeTOTPSecret(c.WebAdmin.TOTP.Secret); err != nil {
+			return fmt.Errorf("webadmin.totp.secret must be valid base32: %w", err)
+		}
+	}
+	if c.WebAdmin.Captcha.Enabled {
+		if strings.TrimSpace(c.WebAdmin.Captcha.Provider) == "" {
+			return fmt.Errorf("webadmin.captcha.provider is required when captcha is enabled")
+		}
+		if strings.ToLower(strings.TrimSpace(c.WebAdmin.Captcha.Provider)) != "turnstile" {
+			return fmt.Errorf("webadmin.captcha.provider must be turnstile")
+		}
+		if strings.TrimSpace(c.WebAdmin.Captcha.SiteKey) == "" {
+			return fmt.Errorf("webadmin.captcha.site_key is required when captcha is enabled")
+		}
+		if strings.TrimSpace(c.WebAdmin.Captcha.SecretKey) == "" {
+			return fmt.Errorf("webadmin.captcha.secret_key is required when captcha is enabled")
+		}
+		if strings.TrimSpace(c.WebAdmin.Captcha.VerifyURL) == "" {
+			return fmt.Errorf("webadmin.captcha.verify_url is required when captcha is enabled")
+		}
+		if c.WebAdmin.Captcha.Timeout <= 0 {
+			return fmt.Errorf("webadmin.captcha.timeout must be positive when captcha is enabled")
+		}
+	}
+	if isExampleSecret(c.WebAdmin.Ops.MetricsToken) {
+		return fmt.Errorf("webadmin.ops.metrics_token must not use the example value")
+	}
 
 	switch c.Database.Driver {
 	case "sqlite", "mysql", "postgres":
@@ -174,4 +247,70 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("database.driver must be one of sqlite, mysql, postgres")
 	}
+}
+
+func (c *Config) ProductionWarnings() []string {
+	var warnings []string
+	adminTLS := c.Server.EffectiveAdminTLS()
+	if c.WebAdmin.SessionSecret == "change-me-32bytes-random" {
+		warnings = append(warnings, "webadmin.session_secret still uses the example value")
+	}
+	if c.WebAdmin.AdminBootstrapPassword != "" {
+		warnings = append(warnings, "webadmin.admin_bootstrap_password is set; copy the generated hash and clear the bootstrap password")
+	}
+	if c.WebAdmin.PasswordHash == "" {
+		warnings = append(warnings, "webadmin.password_hash is empty; admin login is disabled until a bcrypt hash is configured")
+	}
+	if isPublicListenAddr(c.Server.AdminAddr) && !adminTLS.Enabled {
+		warnings = append(warnings, "server.admin_addr listens publicly without admin TLS; use a trusted HTTPS reverse proxy or enable server.admin_tls")
+	}
+	if c.RateLimit.TrustForwarded {
+		warnings = append(warnings, "rate_limit.trust_forwarded is enabled; only use it when a trusted proxy overwrites forwarded headers")
+	}
+	if !c.WebAdmin.TOTP.Enabled {
+		warnings = append(warnings, "webadmin.totp.enabled is false; public admin deployments should require TOTP")
+	}
+	if !c.WebAdmin.Captcha.Enabled {
+		warnings = append(warnings, "webadmin.captcha.enabled is false; public admin deployments should enable human verification")
+	}
+	if c.WebAdmin.Ops.PublicReadyz {
+		warnings = append(warnings, "webadmin.ops.public_readyz is true; avoid exposing /readyz on public admin hostnames")
+	}
+	if c.WebAdmin.Ops.PublicMetrics && c.WebAdmin.Ops.MetricsToken == "" {
+		warnings = append(warnings, "webadmin.ops.public_metrics is true without a metrics token; avoid exposing /metrics publicly")
+	}
+	return warnings
+}
+
+func decodeTOTPSecret(secret string) ([]byte, error) {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(secret), " ", ""))
+	if normalized == "" {
+		return nil, fmt.Errorf("secret is empty")
+	}
+	decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.TrimRight(normalized, "="))
+	if err != nil {
+		return nil, err
+	}
+	if len(decoded) < 10 {
+		return nil, fmt.Errorf("secret is too short")
+	}
+	return decoded, nil
+}
+
+func isExampleSecret(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "", "change-me", "change-me-token", "change-me-32bytes-random":
+		return value != ""
+	default:
+		return false
+	}
+}
+
+func isPublicListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(host, "[]")
+	return host == "" || host == "0.0.0.0" || host == "::"
 }

@@ -45,6 +45,19 @@ export interface RequestTrendItem {
   bytes_out: number
 }
 
+export interface AuthSettings {
+  totp_required: boolean
+  captcha_enabled: boolean
+  captcha_provider: string
+  captcha_site_key: string
+}
+
+export interface LoginInput {
+  password: string
+  totp_code?: string
+  captcha_token?: string
+}
+
 interface RequestOptions extends RequestInit {
   skipAuthRedirect?: boolean
 }
@@ -92,10 +105,13 @@ function isErrorPayload(payload: unknown): payload is { error: string } {
 }
 
 export const adminApi = {
-  login(password: string) {
+  authSettings() {
+    return apiFetch<AuthSettings>('/api/admin/auth-settings', { skipAuthRedirect: true })
+  },
+  login(input: LoginInput) {
     return apiFetch<{ ok: boolean }>('/api/admin/login', {
       method: 'POST',
-      body: JSON.stringify({ password }),
+      body: JSON.stringify(input),
       skipAuthRedirect: true
     })
   },

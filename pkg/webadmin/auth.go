@@ -21,18 +21,26 @@ import (
 const sessionCookieName = "natives3_admin_session"
 
 type Auth struct {
-	passwordHash   []byte
-	sessionKey     []byte
-	ttl            time.Duration
-	failureDelay   time.Duration
-	cookieSecure   bool
-	trustForwarded bool
-	limiter        *loginLimiter
-	now            func() time.Time
+	passwordHash    []byte
+	sessionKey      []byte
+	ttl             time.Duration
+	failureDelay    time.Duration
+	cookieSecure    bool
+	trustForwarded  bool
+	totpEnabled     bool
+	totpVerifier    TOTPVerifier
+	captchaEnabled  bool
+	captchaVerifier CaptchaVerifier
+	captchaProvider string
+	captchaSiteKey  string
+	limiter         *loginLimiter
+	now             func() time.Time
 }
 
 type loginRequest struct {
-	Password string `json:"password"`
+	Password     string `json:"password"`
+	TOTPCode     string `json:"totp_code"`
+	CaptchaToken string `json:"captcha_token"`
 }
 
 type sessionPayload struct {
@@ -62,13 +70,30 @@ func NewAuth(cfg config.WebAdminConfig, secureCookie ...bool) *Auth {
 	if cfg.PasswordHash == "" {
 		slog.Warn("webadmin password_hash is empty; admin login is disabled until a bcrypt hash is configured")
 	}
+	var totpVerifier TOTPVerifier
+	if cfg.TOTP.Enabled {
+		verifier, err := newTOTPVerifier(cfg.TOTP.Secret)
+		if err != nil {
+			slog.Error("configure webadmin totp", "error", err)
+		} else {
+			totpVerifier = verifier
+		}
+	}
 	a := &Auth{
-		passwordHash: []byte(cfg.PasswordHash),
-		sessionKey:   []byte(cfg.SessionSecret),
-		ttl:          ttl,
-		failureDelay: 500 * time.Millisecond,
-		cookieSecure: secure,
-		now:          time.Now,
+		passwordHash:    []byte(cfg.PasswordHash),
+		sessionKey:      []byte(cfg.SessionSecret),
+		ttl:             ttl,
+		failureDelay:    500 * time.Millisecond,
+		cookieSecure:    secure,
+		totpEnabled:     cfg.TOTP.Enabled,
+		totpVerifier:    totpVerifier,
+		captchaEnabled:  cfg.Captcha.Enabled,
+		captchaProvider: cfg.Captcha.Provider,
+		captchaSiteKey:  cfg.Captcha.SiteKey,
+		now:             time.Now,
+	}
+	if cfg.Captcha.Enabled {
+		a.captchaVerifier = newCaptchaVerifier(cfg.Captcha)
 	}
 	a.limiter = newLoginLimiter(cfg.LoginMaxFailures, cfg.LoginLockoutWindow, a.now)
 	return a
@@ -92,10 +117,16 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
+	if a.captchaEnabled && (a.captchaVerifier == nil || !a.captchaVerifier.Verify(r.Context(), req.CaptchaToken, ip)) {
+		a.rejectLogin(w, ip)
+		return
+	}
 	if a.passwordHash == nil || bcrypt.CompareHashAndPassword(a.passwordHash, []byte(req.Password)) != nil {
-		a.limiter.recordFailure(ip)
-		time.Sleep(a.failureDelay)
-		writeJSONError(w, http.StatusUnauthorized, "invalid password")
+		a.rejectLogin(w, ip)
+		return
+	}
+	if a.totpEnabled && (a.totpVerifier == nil || !a.totpVerifier.Verify(req.TOTPCode, a.now().UTC())) {
+		a.rejectLogin(w, ip)
 		return
 	}
 	a.limiter.recordSuccess(ip)
@@ -118,6 +149,25 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_at": expires.Format(time.RFC3339)})
+}
+
+func (a *Auth) AuthSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"totp_required":    a.totpEnabled,
+		"captcha_enabled":  a.captchaEnabled,
+		"captcha_provider": a.captchaProvider,
+		"captcha_site_key": a.captchaSiteKey,
+	})
+}
+
+func (a *Auth) rejectLogin(w http.ResponseWriter, ip string) {
+	a.limiter.recordFailure(ip)
+	time.Sleep(a.failureDelay)
+	writeJSONError(w, http.StatusUnauthorized, "invalid login")
 }
 
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {

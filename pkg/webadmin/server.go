@@ -35,10 +35,11 @@ func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb 
 	}
 
 	mux := http.NewServeMux()
-	ops := NewOpsHandler(gdb)
+	ops := NewOpsHandler(gdb, webCfg.Ops)
 	mux.HandleFunc("/healthz", ops.Healthz)
 	mux.HandleFunc("/readyz", ops.Readyz)
 	mux.HandleFunc("/metrics", ops.Metrics)
+	mux.HandleFunc("/api/admin/auth-settings", authenticator.AuthSettings)
 	mux.HandleFunc("/api/admin/login", authenticator.Login)
 	mux.Handle("/api/admin/logout", authenticator.Middleware(http.HandlerFunc(authenticator.Logout)))
 	mux.Handle("/api/admin/credentials", authenticator.Middleware(http.HandlerFunc(api.Credentials)))

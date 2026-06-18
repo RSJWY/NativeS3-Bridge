@@ -221,6 +221,7 @@ webadmin password_hash generated from admin_bootstrap_password; copy this hash i
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `-config` | `configs/config.yaml` | 配置文件路径 |
+| `-check-config` | `false` | 只加载并校验配置，输出生产安全检查 warning 后退出 |
 | `-seed-access-key` | `""` | 临时播种的访问密钥（用于本地测试）。须与 `-seed-secret-key` 成对出现 |
 | `-seed-secret-key` | `""` | 临时播种的密钥 |
 | `-seed-quota-bytes` | `0` | 播种密钥的容量上限（字节），`0` 表示不限 |
@@ -270,6 +271,23 @@ webadmin:
   session_ttl_minutes: 720
   login_max_failures: 5          # 同一来源 IP 连续失败达到阈值后锁定
   login_lockout_window: "15m"    # 登录失败锁定窗口
+  totp:
+    enabled: false               # 公网管理后台建议启用
+    issuer: "NativeS3-Bridge"
+    account: "admin"
+    secret: ""                   # base32 TOTP secret；禁用/重置可通过配置回滚
+  captcha:
+    enabled: false               # 公网管理后台建议启用
+    provider: "turnstile"
+    site_key: ""
+    secret_key: ""
+    verify_url: "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+    timeout: "3s"
+  ops:
+    public_healthz: true         # /healthz 仅返回 ok
+    public_readyz: false         # /readyz 默认不公开
+    public_metrics: false        # /metrics 默认不公开
+    metrics_token: ""            # 设置后可用 Authorization: Bearer <token> 抓取 /metrics
 
 rate_limit:
   anonymous_rps: 10              # 匿名对象 GET/HEAD 每 IP 每秒请求数
@@ -381,6 +399,7 @@ curl -b cookie.txt http://127.0.0.1:9001/api/admin/dashboard/summary
 
 ## 安全提示
 
+- **配置检查**：生产发布前运行 `natives3bridge -check-config -config configs/config.yaml`。该命令会在不启动服务的情况下校验配置，并输出 TLS、示例 session secret、bootstrap 密码、TOTP/captcha、ops 端点和 `trust_forwarded` 等检查项的 warning。
 - **管理后台 TLS 直连**：`server.admin_tls` 可独立控制管理端口 TLS；省略 `admin_tls` 时继承 `server.tls`，保持旧配置行为不变。生产直连管理端口时建议显式配置管理端口证书：
 
   ```yaml
@@ -401,10 +420,39 @@ curl -b cookie.txt http://127.0.0.1:9001/api/admin/dashboard/summary
   admin UI served over plain HTTP; enable TLS for production
   ```
 - **登录节流**：`webadmin.login_max_failures` 和 `webadmin.login_lockout_window` 控制同一来源 IP 的登录失败锁定；锁定期间登录接口返回 `429` 与 `Retry-After`，不会继续进行密码校验。
+- **TOTP 二次验证**：公网管理后台建议设置 `webadmin.totp.enabled: true` 并配置 base32 `secret`。登录时需要密码和 6 位动态验证码。若管理员设备丢失，MVP 恢复路径是修改配置禁用 TOTP 或替换 `secret` 后重启服务。
+- **人机验证**：`webadmin.captcha` 支持 Turnstile-compatible server-side verification。启用后，登录页加载 provider widget，后端在校验密码前使用 `secret_key` 调用 `verify_url`。缺失 token、provider 拒绝、超时或异常都会失败并计入登录锁定。
+- **运维端点边界**：`/healthz` 默认公开，`/readyz` 与 `/metrics` 默认隐藏。内部探针需要公开 `/readyz` 时设置 `webadmin.ops.public_readyz: true`；Prometheus 建议设置 `webadmin.ops.metrics_token` 并用 `Authorization: Bearer <token>` 抓取 `/metrics`，不要把聚合指标裸露在公网管理域名上。
 - **匿名下载限流**：public-read 桶的匿名对象 `GET`/`HEAD` 受 `rate_limit.anonymous_rps` 与 `rate_limit.anonymous_burst` 限制，超限返回 S3 XML `503 SlowDown`。带签名请求不受该匿名限流影响，仍按密钥配额体系处理。
 - **会话密钥**：务必将 `webadmin.session_secret` 改为足够长的随机值。
 - **首启密码**：生成 `password_hash` 后清空 `admin_bootstrap_password`。
 - **分段临时目录**：生产环境建议将 `storage.multipart_tmp` 配置到 `data_root` 之外的独立路径。
+
+## 公网安全部署
+
+推荐把 S3 API 和管理后台放在不同域名与不同反向代理规则下：
+
+```text
+s3.example.com    -> NativeS3 S3 listener
+admin.example.com -> NativeS3 admin listener
+internal ops      -> /readyz, /metrics
+```
+
+公网入口必须使用 HTTPS，可由应用 TLS 或可信反向代理/CDN 终止。管理端口若由反代转发，应用本身应监听内网地址或只被反代访问；只有反代会覆盖并校验 `X-Forwarded-For` / `X-Real-IP` 时才开启 `rate_limit.trust_forwarded: true`。
+
+S3 用户直链优先使用私有 bucket + 短 TTL 预签名 URL。业务服务使用启用的 S3 credential 生成 query-presigned `GET` URL，终端用户只拿到该 URL；服务端会按现有 SigV4 逻辑校验签名，不改变原生文件 1:1 映射。不要把完整预签名 URL 写入日志，因为 query string 中包含签名材料。
+
+`public-read` 只用于明确打算匿名下载的 bucket。匿名访问仍只允许对象级 `GET` / `HEAD`；匿名列桶、写入、删除、tagging、multipart 子资源都保持拒绝。public-read 的应用内匿名限流不是完整抗滥用方案，公网部署还应在 CDN/反代层配置限流。
+
+生产前检查清单：
+
+- HTTPS 已在应用或可信反向代理终止。
+- `webadmin.password_hash` 已配置，`admin_bootstrap_password` 已清空。
+- `webadmin.session_secret` 已替换为随机值。
+- 公网管理后台启用了 TOTP，并启用了 captcha 或记录了明确例外。
+- `/readyz` 和 `/metrics` 未在公网裸露，或 `/metrics` 使用 bearer token。
+- `trust_forwarded` 只在可信反代覆盖转发头时启用。
+- 日志不记录 Authorization、Cookie、captcha token、session secret、完整预签名 URL 或对象内容。
 
 ---
 

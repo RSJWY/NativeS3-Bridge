@@ -23,6 +23,7 @@ import (
 
 func main() {
 	cfgPath := flag.String("config", "configs/config.yaml", "config file path")
+	checkConfig := flag.Bool("check-config", false, "load and validate config, then print production hardening warnings")
 	seedAccessKey := flag.String("seed-access-key", "", "temporary seed access key for local S3 testing")
 	seedSecretKey := flag.String("seed-secret-key", "", "temporary seed secret key for local S3 testing")
 	seedQuotaBytes := flag.Int64("seed-quota-bytes", 0, "temporary seed quota bytes; 0 means unlimited")
@@ -36,6 +37,11 @@ func main() {
 
 	setupSlog(cfg.LogLevel)
 	db.SetLogLevel(cfg.LogLevel)
+	logProductionWarnings(cfg)
+	if *checkConfig {
+		slog.Info("config check passed")
+		return
+	}
 	if err := webadmin.BootstrapPasswordHash(&cfg.WebAdmin); err != nil {
 		slog.Error("bootstrap webadmin password", "error", err)
 		os.Exit(1)
@@ -138,4 +144,10 @@ func setupSlog(level string) {
 
 	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slogLevel})
 	slog.SetDefault(slog.New(handler))
+}
+
+func logProductionWarnings(cfg *config.Config) {
+	for _, warning := range cfg.ProductionWarnings() {
+		slog.Warn("production config warning", "check", warning)
+	}
 }
