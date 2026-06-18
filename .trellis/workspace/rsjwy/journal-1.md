@@ -203,3 +203,36 @@ Implemented storage and handler digest validation for single-part PutObject, inc
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: Public secure deployment
+
+**Date**: 2026-06-19
+**Task**: Public secure deployment
+**Branch**: `master`
+
+### Summary
+
+Verified and closed public secure deployment: frontend build, Go build/vet/test passed; confirmed hardening commit is on master and origin/master; archived the Trellis task.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c23147b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
