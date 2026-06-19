@@ -37,6 +37,9 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 
 ## 界面预览
 
+<details>
+<summary>展开管理后台截图</summary>
+
 管理后台提供容量、请求趋势、访问密钥和 bucket ACL 的集中视图。截图来自本地临时实例，示例数据通过真实 S3 上传和管理 API 写入。
 
 ### 仪表盘
@@ -51,7 +54,12 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 
 ![桶管理页面，展示 private 与 public-read bucket](docs/images/webadmin-buckets.png)
 
+</details>
+
 ## 适用场景
+
+<details>
+<summary>展开适用 / 不适合场景</summary>
 
 - 局域网或内网环境中，把已有目录快速暴露为 S3 接口。
 - 游戏、互动引擎、AI 工作流、媒体处理脚本需要 S3 API，但希望对象仍是普通文件。
@@ -64,7 +72,12 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 - 需要分布式高可用、跨节点副本、纠删码、版本化或对象锁。
 - 需要把文件存储为专有块格式或跨盘卷合并。
 
+</details>
+
 ## 架构与数据模型
+
+<details>
+<summary>展开架构图、原生文件布局和数据库模型</summary>
 
 ```text
                  ┌──────────────────────────┐
@@ -144,7 +157,12 @@ data/
 
 对象字节、对象 metadata 和 tags 不存入数据库。
 
+</details>
+
 ## 快速开始
+
+<details>
+<summary>展开构建、配置和启动步骤</summary>
 
 ### 1. 环境要求
 
@@ -229,7 +247,12 @@ webadmin:
 
 该命令只加载和校验配置，不启动服务。它会输出 TLS、示例 session secret、bootstrap password、TOTP、captcha、ops endpoint 和 `trust_forwarded` 等生产安全 warning。
 
+</details>
+
 ## 配置说明
+
+<details>
+<summary>展开完整配置字段说明</summary>
 
 完整示例见 [configs/config.example.yaml](configs/config.example.yaml) 和 [configs/config.docker.example.yaml](configs/config.docker.example.yaml)。
 
@@ -372,7 +395,12 @@ log_level: "info"
 - `region`：SigV4 region，客户端签名必须匹配。
 - `log_level`：`debug`、`info`、`warn`、`error`。
 
+</details>
+
 ## S3 API 使用
+
+<details>
+<summary>展开 AWS CLI、支持范围和访问方式</summary>
 
 ### AWS CLI 环境变量
 
@@ -485,7 +513,12 @@ S3 API 错误统一返回标准 XML：
 
 每个 S3 响应都会带 `x-amz-request-id`，该 ID 也会出现在错误 XML 和访问日志中。
 
+</details>
+
 ## 管理后台
+
+<details>
+<summary>展开登录流程和 Admin API</summary>
 
 浏览器访问 `http://127.0.0.1:9001/`。管理后台是单用户模型，不提供多用户、RBAC 或 OIDC。
 
@@ -567,7 +600,12 @@ curl -b cookie.txt \
   -d '{"acl":"public-read"}'
 ```
 
+</details>
+
 ## 公网安全部署
+
+<details>
+<summary>展开反向代理示例和生产检查清单</summary>
 
 公网部署要把 S3 API 和管理后台视为不同安全边界。
 
@@ -659,7 +697,12 @@ server {
 - 日志不记录 Authorization、Cookie、captcha token、session secret、完整 presigned URL 或对象内容。
 - public-read bucket 中只有明确公开的对象。
 
+</details>
+
 ## 运维端点与监控
+
+<details>
+<summary>展开健康检查和 Prometheus 指标</summary>
 
 Ops endpoints 在 admin listener 上注册：
 
@@ -702,7 +745,12 @@ natives3_database_up
 
 指标不会包含 bucket name、object key、access key、secret 或 session。
 
+</details>
+
 ## 事件钩子
+
+<details>
+<summary>展开 Webhook 事件格式和投递规则</summary>
 
 Hook manager 从数据库的 `hook_configs` 表加载启用的 Webhook 配置。对象创建、对象删除和 multipart complete 会投递事件。
 
@@ -732,7 +780,12 @@ Hook manager 从数据库的 `hook_configs` 表加载启用的 Webhook 配置。
 
 当前 README 不提供 hook 配置管理 API。可通过数据库初始化或后续管理能力写入 `hook_configs`。
 
+</details>
+
 ## Docker 部署
+
+<details>
+<summary>展开 docker run 和 compose 示例</summary>
 
 ### docker run
 
@@ -786,7 +839,12 @@ database:
 
 镜像默认以 UID/GID `10001:10001` 运行。挂载目录不可写时，调整宿主机目录属主或权限。
 
+</details>
+
 ## 发布流程
+
+<details>
+<summary>展开 GitHub Release 和镜像发布说明</summary>
 
 GitHub Actions 的 release workflow 支持 tag 触发和手动触发。
 
@@ -812,7 +870,12 @@ ghcr.io/rsjwy/natives3-bridge:latest
 
 手动运行 `Release` workflow 时可以输入发布 tag。若 tag 不存在，workflow 会基于当前构建提交创建该 tag；如需指定源码，可填写 `source_ref`。
 
+</details>
+
 ## 开发与验证
+
+<details>
+<summary>展开本地命令、冒烟测试和代码结构</summary>
 
 ### 常用命令
 
@@ -875,7 +938,12 @@ configs/                 # 示例配置
 scripts/                 # 冒烟测试脚本
 ```
 
+</details>
+
 ## 仓库文件与忽略规则
+
+<details>
+<summary>展开应提交和不应提交清单</summary>
 
 提交前建议检查：
 
@@ -901,6 +969,8 @@ git status --ignored --short
 - Trellis 运行态：`.trellis/.developer`、`.trellis/.runtime/`、`__pycache__/`、`.trellis/.template-hashes.json` 的本地模板哈希改动。
 
 `.trellis/.template-hashes.json` 当前在仓库中已跟踪，但它容易记录本地模板刷新、runtime session 和 Python cache 哈希。除非明确在升级 Trellis 模板并审查了 diff，否则不要把它和业务或文档提交混在一起。
+
+</details>
 
 ## License
 
