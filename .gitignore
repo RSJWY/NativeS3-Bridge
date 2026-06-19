@@ -24,6 +24,8 @@ coverage.*
 # Local config with real secrets (keep config.example.yaml committed)
 /configs/config.yaml
 /configs/config.local.yaml
+docker-compose.yml
+docker-compose.override.yml
 
 # --- Frontend (Vue3 + Vite) ---
 node_modules/

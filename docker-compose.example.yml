@@ -1,0 +1,76 @@
+# NativeS3-Bridge Docker Compose example.
+#
+# Default mode: SQLite
+#   1. cp configs/config.docker.example.yaml configs/config.yaml
+#   2. mkdir -p data state
+#   3. sudo chown -R 10001:10001 data state
+#   4. docker compose -f docker-compose.example.yml up -d
+#
+# To use MySQL or PostgreSQL:
+#   1. Edit configs/config.yaml database.driver and database.dsn.
+#   2. Start the matching profile, for example:
+#        docker compose -f docker-compose.example.yml --profile mysql up -d
+#        docker compose -f docker-compose.example.yml --profile postgres up -d
+#
+# Run one database mode at a time.
+
+services:
+  natives3bridge:
+    image: ghcr.io/rsjwy/natives3-bridge:latest
+    # Use the current checkout instead of the published image:
+    # build: .
+    # image: natives3bridge:local
+    container_name: natives3bridge
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      # Keep the admin UI on localhost unless it is behind HTTPS/authenticated proxy.
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - ./configs/config.yaml:/app/configs/config.yaml:ro
+      - ./data:/data
+      - ./state:/state
+
+  mysql:
+    image: mysql:8.4
+    profiles:
+      - mysql
+    container_name: natives3bridge-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: natives3
+      MYSQL_USER: natives3
+      MYSQL_PASSWORD: change-me-mysql-password
+      MYSQL_ROOT_PASSWORD: change-me-root-password
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:16-alpine
+    profiles:
+      - postgres
+    container_name: natives3bridge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: natives3
+      POSTGRES_USER: natives3
+      POSTGRES_PASSWORD: change-me-postgres-password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mysql-data:
+  postgres-data:

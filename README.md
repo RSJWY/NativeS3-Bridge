@@ -813,19 +813,23 @@ docker run -d --name natives3bridge \
 
 ### Docker Compose
 
-```yaml
-services:
-  natives3bridge:
-    image: ghcr.io/rsjwy/natives3-bridge:latest
-    container_name: natives3bridge
-    restart: unless-stopped
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - ./configs/config.yaml:/app/configs/config.yaml:ro
-      - ./data:/data
-      - ./state:/state
+仓库提供了 `docker-compose.example.yml`。默认按 SQLite 单容器模式运行：
+
+```bash
+cp docker-compose.example.yml docker-compose.yml
+cp configs/config.docker.example.yaml configs/config.yaml
+mkdir -p data state
+sudo chown -R 10001:10001 data state
+docker compose up -d
+docker compose logs -f natives3bridge
+```
+
+如果要使用当前 checkout 构建镜像，而不是拉取 GHCR `latest`，编辑
+`docker-compose.yml`，注释 `image: ghcr.io/rsjwy/natives3-bridge:latest`，取消
+`build: .` 和 `image: natives3bridge:local` 的注释，然后运行：
+
+```bash
+docker compose up -d --build
 ```
 
 容器内默认配置路径：
@@ -846,6 +850,65 @@ database:
 ```
 
 镜像默认以 UID/GID `10001:10001` 运行。挂载目录不可写时，调整宿主机目录属主或权限。
+
+### Compose 数据库用法
+
+SQLite 是默认推荐的单机部署方式，只需要 `natives3bridge` 一个容器：
+
+```yaml
+database:
+  driver: "sqlite"
+  dsn: "/state/natives3.db"
+```
+
+- 对象字节写入 `./data`。
+- SQLite 数据库、multipart 临时目录和升级备份写入 `./state`。
+- 启动迁移前会自动做 SQLite 完整性检查；已有业务表时会生成
+  `./state/natives3.db.pre-upgrade-*.bak`。
+- 升级前仍建议整体备份 `./data` 和 `./state`。
+
+MySQL 适合已有 MySQL 运维体系的部署。先修改 `configs/config.yaml`：
+
+```yaml
+database:
+  driver: "mysql"
+  dsn: "natives3:change-me-mysql-password@tcp(mysql:3306)/natives3?charset=utf8mb4&parseTime=True&loc=Local"
+```
+
+然后启动 MySQL profile：
+
+```bash
+docker compose --profile mysql up -d
+```
+
+- DSN 里的 `mysql` 是 compose 文件中的服务名。
+- `change-me-mysql-password` 必须和 `docker-compose.yml` 中
+  `MYSQL_PASSWORD` 一致。
+- 应用不会在启动时复制 MySQL 表；生产升级前用 MySQL 原生一致备份、
+  托管快照或物理备份。
+
+PostgreSQL 用法类似。先修改 `configs/config.yaml`：
+
+```yaml
+database:
+  driver: "postgres"
+  dsn: "host=postgres user=natives3 password=change-me-postgres-password dbname=natives3 port=5432 sslmode=disable"
+```
+
+然后启动 PostgreSQL profile：
+
+```bash
+docker compose --profile postgres up -d
+```
+
+- DSN 里的 `postgres` 是 compose 文件中的服务名。
+- `change-me-postgres-password` 必须和 `docker-compose.yml` 中
+  `POSTGRES_PASSWORD` 一致。
+- 应用不会在启动时复制 PostgreSQL 表；生产升级前用 PostgreSQL 原生一致
+  备份、托管快照、物理备份或 PITR。
+
+无论使用哪种数据库，`storage.data_root` 都应保持为 `/data`，因为对象文件不存
+在关系数据库中。
 
 </details>
 
