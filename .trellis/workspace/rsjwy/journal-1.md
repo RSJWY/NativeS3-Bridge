@@ -236,3 +236,36 @@ Verified and closed public secure deployment: frontend build, Go build/vet/test 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: Release readiness hardening
+
+**Date**: 2026-06-19
+**Task**: Release readiness hardening
+**Branch**: `master`
+
+### Summary
+
+Added secret-safe SQL logging, expanded S3 smoke coverage with webhook validation, and recorded admin UI browser validation results.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `fa16b1e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
