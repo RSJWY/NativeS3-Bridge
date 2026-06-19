@@ -7,6 +7,7 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 ## 目录
 
 - [核心能力](#核心能力)
+- [界面预览](#界面预览)
 - [适用场景](#适用场景)
 - [架构与数据模型](#架构与数据模型)
 - [快速开始](#快速开始)
@@ -33,6 +34,22 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 | 管理后台 | 单密码登录，支持 TOTP、Turnstile-compatible captcha、credential CRUD、bucket ACL、ECharts 仪表盘和 Prometheus 指标。 |
 | 单文件部署 | Vue3 管理界面构建产物通过 `go:embed` 打入 Go 二进制。运行时不需要 Node.js。 |
 | 异步 Webhook | 对象创建、删除和 multipart complete 可异步投递事件，失败重试不阻塞 S3 请求。 |
+
+## 界面预览
+
+管理后台提供容量、请求趋势、访问密钥和 bucket ACL 的集中视图。截图来自本地临时实例，示例数据通过真实 S3 上传和管理 API 写入。
+
+### 仪表盘
+
+![管理后台仪表盘，展示容量使用率、密钥用量排行和请求趋势](docs/images/webadmin-dashboard.png)
+
+### 密钥管理
+
+![密钥管理页面，展示 access key、状态、已用容量和配额](docs/images/webadmin-credentials.png)
+
+### Bucket ACL
+
+![桶管理页面，展示 private 与 public-read bucket](docs/images/webadmin-buckets.png)
 
 ## 适用场景
 
