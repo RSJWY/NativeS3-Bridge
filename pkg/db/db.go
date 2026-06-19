@@ -91,7 +91,7 @@ func (l slogGORMLogger) Trace(ctx context.Context, begin time.Time, fc func() (s
 
 	elapsed := time.Since(begin)
 	sql, rows := fc()
-	attrs := []any{"elapsed", elapsed, "rows", rows, "sql", sql}
+	attrs := []any{"elapsed", elapsed, "rows", rows, "sql", redactSQLLiterals(sql)}
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) && l.level >= logger.Error {
 		slog.ErrorContext(ctx, "gorm query failed", append(attrs, "error", err)...)
 		return
@@ -103,4 +103,38 @@ func (l slogGORMLogger) Trace(ctx context.Context, begin time.Time, fc func() (s
 	if l.level >= logger.Info {
 		slog.InfoContext(ctx, "gorm query", attrs...)
 	}
+}
+
+func redactSQLLiterals(sql string) string {
+	var out strings.Builder
+	out.Grow(len(sql))
+
+	for i := 0; i < len(sql); {
+		switch sql[i] {
+		case '\'', '"':
+			quote := sql[i]
+			out.WriteString("[redacted]")
+			i++
+			for i < len(sql) {
+				if sql[i] == quote {
+					if i+1 < len(sql) && sql[i+1] == quote {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				if sql[i] == '\\' && i+1 < len(sql) {
+					i += 2
+					continue
+				}
+				i++
+			}
+		default:
+			out.WriteByte(sql[i])
+			i++
+		}
+	}
+
+	return out.String()
 }

@@ -1,0 +1,30 @@
+{
+  "id": "release-readiness-hardening",
+  "name": "release-readiness-hardening",
+  "title": "Release readiness hardening",
+  "description": "Close release-readiness gaps: secret-safe logging, broader S3/admin end-to-end smoke coverage, and browser-level admin UI validation.",
+  "status": "done",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "rsjwy",
+  "assignee": "rsjwy",
+  "createdAt": "2026-06-19",
+  "completedAt": "2026-06-19",
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "06-19-secret-safe-db-logging",
+    "06-19-expanded-s3-e2e-smoke",
+    "06-19-admin-ui-browser-validation"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
