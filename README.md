@@ -323,6 +323,14 @@ database:
   dsn: "host=127.0.0.1 user=postgres password=pass dbname=natives3 port=5432 sslmode=disable"
 ```
 
+升级安全：
+
+- 启动时会先打开数据库，再执行迁移。迁移失败或迁移后的 schema 校验失败时，服务会退出，不会启动 S3 或管理端口。
+- SQLite 本地文件库在迁移前会运行 `PRAGMA integrity_check`。如果检查失败，迁移不会执行。
+- SQLite DSN 指向已有且包含业务表的本地文件时，迁移前会用 SQLite `VACUUM INTO` 在同目录创建一致备份，文件名形如 `natives3.db.pre-upgrade-20260619T103000Z.bak`。新库、空库、`:memory:` 和 `file::memory:` 不会创建备份。
+- SQLite 备份只保护关系数据库内容。对象字节仍在 `storage.data_root`，对象 metadata/tags 仍在 sidecar 文件中，升级前需要按你的部署方式一起备份数据目录。
+- MySQL/PostgreSQL 不会在应用启动时复制表。表级复制可能慢、占锁、占空间且不一定是一致快照；生产升级前应使用数据库原生一致备份、托管快照、物理备份或 PITR。
+
 ### webadmin
 
 ```yaml
@@ -964,6 +972,7 @@ git status --ignored --short
 - 真实配置：`configs/config.yaml`、`configs/config.local.yaml`。
 - 本地数据：`data/`、`state/`。
 - 本地数据库：`*.db`、`*.sqlite`、`*.sqlite3`。
+- SQLite 升级备份：`*.pre-upgrade-*.bak*`。
 - 构建产物：`natives3bridge`、`bin/`、`*.tar.gz`。
 - 前端依赖和产物：`pkg/webadmin/ui/node_modules/`、`pkg/webadmin/ui/dist/assets/`、`pkg/webadmin/ui/dist/index.html`。
 - Trellis 运行态：`.trellis/.developer`、`.trellis/.runtime/`、`__pycache__/`、`.trellis/.template-hashes.json` 的本地模板哈希改动。

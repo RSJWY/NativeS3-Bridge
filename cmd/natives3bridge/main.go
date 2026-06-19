@@ -53,7 +53,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := db.Migrate(gdb); err != nil {
+	if err := db.MigrateConfigured(cfg.Database.Driver, cfg.Database.DSN, gdb); err != nil {
 		slog.Error("migrate database", "error", err)
 		os.Exit(1)
 	}
