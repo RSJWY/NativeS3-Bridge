@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 8
+- **Total Sessions**: 9
 - **Last Active**: 2026-06-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~271 | Active |
+| `journal-1.md` | ~304 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 9 | 2026-06-19 | Harden database upgrades | `d321a73` | `master` |
 | 8 | 2026-06-19 | Release readiness hardening | `fa16b1e` | `master` |
 | 7 | 2026-06-19 | Public secure deployment | `c23147b` | `master` |
 | 6 | 2026-06-07 | Validate single-part PUT digests | `db51d0f` | `06-06-s3-ops-completion` |

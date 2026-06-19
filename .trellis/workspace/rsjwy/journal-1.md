@@ -269,3 +269,36 @@ Added secret-safe SQL logging, expanded S3 smoke coverage with webhook validatio
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: Harden database upgrades
+
+**Date**: 2026-06-19
+**Task**: Harden database upgrades
+**Branch**: `master`
+
+### Summary
+
+Added startup-safe database migration with SQLite pre-upgrade backups, SQLite integrity checks, schema validation, documentation, and regression tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d321a73` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
