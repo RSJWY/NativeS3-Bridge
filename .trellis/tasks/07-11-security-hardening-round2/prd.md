@@ -9,9 +9,9 @@
 
 Full security audit completed 2026-07-11 covering S3 data plane (SigV4, anonymous access, path traversal, rate limiting, quota), webadmin control plane (login, session, CSRF, TLS, AuthZ, UI), and secrets/logging/config/storage. The codebase is fundamentally sound — SigV4 verification is spec-correct with constant-time comparison, path traversal is blocked, anonymous access is tightly scoped, bcrypt password storage, parameterized SQL, no secret leakage in logs. This task addresses the remaining hardening items.
 
-## Design decision: single-tenant model
+## Design decision: per-bucket credential scoping (implemented)
 
-**Confirmed**: NativeS3-Bridge is a single-tenant S3 gateway. Any enabled credential can read/write/delete all buckets. Per-credential quota is enforced, but there is no per-bucket or per-credential-bucket authorization. This is the intended design for a personal/small-team bridge. No per-bucket isolation work is planned. If multi-tenant isolation is ever needed, it would be a separate, larger effort touching the data model and every handler's authorization check.
+NativeS3-Bridge now supports per-bucket credential scoping. The `Credential` model has a `Bucket` column: when non-empty, the credential can only access that single bucket; when empty, it retains full access to all buckets (backward compatible). The Auth middleware in `pkg/server/router.go` enforces the bucket boundary, rejecting requests to other buckets and service-level operations with 403 AccessDenied. The webadmin API and UI allow setting/changing the bucket on each credential. A `--seed-bucket` CLI flag scopes the seed credential. Implemented in commit `ccdc97d` (2026-07-11).
 
 ## Medium-severity subtasks
 
