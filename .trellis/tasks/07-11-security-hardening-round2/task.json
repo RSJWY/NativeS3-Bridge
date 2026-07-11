@@ -1,0 +1,33 @@
+{
+  "id": "07-11-security-hardening-round2",
+  "name": "07-11-security-hardening-round2",
+  "title": "Security hardening: session, transport, rate-limit, quota",
+  "description": "Round-2 security hardening based on full audit. Medium-severity items get subtasks; low-severity items tracked as a checklist.",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "rsjwy",
+  "assignee": "rsjwy",
+  "createdAt": "2026-07-11",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-11-s1-reject-weak-session-secret",
+    "07-11-s2-remove-docker-bootstrap-password",
+    "07-11-s3-admin-tls-default-bind",
+    "07-11-s4-xff-rate-limit-bypass",
+    "07-11-s5-revocable-sessions",
+    "07-11-s6-quota-bypass"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
