@@ -1,13 +1,13 @@
 ---
 name: security-hardening-round2-plan
-description: 07-11 安全审查结论与 round2 加固任务树（6 中危 + 7 低危，单租户确认）
+description: 07-11 安全审查结论与 round2 加固任务树（6 中危 + 7 低卫，按桶授权已实现）
 metadata:
   type: project
 ---
 
 2026-07-11 完成全量安全审查（S3 数据面 + webadmin 控制面 + 密钥/日志/配置）。代码基本面扎实：SigV4 常量时间验签、路径穿越已堵、匿名访问紧缩、bcrypt 存储口令、SQL 参数化、日志不泄露密钥。
 
-**单租户确认**：任一 enabled 凭证可读写删所有桶，无按桶隔离。这是刻意的单租户网关设计，不列入加固范围。
+**按桶授权已实现**（commit `ccdc97d`）：Credential 新增 `Bucket` 列，非空时该密钥只能操作指定桶，Auth 中间件拦截跨桶请求和服务级操作（403）。留空则保留全桶访问（向后兼容）。webadmin API/UI 支持设置/修改绑定桶，`--seed-bucket` CLI flag 可限定种子密钥。
 
 **6 个中危子任务**（Trellis `07-11-security-hardening-round2` 下）：
 - S1 弱 session_secret 只警告不拒绝（`config.go:203,255`）-> 可离线伪造管理会话
