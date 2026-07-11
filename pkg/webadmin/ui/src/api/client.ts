@@ -5,6 +5,7 @@ export interface Credential {
   id: number
   access_key: string
   name: string
+  bucket: string
   status: 'enabled' | 'disabled'
   quota_bytes: number
   used_bytes: number
@@ -121,13 +122,13 @@ export const adminApi = {
   listCredentials() {
     return apiFetch<Credential[]>('/api/admin/credentials')
   },
-  createCredential(input: { name: string; quota_bytes: number }) {
+  createCredential(input: { name: string; bucket: string; quota_bytes: number }) {
     return apiFetch<CreatedCredential>('/api/admin/credentials', {
       method: 'POST',
       body: JSON.stringify(input)
     })
   },
-  updateCredential(id: number, input: { name?: string; status?: 'enabled' | 'disabled'; quota_bytes?: number }) {
+  updateCredential(id: number, input: { name?: string; bucket?: string; status?: 'enabled' | 'disabled'; quota_bytes?: number }) {
     return apiFetch<Credential>(`/api/admin/credentials/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(input)

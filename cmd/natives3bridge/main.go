@@ -27,6 +27,7 @@ func main() {
 	seedAccessKey := flag.String("seed-access-key", "", "temporary seed access key for local S3 testing")
 	seedSecretKey := flag.String("seed-secret-key", "", "temporary seed secret key for local S3 testing")
 	seedQuotaBytes := flag.Int64("seed-quota-bytes", 0, "temporary seed quota bytes; 0 means unlimited")
+	seedBucket := flag.String("seed-bucket", "", "scope seed credential to a single bucket; empty means all buckets")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
@@ -62,7 +63,7 @@ func main() {
 		os.Exit(1)
 	}
 	if *seedAccessKey != "" {
-		if err := seedCredential(gdb, *seedAccessKey, *seedSecretKey, *seedQuotaBytes); err != nil {
+		if err := seedCredential(gdb, *seedAccessKey, *seedSecretKey, *seedQuotaBytes, *seedBucket); err != nil {
 			slog.Error("seed credential", "error", err)
 			os.Exit(1)
 		}
@@ -117,14 +118,15 @@ func main() {
 	}
 }
 
-func seedCredential(gdb *gorm.DB, accessKey, secretKey string, quotaBytes int64) error {
-	cred := db.Credential{AccessKey: accessKey, SecretKey: secretKey, Name: "local seed", Status: "enabled", QuotaBytes: quotaBytes}
+func seedCredential(gdb *gorm.DB, accessKey, secretKey string, quotaBytes int64, bucket string) error {
+	cred := db.Credential{AccessKey: accessKey, SecretKey: secretKey, Name: "local seed", Bucket: bucket, Status: "enabled", QuotaBytes: quotaBytes}
 	return gdb.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "access_key"}},
 		DoUpdates: clause.Assignments(map[string]any{
 			"secret_key":  secretKey,
 			"status":      "enabled",
 			"quota_bytes": quotaBytes,
+			"bucket":      bucket,
 		}),
 	}).Create(&cred).Error
 }

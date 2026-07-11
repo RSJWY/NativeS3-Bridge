@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -188,7 +189,75 @@ func newBucketAPITestHandlerWithRoot(t *testing.T) (http.Handler, *Auth, string)
 	mux := http.NewServeMux()
 	mux.Handle("/api/admin/buckets", auth.Middleware(http.HandlerFunc(api.Buckets)))
 	mux.Handle("/api/admin/buckets/", auth.Middleware(http.HandlerFunc(api.BucketByName)))
+	mux.Handle("/api/admin/credentials", auth.Middleware(http.HandlerFunc(api.Credentials)))
+	mux.Handle("/api/admin/credentials/", auth.Middleware(http.HandlerFunc(api.CredentialByID)))
 	return mux, auth, dataRoot
+}
+
+func TestCredentialBucketScoping(t *testing.T) {
+	handler, auth := newBucketAPITestHandler(t)
+
+	rr := authRequest(t, handler, auth, http.MethodPost, "/api/admin/credentials", []byte(`{"name":"scoped-key","bucket":"my-bucket","quota_bytes":0}`))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create scoped credential status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var created createCredentialResponse
+	decodeJSONBody(t, rr.Body.Bytes(), &created)
+	if created.Bucket != "my-bucket" {
+		t.Fatalf("created bucket = %q, want my-bucket", created.Bucket)
+	}
+
+	rr = authRequest(t, handler, auth, http.MethodPost, "/api/admin/credentials", []byte(`{"name":"global-key","quota_bytes":0}`))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create global credential status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var global createCredentialResponse
+	decodeJSONBody(t, rr.Body.Bytes(), &global)
+	if global.Bucket != "" {
+		t.Fatalf("global bucket = %q, want empty", global.Bucket)
+	}
+
+	rr = authRequest(t, handler, auth, http.MethodGet, "/api/admin/credentials", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var listed []credentialResponse
+	decodeJSONBody(t, rr.Body.Bytes(), &listed)
+	if len(listed) != 2 {
+		t.Fatalf("list length = %d, want 2", len(listed))
+	}
+	if listed[0].Bucket != "" && listed[1].Bucket != "" {
+		t.Fatalf("expected at least one empty bucket in list: %+v", listed)
+	}
+
+	rr = authRequest(t, handler, auth, http.MethodPatch, "/api/admin/credentials/"+strconv.FormatUint(uint64(created.ID), 10), []byte(`{"bucket":"other-bucket"}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update bucket status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var updated credentialResponse
+	decodeJSONBody(t, rr.Body.Bytes(), &updated)
+	if updated.Bucket != "other-bucket" {
+		t.Fatalf("updated bucket = %q, want other-bucket", updated.Bucket)
+	}
+
+	rr = authRequest(t, handler, auth, http.MethodPatch, "/api/admin/credentials/"+strconv.FormatUint(uint64(created.ID), 10), []byte(`{"bucket":""}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("clear bucket status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	decodeJSONBody(t, rr.Body.Bytes(), &updated)
+	if updated.Bucket != "" {
+		t.Fatalf("cleared bucket = %q, want empty", updated.Bucket)
+	}
+}
+
+func TestCredentialBucketValidationRejectsInvalidName(t *testing.T) {
+	handler, auth := newBucketAPITestHandler(t)
+
+	rr := authRequest(t, handler, auth, http.MethodPost, "/api/admin/credentials", []byte(`{"name":"bad","bucket":"INVALID","quota_bytes":0}`))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid bucket create status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	assertJSONError(t, rr.Body.Bytes(), "bucket must be a valid bucket name or empty for all buckets")
 }
 
 func newWebadminTestDB(t *testing.T) *gorm.DB {

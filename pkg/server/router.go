@@ -246,6 +246,13 @@ func Auth(authenticator auth.Authenticator, aclLookup ACLLookup) Middleware {
 					handlers.WriteS3Error(w, code, http.StatusForbidden, r.URL.Path)
 					return
 				}
+				if id.Bucket != "" {
+					bucket, _ := parseS3Path(r.URL.Path)
+					if bucket != id.Bucket {
+						handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+						return
+					}
+				}
 				next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), id)))
 				return
 			}

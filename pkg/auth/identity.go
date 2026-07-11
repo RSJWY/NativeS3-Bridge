@@ -8,6 +8,7 @@ import (
 type Identity struct {
 	CredentialID uint
 	AccessKey    string
+	Bucket       string
 	QuotaBytes   int64
 	UsedBytes    int64
 }

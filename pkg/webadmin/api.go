@@ -54,6 +54,7 @@ type credentialResponse struct {
 	ID         uint      `json:"id"`
 	AccessKey  string    `json:"access_key"`
 	Name       string    `json:"name"`
+	Bucket     string    `json:"bucket"`
 	Status     string    `json:"status"`
 	QuotaBytes int64     `json:"quota_bytes"`
 	UsedBytes  int64     `json:"used_bytes"`
@@ -62,6 +63,7 @@ type credentialResponse struct {
 
 type createCredentialRequest struct {
 	Name       string `json:"name"`
+	Bucket     string `json:"bucket"`
 	QuotaBytes int64  `json:"quota_bytes"`
 }
 
@@ -72,6 +74,7 @@ type createCredentialResponse struct {
 
 type updateCredentialRequest struct {
 	Name       *string `json:"name"`
+	Bucket     *string `json:"bucket"`
 	Status     *string `json:"status"`
 	QuotaBytes *int64  `json:"quota_bytes"`
 }
@@ -339,6 +342,11 @@ func (a *API) createCredential(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "quota_bytes must be greater than or equal to 0")
 		return
 	}
+	bucket, err := normalizeCredentialBucket(req.Bucket)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	for attempt := 0; attempt < 5; attempt++ {
 		accessKey, err := randomAccessKey()
@@ -356,7 +364,7 @@ func (a *API) createCredential(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		cred := dbpkg.Credential{AccessKey: accessKey, SecretKey: secretKey, Name: name, Status: credentialStatusEnabled, QuotaBytes: req.QuotaBytes}
+		cred := dbpkg.Credential{AccessKey: accessKey, SecretKey: secretKey, Name: name, Bucket: bucket, Status: credentialStatusEnabled, QuotaBytes: req.QuotaBytes}
 		if err := a.db.Create(&cred).Error; err != nil {
 			if attempt < 4 {
 				continue
@@ -396,6 +404,14 @@ func (a *API) updateCredential(w http.ResponseWriter, r *http.Request, idOrAcces
 			return
 		}
 		updates["status"] = status
+	}
+	if req.Bucket != nil {
+		bucket, err := normalizeCredentialBucket(*req.Bucket)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		updates["bucket"] = bucket
 	}
 	if req.QuotaBytes != nil {
 		if *req.QuotaBytes < 0 {
@@ -487,7 +503,7 @@ func (a *API) invalidate(accessKey string) {
 }
 
 func credentialToResponse(cred dbpkg.Credential) credentialResponse {
-	return credentialResponse{ID: cred.ID, AccessKey: cred.AccessKey, Name: cred.Name, Status: cred.Status, QuotaBytes: cred.QuotaBytes, UsedBytes: cred.UsedBytes, CreatedAt: cred.CreatedAt}
+	return credentialResponse{ID: cred.ID, AccessKey: cred.AccessKey, Name: cred.Name, Bucket: cred.Bucket, Status: cred.Status, QuotaBytes: cred.QuotaBytes, UsedBytes: cred.UsedBytes, CreatedAt: cred.CreatedAt}
 }
 
 func bucketToResponse(bucket dbpkg.Bucket) bucketResponse {
@@ -534,6 +550,17 @@ func normalizeCredentialName(name string) (string, error) {
 	trimmed := strings.TrimSpace(name)
 	if utf8.RuneCountInString(trimmed) > maxCredentialNameLength {
 		return "", errors.New("name must be 128 characters or fewer")
+	}
+	return trimmed, nil
+}
+
+func normalizeCredentialBucket(bucket string) (string, error) {
+	trimmed := strings.TrimSpace(bucket)
+	if trimmed == "" {
+		return "", nil
+	}
+	if err := storage.ValidateBucketName(trimmed); err != nil {
+		return "", errors.New("bucket must be a valid bucket name or empty for all buckets")
 	}
 	return trimmed, nil
 }

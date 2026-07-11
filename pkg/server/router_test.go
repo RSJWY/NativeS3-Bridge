@@ -125,6 +125,67 @@ func TestAuthSignedRequestsBypassAnonymousACL(t *testing.T) {
 	}
 }
 
+func TestAuthBucketScopedCredentialEnforcesBucketBoundary(t *testing.T) {
+	authenticator := &stubAuthenticator{id: &auth.Identity{CredentialID: 9, AccessKey: "scoped", Bucket: "alpha"}}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := Auth(authenticator, func(bucket string) (string, bool, error) {
+		return storage.ACLPrivate, true, nil
+	})(handler)
+
+	authHeader := "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc"
+
+	cases := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+	}{
+		{name: "same bucket get", method: http.MethodGet, path: "/alpha/key.txt", wantStatus: http.StatusNoContent},
+		{name: "same bucket put", method: http.MethodPut, path: "/alpha/key.txt", wantStatus: http.StatusNoContent},
+		{name: "same bucket list", method: http.MethodGet, path: "/alpha", wantStatus: http.StatusNoContent},
+		{name: "different bucket denied", method: http.MethodGet, path: "/beta/key.txt", wantStatus: http.StatusForbidden},
+		{name: "different bucket put denied", method: http.MethodPut, path: "/beta/key.txt", wantStatus: http.StatusForbidden},
+		{name: "service level denied", method: http.MethodGet, path: "/", wantStatus: http.StatusForbidden},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			authenticator.verifyCalls = 0
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Authorization", authHeader)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestAuthUnscopedCredentialAccessesAllBuckets(t *testing.T) {
+	authenticator := &stubAuthenticator{id: &auth.Identity{CredentialID: 10, AccessKey: "admin", Bucket: ""}}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := Auth(authenticator, func(bucket string) (string, bool, error) {
+		return storage.ACLPrivate, true, nil
+	})(handler)
+
+	authHeader := "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc"
+
+	for _, path := range []string{"/alpha/key.txt", "/beta/key.txt", "/"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", authHeader)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("path %q status = %d, want %d; body=%s", path, rr.Code, http.StatusNoContent, rr.Body.String())
+		}
+	}
+}
+
 func TestQuotaSkipsCopyObjectRequestBodyLength(t *testing.T) {
 	reached := false
 	h := Quota(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

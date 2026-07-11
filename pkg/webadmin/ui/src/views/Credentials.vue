@@ -17,6 +17,7 @@
           <tr>
             <th>Access Key</th>
             <th>名称</th>
+            <th>绑定桶</th>
             <th>状态</th>
             <th>已用 / 配额</th>
             <th>创建时间</th>
@@ -25,14 +26,15 @@
         </thead>
         <tbody>
           <tr v-if="loading" class="state-row">
-            <td colspan="6">加载中…</td>
+            <td colspan="7">加载中…</td>
           </tr>
           <tr v-else-if="credentials.length === 0" class="state-row">
-            <td colspan="6">暂无密钥。</td>
+            <td colspan="7">暂无密钥。</td>
           </tr>
           <tr v-for="credential in credentials" :key="credential.id">
             <td><code>{{ credential.access_key }}</code></td>
             <td>{{ credential.name || '未命名' }}</td>
+            <td>{{ credential.bucket || '全部桶' }}</td>
             <td>
               <span :class="['status-badge', credential.status === 'enabled' ? 'status-enabled' : 'status-disabled']">
                 {{ credential.status === 'enabled' ? '启用' : '禁用' }}
@@ -60,6 +62,8 @@
         <h2>{{ editing ? '编辑密钥' : '新建密钥' }}</h2>
         <label for="credential-name">名称</label>
         <input id="credential-name" v-model="form.name" type="text" maxlength="128" :disabled="saving" />
+        <label for="credential-bucket">绑定桶（留空表示可访问全部桶）</label>
+        <input id="credential-bucket" v-model="form.bucket" type="text" maxlength="63" :disabled="saving" placeholder="例如 my-bucket" />
         <label for="quota-bytes">配额字节数（0 表示不限）</label>
         <input id="quota-bytes" v-model="form.quotaBytes" type="number" min="0" step="1" :disabled="saving" />
         <p v-if="formError" class="error-text">{{ formError }}</p>
@@ -101,7 +105,7 @@ const formError = ref('')
 const showForm = ref(false)
 const editing = ref<Credential | null>(null)
 const created = ref<CreatedCredential | null>(null)
-const form = reactive({ name: '', quotaBytes: '0' })
+const form = reactive({ name: '', bucket: '', quotaBytes: '0' })
 const tableMutating = computed(() => togglingCredential.value !== null || deletingCredential.value !== null)
 
 onMounted(load)
@@ -122,6 +126,7 @@ function openCreate() {
   if (tableMutating.value) return
   editing.value = null
   form.name = ''
+  form.bucket = ''
   form.quotaBytes = '0'
   formError.value = ''
   showForm.value = true
@@ -131,6 +136,7 @@ function openEdit(credential: Credential) {
   if (tableMutating.value) return
   editing.value = credential
   form.name = credential.name
+  form.bucket = credential.bucket
   form.quotaBytes = String(credential.quota_bytes)
   formError.value = ''
   showForm.value = true
@@ -152,9 +158,9 @@ async function saveForm() {
   formError.value = ''
   try {
     if (editing.value) {
-      await adminApi.updateCredential(editing.value.id, { name: form.name, quota_bytes: quota })
+      await adminApi.updateCredential(editing.value.id, { name: form.name, bucket: form.bucket, quota_bytes: quota })
     } else {
-      created.value = await adminApi.createCredential({ name: form.name, quota_bytes: quota })
+      created.value = await adminApi.createCredential({ name: form.name, bucket: form.bucket, quota_bytes: quota })
     }
     showForm.value = false
     await load()

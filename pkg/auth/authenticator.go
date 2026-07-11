@@ -70,7 +70,7 @@ func (a *LocalSigV4Authenticator) Verify(r *http.Request) (*Identity, error) {
 		return nil, NewError(CodeSignatureDoesNotMatch)
 	}
 
-	return &Identity{CredentialID: cred.ID, AccessKey: cred.AccessKey, QuotaBytes: cred.QuotaBytes, UsedBytes: cred.UsedBytes}, nil
+	return &Identity{CredentialID: cred.ID, AccessKey: cred.AccessKey, Bucket: cred.Bucket, QuotaBytes: cred.QuotaBytes, UsedBytes: cred.UsedBytes}, nil
 }
 
 func HasPresignQuery(r *http.Request) bool {
@@ -115,7 +115,7 @@ func (a *LocalSigV4Authenticator) verifyPresigned(r *http.Request) (*Identity, e
 		return nil, NewError(CodeSignatureDoesNotMatch)
 	}
 
-	return &Identity{CredentialID: cred.ID, AccessKey: cred.AccessKey, QuotaBytes: cred.QuotaBytes, UsedBytes: cred.UsedBytes}, nil
+	return &Identity{CredentialID: cred.ID, AccessKey: cred.AccessKey, Bucket: cred.Bucket, QuotaBytes: cred.QuotaBytes, UsedBytes: cred.UsedBytes}, nil
 }
 
 func parsePresignQuery(query url.Values) (ParsedAuthorization, string, time.Duration, error) {

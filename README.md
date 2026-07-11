@@ -221,8 +221,11 @@ webadmin:
 ./natives3bridge -config configs/config.yaml \
   -seed-access-key TESTKEY \
   -seed-secret-key TESTSECRET \
-  -seed-quota-bytes 0
+  -seed-quota-bytes 0 \
+  -seed-bucket ""
 ```
+
+`-seed-bucket` 留空表示该密钥可访问所有桶；填入桶名则密钥只能操作该桶。
 
 启动后默认端口：
 
@@ -966,7 +969,8 @@ go test ./...
 ./natives3bridge -config configs/config.yaml \
   -seed-access-key TESTKEY \
   -seed-secret-key TESTSECRET \
-  -seed-quota-bytes 0
+  -seed-quota-bytes 0 \
+  -seed-bucket ""
 ```
 
 再运行：

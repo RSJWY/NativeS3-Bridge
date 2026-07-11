@@ -7,6 +7,7 @@ type Credential struct {
 	AccessKey  string `gorm:"uniqueIndex;size:128;not null"`
 	SecretKey  string `gorm:"size:256;not null"`
 	Name       string `gorm:"size:128"`
+	Bucket     string `gorm:"size:63;index"`
 	Status     string `gorm:"size:16;not null;default:enabled"`
 	QuotaBytes int64  `gorm:"not null;default:0"`
 	UsedBytes  int64  `gorm:"not null;default:0"`
