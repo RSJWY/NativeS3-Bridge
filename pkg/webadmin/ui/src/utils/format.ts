@@ -15,16 +15,41 @@ export function formatQuota(bytes: number): string {
   return bytes === 0 ? '不限' : formatBytes(bytes)
 }
 
-export function parseQuotaToBytes(value: string): number | null {
-  const trimmed = value.trim()
+export const quotaUnits = ['KB', 'MB', 'GB', 'TB'] as const
+
+export type QuotaUnit = (typeof quotaUnits)[number]
+
+const quotaUnitBytes: Record<QuotaUnit, number> = {
+  KB: 1024,
+  MB: 1024 ** 2,
+  GB: 1024 ** 3,
+  TB: 1024 ** 4
+}
+
+export function parseQuotaToBytes(value: string | number, unit: QuotaUnit): number | null {
+  const trimmed = String(value).trim()
   if (!trimmed) {
     return 0
   }
   const parsed = Number(trimmed)
-  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isSafeInteger(Math.floor(parsed))) {
+  const bytes = parsed * quotaUnitBytes[unit]
+  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isSafeInteger(bytes)) {
     return null
   }
-  return Math.floor(parsed)
+  return bytes
+}
+
+export function quotaInputFromBytes(bytes: number): { value: string; unit: QuotaUnit } {
+  if (bytes === 0) {
+    return { value: '0', unit: 'GB' }
+  }
+  for (const unit of [...quotaUnits].reverse()) {
+    const multiplier = quotaUnitBytes[unit]
+    if (bytes % multiplier === 0) {
+      return { value: String(bytes / multiplier), unit }
+    }
+  }
+  return { value: String(bytes / quotaUnitBytes.KB), unit: 'KB' }
 }
 
 export function usagePercent(used: number, quota: number): string {

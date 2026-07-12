@@ -71,8 +71,13 @@
           <option v-if="isMissingBucket(form.bucket)" :value="form.bucket" disabled>{{ form.bucket }}（已不存在，请改选）</option>
           <option v-for="bucket in buckets" :key="bucket.name" :value="bucket.name">{{ bucket.name }}</option>
         </select>
-        <label for="quota-bytes">配额字节数（0 表示不限）</label>
-        <input id="quota-bytes" v-model="form.quotaBytes" type="number" min="0" step="1" :disabled="saving" />
+        <label for="quota-value">容量配额（0 表示不限）</label>
+        <div class="quota-input">
+          <input id="quota-value" v-model="form.quotaValue" type="number" min="0" step="any" :disabled="saving" />
+          <select v-model="form.quotaUnit" aria-label="配额单位" :disabled="saving">
+            <option v-for="unit in quotaUnits" :key="unit" :value="unit">{{ unit }}</option>
+          </select>
+        </div>
         <p v-if="formError" class="error-text">{{ formError }}</p>
         <div class="modal-actions">
           <button class="secondary-button" type="button" :disabled="saving" @click="closeForm">取消</button>
@@ -100,7 +105,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { adminApi, type Bucket, type CreatedCredential, type Credential } from '../api/client'
-import { formatBytes, formatQuota, parseQuotaToBytes } from '../utils/format'
+import { formatBytes, formatQuota, parseQuotaToBytes, quotaInputFromBytes, quotaUnits, type QuotaUnit } from '../utils/format'
 
 const credentials = ref<Credential[]>([])
 const buckets = ref<Bucket[]>([])
@@ -113,7 +118,12 @@ const formError = ref('')
 const showForm = ref(false)
 const editing = ref<Credential | null>(null)
 const created = ref<CreatedCredential | null>(null)
-const form = reactive({ name: '', bucket: '', quotaBytes: '0' })
+const form = reactive<{ name: string; bucket: string; quotaValue: string | number; quotaUnit: QuotaUnit }>({
+  name: '',
+  bucket: '',
+  quotaValue: '0',
+  quotaUnit: 'GB'
+})
 const tableMutating = computed(() => togglingCredential.value !== null || deletingCredential.value !== null)
 const bucketNames = computed(() => new Set(buckets.value.map((bucket) => bucket.name)))
 
@@ -136,7 +146,8 @@ function openCreate() {
   editing.value = null
   form.name = ''
   form.bucket = ''
-  form.quotaBytes = '0'
+  form.quotaValue = '0'
+  form.quotaUnit = 'GB'
   formError.value = ''
   showForm.value = true
 }
@@ -146,7 +157,9 @@ function openEdit(credential: Credential) {
   editing.value = credential
   form.name = credential.name
   form.bucket = credential.bucket
-  form.quotaBytes = String(credential.quota_bytes)
+  const quotaInput = quotaInputFromBytes(credential.quota_bytes)
+  form.quotaValue = quotaInput.value
+  form.quotaUnit = quotaInput.unit
   formError.value = ''
   showForm.value = true
 }
@@ -158,9 +171,9 @@ function closeForm() {
 
 async function saveForm() {
   if (saving.value) return
-  const quota = parseQuotaToBytes(form.quotaBytes)
+  const quota = parseQuotaToBytes(form.quotaValue, form.quotaUnit)
   if (quota === null) {
-    formError.value = '配额必须是非负整数且不能超过安全范围'
+    formError.value = '配额必须是非负数，换算后需为整数字节且不能超过安全范围'
     return
   }
   if (isMissingBucket(form.bucket)) {

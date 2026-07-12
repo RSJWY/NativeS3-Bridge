@@ -560,6 +560,12 @@ pre {
   margin-top: 16px;
 }
 
+.quota-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 8px;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

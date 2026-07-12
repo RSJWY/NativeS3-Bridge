@@ -31,7 +31,8 @@
 - Bucket management UI must call `/api/admin/buckets*` through the shared API client with `credentials: 'include'`; it must not implement or call S3 `PutBucketAcl`.
 - Bucket ACL values in the UI are exactly `private` and `public-read`; display copy is Chinese (`私有`, `公开下载`) and `public-read` rows must warn that objects can be anonymously downloaded.
 - Bucket delete actions require `window.confirm` or an equivalent explicit second confirmation; non-empty bucket `409` must show a visible friendly error and must not be treated as success.
-- Quota input is raw bytes. Empty input means `0` (unlimited); invalid, negative, non-finite, or unsafe numbers must block submit with a visible error instead of becoming unlimited silently.
+- Credential quota input is a numeric value plus a `KB`, `MB`, `GB`, or `TB` selector; the frontend converts it to the API's raw `quota_bytes` field with binary 1024-based multipliers. Empty or zero input means `0` (unlimited); invalid, negative, non-finite, unsafe, or non-integral byte results must block submit with a visible error instead of becoming unlimited silently.
+- Editing a credential must choose the largest unit that represents its existing `quota_bytes` exactly; legacy values smaller than 1 KB fall back to a precise fractional KB value so saving without changes preserves the byte count.
 - Dashboard must render three real ECharts charts from API data: capacity usage donut, usage ranking bar chart, request trend line chart.
 - UI styling should stay functional and restrained: normal sidebar, simple cards/tables/forms, no gradients, no glass shells, no decorative hero copy, no oversized radii.
 - Reuse shared visual state classes instead of one-off styles: wrap wide tables in `.table-scroll`, use `.state-row` for loading/empty table rows, use `.status-badge` for credential status, and use `.chart-state` overlays for dashboard loading/empty chart states.
@@ -40,7 +41,7 @@
 
 - Login API error -> visible login error text.
 - Protected API returns `401` -> local auth cleared and route redirected to `/login`.
-- Create/update quota invalid -> block submit and show a form error.
+- Create/update quota invalid or not exactly representable as whole bytes -> block submit and show a form error.
 - Create/update/delete/toggle failure -> show a visible page or form error; do not leave unhandled promise rejections.
 - Bucket create invalid name -> visible error explaining lowercase/digit/hyphen 3-63 character naming constraints.
 - Bucket ACL update failure -> visible page error and UI selection returns to the previous ACL value.
@@ -53,15 +54,17 @@
 
 - Good: browser opens `/`, sees login, submits correct password, reaches `/dashboard`, and sees three chart canvases.
 - Good: creating a credential opens a modal with the one-time `Secret Key`; after closing, the table only shows access key/name/status/quota/usage.
+- Good: entering `10` with unit `GB` sends `quota_bytes: 10737418240`; editing that credential shows `10 GB`.
 - Good: opening `/buckets` after login lists bucket `name`, `acl`, and `created_at`; creating a valid bucket refreshes the table; switching ACL to `public-read` refreshes and shows the `公开下载` badge.
 - Base: refresh with stale local auth state may hit an API `401`, clear state, and redirect to login.
 - Bad: hiding a failed bucket delete or leaving the ACL select visually changed after the server rejects the update.
-- Bad: silently converting invalid quota text to `0`, because that grants unlimited capacity.
+- Bad: asking users to enter raw bytes, or silently converting invalid quota text to `0`, because the former is error-prone and the latter grants unlimited capacity.
 - Bad: storing the secret key in localStorage or showing it in the credential table.
 
 ### 6. Tests Required
 
 - `npm ci && npm run build` for dependency lock, TypeScript checking, and production bundle creation.
+- Quota conversion checks: assert KB/MB/GB/TB multipliers, zero/unlimited handling, fractional values that resolve to whole bytes, unsafe values, and exact edit-form round trips.
 - Browser smoke with real Chrome: login page text renders, successful login reaches dashboard, at least three `.chart-box canvas` elements exist, credentials page renders.
 - Bucket page smoke: login, navigate to `/buckets`, create a bucket, switch ACL to `public-read`, confirm the list shows `公开下载`, switch back to `private`, attempt non-empty delete and verify the friendly error.
 - API smoke through the UI session cookie: create credential, list credentials, confirm list response lacks `secret_key`.
@@ -73,17 +76,18 @@
 Wrong:
 
 ```ts
-return Number(value) || 0 // invalid values become unlimited quota
+return Number(value) || 0 // invalid values become unlimited quota and ignore the selected unit
 ```
 
 Correct:
 
 ```ts
-const parsed = Number(value.trim())
-if (!Number.isFinite(parsed) || parsed < 0 || !Number.isSafeInteger(Math.floor(parsed))) {
+const parsed = Number(String(value).trim()) // type=number v-model yields a number after editing
+const bytes = parsed * quotaUnitBytes[unit]
+if (!Number.isFinite(parsed) || parsed < 0 || !Number.isSafeInteger(bytes)) {
   return null
 }
-return Math.floor(parsed)
+return bytes
 ```
 
 Wrong:
