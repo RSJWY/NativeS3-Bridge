@@ -302,3 +302,36 @@ Added startup-safe database migration with SQLite pre-upgrade backups, SQLite in
 ### Next Steps
 
 - None - task complete
+
+
+## Session 10: 修复容器管理端公共监听启动失败
+
+**Date**: 2026-07-12
+**Task**: 修复容器管理端公共监听启动失败
+**Branch**: `main`
+
+### Summary
+
+将容器内公共管理监听从致命配置错误调整为生产安全告警，更新 Docker 示例、README 与 Webadmin 规范；前端构建、全量 Go 测试、race、vet、编译和真实启动烟测通过。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e3fefa9` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
