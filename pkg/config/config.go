@@ -26,12 +26,22 @@ type Config struct {
 
 type LogConfig struct {
 	File          string `yaml:"file"`
+	Dir           string `yaml:"dir"`
 	MaxSizeMB     int    `yaml:"max_size_mb"`
 	MaxBackups    int    `yaml:"max_backups"`
 	MaxAgeDays    int    `yaml:"max_age_days"`
 	Compress      bool   `yaml:"compress"`
 	maxSizeSet    bool
 	maxBackupsSet bool
+}
+
+const DefaultLogFileName = "natives3bridge.log"
+
+func (c LogConfig) EffectiveFile() string {
+	if c.Dir != "" {
+		return filepath.Join(c.Dir, DefaultLogFileName)
+	}
+	return c.File
 }
 
 func (c *LogConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -242,8 +252,11 @@ func (c *Config) Validate() error {
 	if c.Storage.MultipartMaxPendingBytes < 0 {
 		return fmt.Errorf("storage.multipart_max_pending_bytes must be positive")
 	}
-	if c.Log.File != "" && c.Log.MaxSizeMB < 1 {
-		return fmt.Errorf("log.max_size_mb must be at least 1 when log.file is set")
+	if c.Log.Dir != "" && c.Log.File != "" {
+		return fmt.Errorf("log.dir and log.file are mutually exclusive")
+	}
+	if c.Log.EffectiveFile() != "" && c.Log.MaxSizeMB < 1 {
+		return fmt.Errorf("log.max_size_mb must be at least 1 when file logging is enabled")
 	}
 	if c.Log.MaxBackups < 0 {
 		return fmt.Errorf("log.max_backups must not be negative")

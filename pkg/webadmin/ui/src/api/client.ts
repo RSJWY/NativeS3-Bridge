@@ -53,12 +53,23 @@ export interface LogEntry {
   attrs?: Record<string, unknown>
 }
 
+export interface LogFileInfo {
+  id: string
+  name: string
+  size: number
+  modified_at: string
+  current: boolean
+  compressed: boolean
+}
+
 export interface LogsResponse {
   source: 'ring' | 'file'
   file_enabled: boolean
   limit: number
   entries: LogEntry[]
   warning?: string
+  files: LogFileInfo[]
+  selected_file?: LogFileInfo
 }
 
 export interface ReconcileCredential {
@@ -206,10 +217,11 @@ export const adminApi = {
   requestTrend(days = 30) {
     return apiFetch<RequestTrendItem[]>(`/api/admin/dashboard/request-trend?days=${days}`)
   },
-  logs(params: { limit: number; level?: string; q?: string }) {
+  logs(params: { limit: number; level?: string; q?: string; file?: string }) {
     const query = new URLSearchParams({ limit: String(params.limit) })
     if (params.level) query.set('level', params.level)
     if (params.q) query.set('q', params.q)
+    if (params.file) query.set('file', params.file)
     return apiFetch<LogsResponse>(`/api/admin/logs?${query.toString()}`)
   }
 }

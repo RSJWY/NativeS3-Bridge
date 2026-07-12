@@ -10,10 +10,17 @@
 
     <div v-if="error" class="notice error-notice">{{ error }}</div>
     <div v-if="response?.warning" class="notice warning-notice">{{ response.warning }}</div>
-    <div v-if="response && !response.file_enabled" class="notice info-notice">当前仅保留内存日志，服务重启后会清空。配置 log.file 可启用轮转落盘。</div>
+    <div v-if="response && !response.file_enabled" class="notice info-notice">当前仅保留内存日志，服务重启后会清空。配置 log.dir 可启用轮转落盘。</div>
 
     <section class="panel form-panel">
       <form class="log-toolbar" @submit.prevent="load">
+        <div class="form-field log-file">
+          <label for="log-file">日志文件</label>
+          <select id="log-file" v-model="selectedFile" :disabled="loading || !response?.files.length" @change="load">
+            <option v-if="!response?.files.length" value="">内存日志</option>
+            <option v-for="file in response?.files ?? []" :key="file.id" :value="file.id">{{ formatLogFile(file) }}</option>
+          </select>
+        </div>
         <div class="form-field"><label for="log-level">级别</label><select id="log-level" v-model="level"><option value="">全部</option><option>DEBUG</option><option>INFO</option><option>WARN</option><option>ERROR</option></select></div>
         <div class="form-field"><label for="log-query">搜索</label><input id="log-query" v-model="query" type="search" placeholder="消息、桶名或请求 ID" /></div>
         <div class="form-field log-limit"><label for="log-limit">条数</label><select id="log-limit" v-model.number="limit"><option :value="100">100</option><option :value="200">200</option><option :value="500">500</option></select></div>
@@ -38,7 +45,7 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { adminApi, type LogsResponse } from '../api/client'
+import { adminApi, type LogFileInfo, type LogsResponse } from '../api/client'
 
 const response = ref<LogsResponse | null>(null)
 const loading = ref(false)
@@ -46,6 +53,7 @@ const error = ref('')
 const level = ref('')
 const query = ref('')
 const limit = ref(200)
+const selectedFile = ref('')
 
 onMounted(load)
 
@@ -53,8 +61,15 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    response.value = await adminApi.logs({ limit: limit.value, level: level.value, q: query.value.trim() })
+    const next = await adminApi.logs({ limit: limit.value, level: level.value, q: query.value.trim(), file: selectedFile.value || undefined })
+    response.value = next
+    if (!selectedFile.value && next.selected_file) {
+      selectedFile.value = next.selected_file.id
+    }
   } catch (err) {
+    if (response.value) {
+      response.value = { ...response.value, entries: [] }
+    }
     error.value = err instanceof Error ? err.message : '加载日志失败'
   } finally {
     loading.value = false
@@ -68,5 +83,17 @@ function formatTime(value: string) {
 
 function formatAttrs(attrs: Record<string, unknown>) {
   return Object.entries(attrs).map(([key, value]) => `${key}=${String(value)}`).join(' ')
+}
+
+function formatLogFile(file: LogFileInfo) {
+  if (file.current) return `当前日志 · ${formatSize(file.size)}`
+  const compressed = file.compressed ? ' · gzip' : ''
+  return `${file.name} · ${formatTime(file.modified_at)} · ${formatSize(file.size)}${compressed}`
+}
+
+function formatSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 </script>

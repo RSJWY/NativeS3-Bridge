@@ -551,8 +551,13 @@ pre {
 
 .log-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 12px;
+}
+
+.log-file {
+  min-width: min(100%, 320px);
 }
 
 .log-limit {

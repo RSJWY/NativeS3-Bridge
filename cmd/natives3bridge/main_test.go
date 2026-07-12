@@ -54,6 +54,22 @@ func TestSetupSlogWritesFileAndRing(t *testing.T) {
 	}
 }
 
+func TestSetupSlogWritesDirectoryActiveFile(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "logs")
+	if _, err := setupSlog("info", config.LogConfig{Dir: directory, MaxSizeMB: 1, MaxBackups: 1}); err != nil {
+		t.Fatal(err)
+	}
+	slog.Info("directory logging test")
+	path := filepath.Join(directory, config.DefaultLogFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "directory logging test") {
+		t.Fatalf("log file = %q", data)
+	}
+}
+
 func TestSetupSlogRejectsUnusablePath(t *testing.T) {
 	parent := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {

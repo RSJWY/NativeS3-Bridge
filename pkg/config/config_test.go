@@ -283,8 +283,16 @@ webadmin:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Log.File != "" || cfg.Log.MaxSizeMB != 100 || cfg.Log.MaxBackups != 5 || cfg.Log.MaxAgeDays != 0 {
+	if cfg.Log.File != "" || cfg.Log.Dir != "" || cfg.Log.MaxSizeMB != 100 || cfg.Log.MaxBackups != 5 || cfg.Log.MaxAgeDays != 0 {
 		t.Fatalf("log defaults = %+v", cfg.Log)
+	}
+	legacyFile := filepath.Join(t.TempDir(), "legacy.log")
+	if effective := (LogConfig{File: legacyFile}).EffectiveFile(); effective != legacyFile {
+		t.Fatalf("legacy effective file = %q, want %q", effective, legacyFile)
+	}
+	logDir := t.TempDir()
+	if effective := (LogConfig{Dir: logDir}).EffectiveFile(); effective != filepath.Join(logDir, DefaultLogFileName) {
+		t.Fatalf("directory effective file = %q", effective)
 	}
 
 	cfg.Log.File = filepath.Join(t.TempDir(), "app.log")
@@ -296,6 +304,16 @@ webadmin:
 	cfg.Log.MaxBackups = -1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_backups") {
 		t.Fatalf("max backups validation = %v", err)
+	}
+	cfg.Log.MaxBackups = 5
+	cfg.Log.Dir = t.TempDir()
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("log dir/file conflict validation = %v", err)
+	}
+	cfg.Log.File = ""
+	cfg.Log.MaxSizeMB = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_size_mb") {
+		t.Fatalf("log dir max size validation = %v", err)
 	}
 
 	explicitPath := filepath.Join(t.TempDir(), "explicit.yaml")

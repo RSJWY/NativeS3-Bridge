@@ -112,7 +112,7 @@ func main() {
 	adminServer, err := webadmin.NewServer(cfg.Server, cfg.WebAdmin, gdb, credentialStore, bucketStore, webadmin.ServerOptions{
 		TrustForwarded: cfg.RateLimit.TrustForwarded,
 		LogRing:        logRing,
-		LogFile:        cfg.Log.File,
+		LogFile:        cfg.Log.EffectiveFile(),
 		DataRoot:       cfg.Storage.DataRoot,
 		MetadataSuffix: cfg.Storage.MetadataSuffix,
 	})
@@ -174,13 +174,14 @@ func setupSlog(level string, logCfg config.LogConfig) (*loggingpkg.Ring, error) 
 	}
 
 	writers := []io.Writer{os.Stdout}
-	if logCfg.File != "" {
-		directory := filepath.Dir(logCfg.File)
+	logFile := logCfg.EffectiveFile()
+	if logFile != "" {
+		directory := filepath.Dir(logFile)
 		if err := os.MkdirAll(directory, 0o750); err != nil {
 			return nil, fmt.Errorf("create log directory %q: %w", directory, err)
 		}
 		fileWriter := &lumberjack.Logger{
-			Filename:   logCfg.File,
+			Filename:   logFile,
 			MaxSize:    logCfg.MaxSizeMB,
 			MaxBackups: logCfg.MaxBackups,
 			MaxAge:     logCfg.MaxAgeDays,
@@ -188,7 +189,7 @@ func setupSlog(level string, logCfg config.LogConfig) (*loggingpkg.Ring, error) 
 			LocalTime:  true,
 		}
 		if _, err := fileWriter.Write(nil); err != nil {
-			return nil, fmt.Errorf("open log file %q: %w", logCfg.File, err)
+			return nil, fmt.Errorf("open log file %q: %w", logFile, err)
 		}
 		writers = append(writers, fileWriter)
 	}

@@ -570,6 +570,7 @@ GET /api/admin/auth-settings
 | `GET` | `/api/admin/dashboard/summary` | credential 数量、总 quota、总 used bytes。 |
 | `GET` | `/api/admin/dashboard/usage-ranking` | credential 用量排行。 |
 | `GET` | `/api/admin/dashboard/request-trend?days=30` | 按 UTC 日期聚合请求趋势。 |
+| `GET` | `/api/admin/logs?file=&limit=&level=&q=` | 查看当前或历史轮转日志。 |
 
 ### Curl 示例
 
@@ -599,19 +600,21 @@ curl -b cookie.txt \
 
 ### 日志查看与轮转落盘
 
-管理后台的「日志」页面可查看最近的运行日志和 S3 请求日志。默认仅保存在进程内存 ring 中（最多 2000 条，重启清空），stdout 始终保留。配置 `log.file` 后会同时写入轮转文件，并优先从当前日志文件读取管理页数据：
+管理后台的「日志」页面可查看最近的运行日志和 S3 请求日志。默认仅保存在进程内存 ring 中（最多 2000 条，重启清空），stdout 始终保留。新部署推荐配置 `log.dir`；当前日志固定写入目录下的 `natives3bridge.log`，管理页可选择查看匹配的普通或 gzip 历史轮转文件：
 
 ```yaml
 log_level: "info"
 log:
-  file: "/state/logs/natives3bridge.log"
+  dir: "/state/logs"
   max_size_mb: 100
   max_backups: 5
   max_age_days: 14
-  compress: false
+  compress: true
 ```
 
-日志文件建议放在 Docker `state` 卷，禁止放入对象 `storage.data_root`。配置了不可写路径时服务会启动失败，避免静默丢日志。`max_backups: 0` 表示不保留历史文件；`max_age_days > 0` 时 lumberjack 会在轮转维护中清理超过该天数的历史文件。
+旧配置 `log.file: "/state/logs/custom.log"` 继续受支持，管理页也会发现该 basename 对应的 lumberjack 历史文件。`log.dir` 与 `log.file` 不能同时设置，否则配置校验失败；两者都为空时只写 stdout 和内存 ring。
+
+日志目录建议放在 Docker `state` 卷，禁止放入对象 `storage.data_root`。配置了不可写路径时服务会启动失败，避免静默丢日志。`max_backups: 0` 表示不保留历史文件；`max_age_days > 0` 时 lumberjack 会在轮转维护中清理超过该天数的历史文件。管理 API 只接受页面返回的文件 ID，不接受任意路径；历史文件被清理后会明确报错，不会静默显示其他文件。
 
 ### 存储对账
 

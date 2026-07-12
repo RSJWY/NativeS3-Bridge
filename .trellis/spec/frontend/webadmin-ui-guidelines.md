@@ -17,6 +17,7 @@
 - Routes: `/login`, `/dashboard`, `/credentials`, `/buckets`; `/` redirects to `/dashboard`.
 - API client: `apiFetch<T>(path: string, options?: RequestOptions): Promise<T>` with `credentials: 'include'`.
 - Admin API methods: `login`, `logout`, `listCredentials`, `createCredential`, `updateCredential`, `deleteCredential`, `listBuckets`, `createBucket`, `deleteBucket`, `setBucketACL`, `dashboardSummary`, `usageRanking`, `requestTrend`.
+- Logs client: `adminApi.logs({ limit, level?, q?, file? })`; response includes `files: LogFileInfo[]` and optional `selected_file`.
 - Vite proxy: `server.proxy['/api'] = 'http://localhost:9001'`.
 - Build command: `npm run build` runs `vue-tsc --noEmit && vite build` into `dist/`.
 - Build version input: optional `APP_VERSION`; Vite exposes it as the compile-time string `__APP_VERSION__`.
@@ -39,6 +40,8 @@
 - Application release metadata has one frontend source: `APP_VERSION` is trimmed and falls back to `dev`; Release workflow and Docker Buildx must pass the same release tag, while local builds omit it.
 - GitHub URL and compiled version must be defined in shared project config and rendered through a shared component on both login and protected application shells. External repository links use `target="_blank"` and `rel="noopener noreferrer"`.
 - Reuse shared visual state classes instead of one-off styles: wrap wide tables in `.table-scroll`, use `.state-row` for loading/empty table rows, use `.status-badge` for credential status, and use `.chart-state` overlays for dashboard loading/empty chart states.
+- The logs toolbar starts with a normal select populated only from `files`; labels distinguish current history and show history time, size, and gzip state. Changing files preserves level/query/limit and requests the selected ID through the shared API client.
+- A selected-history request failure must remain visible, clear stale entries, keep the selection available so the user can switch back, and never relabel another source as the selected file. File-disabled responses keep the ring view and show the `log.dir` setup notice.
 
 ### 4. Validation & Error Matrix
 
@@ -53,6 +56,7 @@
 - Mobile viewport under 900px -> sidebar becomes top navigation and charts/tables remain reachable.
 - Empty or whitespace-only `APP_VERSION` -> compile `dev`; non-empty release tag -> render that exact tag without a runtime request.
 - Wide credential or bucket tables on narrow viewports -> horizontal scrolling within `.table-scroll`, not page-level overflow.
+- Selected log file removed or unreadable -> visible API error and no stale/other-file entries; no file logging -> ring entries plus an explicit in-memory notice.
 
 ### 5. Good/Base/Bad Cases
 
@@ -71,6 +75,7 @@
 ### 6. Tests Required
 
 - `npm ci && npm run build` for dependency lock, TypeScript checking, and production bundle creation.
+- Logs build/browser check: current/history options render from typed API metadata, selection retains level/query/limit, gzip labels are visible, and a failed selected-file request clears stale entries while preserving a route back to current.
 - Quota conversion checks: assert KB/MB/GB/TB multipliers, zero/unlimited handling, fractional values that resolve to whole bytes, unsafe values, and exact edit-form round trips.
 - Browser smoke with real Chrome: login page text renders, successful login reaches dashboard, at least three `.chart-box canvas` elements exist, credentials page renders.
 - Bucket page smoke: login, navigate to `/buckets`, create a bucket, switch ACL to `public-read`, confirm the list shows `公开下载`, switch back to `private`, attempt non-empty delete and verify the friendly error.
@@ -141,6 +146,18 @@ Correct:
 ```ts
 const appVersion = process.env.APP_VERSION?.trim() || 'dev'
 define: { __APP_VERSION__: JSON.stringify(appVersion) }
+```
+
+Wrong:
+
+```ts
+adminApi.logs({ file: '/state/logs/app.log', limit }) // client invents a path
+```
+
+Correct:
+
+```ts
+adminApi.logs({ file: selectedFileID, limit, level, q }) // ID came from response.files
 ```
 
 ---
