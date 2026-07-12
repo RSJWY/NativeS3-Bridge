@@ -374,3 +374,36 @@ Implemented rotating file logging with admin log viewer and single-bucket storag
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: 优化管理端界面并展示项目信息
+
+**Date**: 2026-07-12
+**Task**: 优化管理端界面并展示项目信息
+**Branch**: `main`
+
+### Summary
+
+优化管理端侧栏、导航、登录页与移动端布局；新增 GitHub 和发布版本展示；接通 Release 与 Docker Tag 注入，并完成构建及真实 Chrome 验证。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `be68f63` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
