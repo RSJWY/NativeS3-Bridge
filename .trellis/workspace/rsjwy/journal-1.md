@@ -341,3 +341,36 @@ Added startup-safe database migration with SQLite pre-upgrade backups, SQLite in
 
 ## 2026-07-12
 - 创建任务 `07-12-admin-logging`（日志落盘+管理页查看）：prd/design/implement 已齐，status=planning；用户要求暂不实现。与 storage-reconcile 独立。
+
+
+## Session 11: Admin logging and storage reconcile
+
+**Date**: 2026-07-12
+**Task**: Admin logging and storage reconcile
+**Branch**: `main`
+
+### Summary
+
+Implemented rotating file logging with admin log viewer and single-bucket storage reconciliation with quota repair; validated full test suite, race tests, runtime HTTP E2E, and upgrade from 0.1-test.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ec35cca` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
