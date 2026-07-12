@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const validTestSessionSecret = "test-only-session-secret-32-bytes-minimum"
+
 func TestLoadRejectsMissingDataRoot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := []byte(`
@@ -33,7 +35,18 @@ webadmin:
 }
 
 func TestLoadParsesMultipartDurations(t *testing.T) {
-	cfg, err := Load(filepath.Join("..", "..", "configs", "config.example.yaml"))
+	examplePath := filepath.Join("..", "..", "configs", "config.example.yaml")
+	data, err := os.ReadFile(examplePath)
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	data = []byte(strings.Replace(string(data), "replace-with-random-secret-at-least-32-bytes", validTestSessionSecret, 1))
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
+	}
+
+	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("load example config: %v", err)
 	}
@@ -42,6 +55,9 @@ func TestLoadParsesMultipartDurations(t *testing.T) {
 	}
 	if cfg.Storage.MultipartTTL != 24*time.Hour {
 		t.Fatalf("multipart ttl = %v, want 24h", cfg.Storage.MultipartTTL)
+	}
+	if cfg.Storage.MultipartMaxPendingBytes != 10<<30 {
+		t.Fatalf("multipart max pending bytes = %d, want 10 GiB", cfg.Storage.MultipartMaxPendingBytes)
 	}
 	if cfg.WebAdmin.LoginMaxFailures != 5 {
 		t.Fatalf("login max failures = %d, want 5", cfg.WebAdmin.LoginMaxFailures)
@@ -72,6 +88,15 @@ func TestLoadParsesMultipartDurations(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsUsesLoopbackAdminAddress(t *testing.T) {
+	cfg := Config{}
+	cfg.applyDefaults()
+
+	if cfg.Server.AdminAddr != "127.0.0.1:9001" {
+		t.Fatalf("admin addr = %q, want loopback default", cfg.Server.AdminAddr)
+	}
+}
+
 func TestEffectiveAdminTLSInheritsWhenUnset(t *testing.T) {
 	serverCfg := ServerConfig{TLS: TLSConfig{Enabled: true, CertFile: "s3.crt", KeyFile: "s3.key"}}
 
@@ -99,7 +124,7 @@ func TestValidateRejectsEnabledTLSMissingFiles(t *testing.T) {
 	base := Config{
 		Storage:  StorageConfig{DataRoot: t.TempDir()},
 		Database: DatabaseConfig{Driver: "sqlite", DSN: "test.db"},
-		WebAdmin: WebAdminConfig{SessionSecret: "change-me-32bytes-random"},
+		WebAdmin: WebAdminConfig{SessionSecret: validTestSessionSecret},
 	}
 
 	cfg := base
@@ -121,11 +146,38 @@ func TestValidateRejectsEnabledTLSMissingFiles(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsPublicAdminWithoutTLS(t *testing.T) {
+	base := Config{
+		Storage:  StorageConfig{DataRoot: t.TempDir()},
+		Database: DatabaseConfig{Driver: "sqlite", DSN: "test.db"},
+		WebAdmin: WebAdminConfig{SessionSecret: validTestSessionSecret},
+	}
+
+	cfg := base
+	cfg.Server.AdminAddr = "0.0.0.0:9001"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must not listen publicly") {
+		t.Fatalf("public plaintext admin validation error = %v, want public-listener error", err)
+	}
+
+	cfg = base
+	cfg.Server.AdminAddr = "127.0.0.1:9001"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("loopback plaintext admin returned error: %v", err)
+	}
+
+	cfg = base
+	cfg.Server.AdminAddr = "0.0.0.0:9001"
+	cfg.Server.AdminTLS = &TLSConfig{Enabled: true, CertFile: "admin.crt", KeyFile: "admin.key"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("public TLS admin returned error: %v", err)
+	}
+}
+
 func TestValidateRejectsInvalidSecurityConfig(t *testing.T) {
 	base := Config{
 		Storage:  StorageConfig{DataRoot: t.TempDir()},
 		Database: DatabaseConfig{Driver: "sqlite", DSN: "test.db"},
-		WebAdmin: WebAdminConfig{SessionSecret: "test-session-secret"},
+		WebAdmin: WebAdminConfig{SessionSecret: validTestSessionSecret},
 	}
 
 	cfg := base
@@ -158,6 +210,27 @@ func TestValidateRejectsInvalidSecurityConfig(t *testing.T) {
 	cfg.WebAdmin.Ops.MetricsToken = "change-me-token"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "metrics_token") {
 		t.Fatalf("metrics token validation error = %v, want metrics_token error", err)
+	}
+}
+
+func TestValidateRejectsWeakSessionSecrets(t *testing.T) {
+	base := Config{
+		Storage:  StorageConfig{DataRoot: t.TempDir()},
+		Database: DatabaseConfig{Driver: "sqlite", DSN: "test.db"},
+	}
+
+	for _, secret := range []string{"", "short-session-secret", "change-me-32bytes-random", "replace-with-random-secret-at-least-32-bytes"} {
+		cfg := base
+		cfg.WebAdmin.SessionSecret = secret
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "webadmin.session_secret") {
+			t.Fatalf("session secret %q validation error = %v, want webadmin.session_secret error", secret, err)
+		}
+	}
+
+	cfg := base
+	cfg.WebAdmin.SessionSecret = validTestSessionSecret
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid session secret returned error: %v", err)
 	}
 }
 

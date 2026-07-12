@@ -50,11 +50,12 @@ type RateLimitConfig struct {
 }
 
 type StorageConfig struct {
-	DataRoot            string        `yaml:"data_root"`
-	MultipartTmp        string        `yaml:"multipart_tmp"`
-	MetadataSuffix      string        `yaml:"metadata_suffix"`
-	MultipartGCInterval time.Duration `yaml:"multipart_gc_interval"`
-	MultipartTTL        time.Duration `yaml:"multipart_ttl"`
+	DataRoot                 string        `yaml:"data_root"`
+	MultipartTmp             string        `yaml:"multipart_tmp"`
+	MetadataSuffix           string        `yaml:"metadata_suffix"`
+	MultipartGCInterval      time.Duration `yaml:"multipart_gc_interval"`
+	MultipartTTL             time.Duration `yaml:"multipart_ttl"`
+	MultipartMaxPendingBytes int64         `yaml:"multipart_max_pending_bytes"`
 }
 
 type DatabaseConfig struct {
@@ -128,7 +129,7 @@ func (c *Config) applyDefaults() {
 		c.Server.S3Addr = "0.0.0.0:9000"
 	}
 	if c.Server.AdminAddr == "" {
-		c.Server.AdminAddr = "0.0.0.0:9001"
+		c.Server.AdminAddr = "127.0.0.1:9001"
 	}
 	if c.Storage.MetadataSuffix == "" {
 		c.Storage.MetadataSuffix = ".s3meta"
@@ -141,6 +142,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Storage.MultipartTTL == 0 {
 		c.Storage.MultipartTTL = 24 * time.Hour
+	}
+	if c.Storage.MultipartMaxPendingBytes == 0 {
+		c.Storage.MultipartMaxPendingBytes = 10 << 30
 	}
 	if c.Hooks.QueueSize == 0 {
 		c.Hooks.QueueSize = 1024
@@ -200,8 +204,11 @@ func (c *Config) Validate() error {
 	if c.Database.DSN == "" {
 		return fmt.Errorf("database.dsn is required")
 	}
-	if c.WebAdmin.SessionSecret == "" {
-		return fmt.Errorf("webadmin.session_secret is required")
+	if c.Storage.MultipartMaxPendingBytes < 0 {
+		return fmt.Errorf("storage.multipart_max_pending_bytes must be positive")
+	}
+	if err := validateSessionSecret(c.WebAdmin.SessionSecret); err != nil {
+		return err
 	}
 	if c.Server.TLS.Enabled && (c.Server.TLS.CertFile == "" || c.Server.TLS.KeyFile == "") {
 		return fmt.Errorf("server.tls cert_file and key_file are required when enabled")
@@ -209,6 +216,9 @@ func (c *Config) Validate() error {
 	adminTLS := c.Server.EffectiveAdminTLS()
 	if adminTLS.Enabled && (adminTLS.CertFile == "" || adminTLS.KeyFile == "") {
 		return fmt.Errorf("server.admin_tls cert_file and key_file are required when enabled")
+	}
+	if c.Server.AdminAddr != "" && isPublicListenAddr(c.Server.AdminAddr) && !adminTLS.Enabled {
+		return fmt.Errorf("server.admin_addr must not listen publicly without server.admin_tls enabled")
 	}
 	if c.WebAdmin.TOTP.Enabled {
 		if _, err := decodeTOTPSecret(c.WebAdmin.TOTP.Secret); err != nil {
@@ -252,7 +262,7 @@ func (c *Config) Validate() error {
 func (c *Config) ProductionWarnings() []string {
 	var warnings []string
 	adminTLS := c.Server.EffectiveAdminTLS()
-	if c.WebAdmin.SessionSecret == "change-me-32bytes-random" {
+	if isWeakSessionSecret(c.WebAdmin.SessionSecret) {
 		warnings = append(warnings, "webadmin.session_secret still uses the example value")
 	}
 	if c.WebAdmin.AdminBootstrapPassword != "" {
@@ -301,6 +311,29 @@ func isExampleSecret(value string) bool {
 	switch strings.TrimSpace(value) {
 	case "", "change-me", "change-me-token", "change-me-32bytes-random":
 		return value != ""
+	default:
+		return false
+	}
+}
+
+func validateSessionSecret(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("webadmin.session_secret is required")
+	}
+	if isWeakSessionSecret(value) {
+		return fmt.Errorf("webadmin.session_secret must be a random secret of at least 32 bytes and must not use an example value")
+	}
+	return nil
+}
+
+func isWeakSessionSecret(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if len([]byte(trimmed)) < 32 {
+		return true
+	}
+	switch trimmed {
+	case "change-me-32bytes-random", "replace-with-random-secret-at-least-32-bytes", "replace-with-a-random-32-byte-secret":
+		return true
 	default:
 		return false
 	}

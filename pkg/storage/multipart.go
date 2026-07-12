@@ -13,16 +13,18 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
 
 var (
-	ErrNoSuchUpload      = errors.New("no such multipart upload")
-	ErrInvalidPartNumber = errors.New("invalid part number")
-	ErrInvalidPart       = errors.New("invalid part")
-	ErrInvalidPartOrder  = errors.New("invalid part order")
+	ErrNoSuchUpload          = errors.New("no such multipart upload")
+	ErrInvalidPartNumber     = errors.New("invalid part number")
+	ErrInvalidPart           = errors.New("invalid part")
+	ErrInvalidPartOrder      = errors.New("invalid part order")
+	ErrMultipartStorageLimit = errors.New("multipart pending storage limit exceeded")
 )
 
 type CompletedPart struct {
@@ -45,9 +47,17 @@ type MultipartUploadInfo struct {
 }
 
 type MultipartStore struct {
-	root           string
-	tmpRoot        string
-	metadataSuffix string
+	root            string
+	tmpRoot         string
+	metadataSuffix  string
+	maxPendingBytes int64
+	mu              sync.Mutex
+}
+
+func (s *MultipartStore) SetMaxPendingBytes(limit int64) {
+	s.mu.Lock()
+	s.maxPendingBytes = limit
+	s.mu.Unlock()
 }
 
 type multipartManifest struct {
@@ -102,6 +112,8 @@ func (s *MultipartStore) Create(bucket, key, contentType string, meta map[string
 }
 
 func (s *MultipartStore) UploadPart(uploadID string, partNumber int, r io.Reader) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if partNumber < 1 || partNumber > 10000 {
 		return "", ErrInvalidPartNumber
 	}
@@ -109,24 +121,68 @@ func (s *MultipartStore) UploadPart(uploadID string, partNumber int, r io.Reader
 		return "", err
 	}
 	path := s.partPath(uploadID, partNumber)
+	oldSize := int64(0)
+	if info, err := os.Stat(path); err == nil {
+		oldSize = info.Size()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	available := int64(-1)
+	if s.maxPendingBytes > 0 {
+		pending, err := s.pendingBytesLocked()
+		if err != nil {
+			return "", err
+		}
+		available = s.maxPendingBytes - pending + oldSize
+		if available < 0 {
+			return "", ErrMultipartStorageLimit
+		}
+	}
 	tmp := path + ".tmp-" + randomHex(8)
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		return "", err
 	}
 	h := md5.New()
-	_, copyErr := io.Copy(io.MultiWriter(f, h), r)
+	reader := r
+	if available >= 0 {
+		reader = io.LimitReader(r, available+1)
+	}
+	written, copyErr := io.Copy(io.MultiWriter(f, h), reader)
 	syncErr := f.Sync()
 	closeErr := f.Close()
 	if copyErr != nil || syncErr != nil || closeErr != nil {
 		_ = os.Remove(tmp)
 		return "", firstErr(copyErr, syncErr, closeErr)
 	}
+	if available >= 0 && written > available {
+		_ = os.Remove(tmp)
+		return "", ErrMultipartStorageLimit
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func (s *MultipartStore) pendingBytesLocked() (int64, error) {
+	var total int64
+	err := filepath.WalkDir(s.tmpRoot, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "part-") || strings.Contains(entry.Name(), ".tmp-") {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	return total, err
 }
 
 func (s *MultipartStore) ValidateTarget(uploadID, bucket, key string) error {
@@ -157,6 +213,25 @@ func (s *MultipartStore) CompleteSize(uploadID string, parts []CompletedPart) (i
 		total += info.Size()
 	}
 	return total, nil
+}
+
+func (s *MultipartStore) ExistingObjectSize(uploadID string) (int64, error) {
+	manifest, err := s.readManifest(uploadID)
+	if err != nil {
+		return 0, err
+	}
+	target, err := ResolveObjectPath(s.root, manifest.Bucket, manifest.Key)
+	if err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
 }
 
 func (s *MultipartStore) Complete(uploadID string, parts []CompletedPart) (ObjectInfo, error) {

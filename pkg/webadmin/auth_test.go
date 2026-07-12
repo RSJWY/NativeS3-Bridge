@@ -62,6 +62,35 @@ func TestLoginLockoutCheckedBeforeBodyDecode(t *testing.T) {
 	}
 }
 
+func TestLoginLockoutTrustForwardedIgnoresSpoofedPrefix(t *testing.T) {
+	auth := NewAuth(config.WebAdminConfig{
+		PasswordHash:       mustPasswordHash(t),
+		SessionSecret:      "test-session-secret",
+		SessionTTLMinutes:  10,
+		LoginMaxFailures:   1,
+		LoginLockoutWindow: time.Minute,
+	})
+	auth.failureDelay = 0
+	auth.trustForwarded = true
+
+	request := func(xff, password string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/login", bytes.NewBufferString(`{"password":"`+password+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", xff)
+		req.RemoteAddr = "192.0.2.1:1234"
+		rr := httptest.NewRecorder()
+		auth.Login(rr, req)
+		return rr
+	}
+
+	if first := request("198.51.100.1, 203.0.113.10", "wrong"); first.Code != http.StatusUnauthorized {
+		t.Fatalf("first status = %d, want 401", first.Code)
+	}
+	if second := request("198.51.100.2, 203.0.113.10", "test-password"); second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want 429", second.Code)
+	}
+}
+
 func TestLoginSuccessClearsFailureCount(t *testing.T) {
 	auth := NewAuth(config.WebAdminConfig{
 		PasswordHash:       mustPasswordHash(t),
@@ -96,6 +125,71 @@ func TestLoginCookieSecureFollowsAdminTLS(t *testing.T) {
 	cookies := rr.Result().Cookies()
 	if len(cookies) == 0 || !cookies[0].Secure {
 		t.Fatalf("cookies = %+v, want Secure cookie", cookies)
+	}
+}
+
+func TestLogoutRevokesCurrentSession(t *testing.T) {
+	auth := NewAuth(config.WebAdminConfig{
+		PasswordHash:      mustPasswordHash(t),
+		SessionSecret:     "test-session-secret",
+		SessionTTLMinutes: 10,
+	})
+	auth.failureDelay = 0
+
+	login := loginRequestRecorder(auth, `{"password":"test-password"}`, "192.0.2.1:1234")
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want 200", login.Code)
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login did not set a session cookie")
+	}
+	sessionCookie := cookies[0]
+
+	protected := auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/dashboard/summary", nil)
+	request.AddCookie(sessionCookie)
+	beforeLogout := httptest.NewRecorder()
+	protected.ServeHTTP(beforeLogout, request)
+	if beforeLogout.Code != http.StatusNoContent {
+		t.Fatalf("before logout status = %d, want 204", beforeLogout.Code)
+	}
+
+	logoutHandler := auth.Middleware(http.HandlerFunc(auth.Logout))
+	logoutRequest := httptest.NewRequest(http.MethodPost, "/api/admin/logout", nil)
+	logoutRequest.AddCookie(sessionCookie)
+	logout := httptest.NewRecorder()
+	logoutHandler.ServeHTTP(logout, logoutRequest)
+	if logout.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, want 200", logout.Code)
+	}
+
+	replayRequest := httptest.NewRequest(http.MethodGet, "/api/admin/dashboard/summary", nil)
+	replayRequest.AddCookie(sessionCookie)
+	replay := httptest.NewRecorder()
+	protected.ServeHTTP(replay, replayRequest)
+	if replay.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed session status = %d, want 401", replay.Code)
+	}
+}
+
+func TestSessionDoesNotSurviveAuthRestart(t *testing.T) {
+	cfg := config.WebAdminConfig{
+		PasswordHash:      mustPasswordHash(t),
+		SessionSecret:     "test-session-secret",
+		SessionTTLMinutes: 10,
+	}
+	firstAuth := NewAuth(cfg)
+	session, err := firstAuth.issueSession(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
+
+	restartedAuth := NewAuth(cfg)
+	if _, err := restartedAuth.verifySession(session); err == nil {
+		t.Fatal("session from prior auth instance remained valid")
 	}
 }
 

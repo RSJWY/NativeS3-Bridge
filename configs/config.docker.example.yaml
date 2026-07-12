@@ -1,6 +1,7 @@
 server:
   s3_addr: "0.0.0.0:9000"
-  admin_addr: "0.0.0.0:9001"
+  # Public binds require admin_tls. Keep loopback for plaintext/local proxy use.
+  admin_addr: "127.0.0.1:9001"
   tls:
     enabled: false
     cert_file: ""
@@ -12,6 +13,7 @@ storage:
   metadata_suffix: ".s3meta"
   multipart_gc_interval: "1h"
   multipart_ttl: "24h"
+  multipart_max_pending_bytes: 10737418240
 
 database:
   driver: "sqlite"
@@ -24,9 +26,13 @@ hooks:
   timeout: "5s"
 
 webadmin:
+  # Generate a bcrypt hash before enabling admin login, for example:
+  #   htpasswd -bnBC 12 "" 'your-strong-password' | tr -d ':\n'
+  # Keep this file permission-restricted and paste the resulting hash below.
+  # Admin login remains disabled while password_hash is empty.
   password_hash: ""
-  admin_bootstrap_password: "change-me-on-first-start"
-  session_secret: "change-me-32bytes-random"
+  admin_bootstrap_password: ""
+  session_secret: "replace-with-random-secret-at-least-32-bytes"
   session_ttl_minutes: 720
   login_max_failures: 5
   login_lockout_window: "15m"

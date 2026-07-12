@@ -3,9 +3,12 @@ package handlers
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	dbpkg "github.com/RSJWY/NativeS3-Bridge/pkg/db"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 )
 
@@ -55,6 +58,64 @@ func TestBucketProbeResponsesDoNotReturnListBucketResult(t *testing.T) {
 				t.Fatalf("probe fell through to list response: %s", body)
 			}
 		})
+	}
+}
+
+func TestBucketHandlerDeleteBucketRejectsBoundCredential(t *testing.T) {
+	backend, err := storage.NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	if _, err := backend.PutObject("bound-bucket", "placeholder", strings.NewReader("x"), "text/plain"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if err := backend.DeleteObject("bound-bucket", "placeholder"); err != nil {
+		t.Fatalf("empty bucket: %v", err)
+	}
+	h := NewBucketHandlerWithCredentialChecker(backend, nil, func(bucket string) (bool, error) {
+		return bucket == "bound-bucket", nil
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/bound-bucket", nil)
+	rr := httptest.NewRecorder()
+
+	h.DeleteBucket(rr, req, "bound-bucket")
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "<Code>BucketNotEmpty</Code>") {
+		t.Fatalf("body = %s, want BucketNotEmpty", rr.Body.String())
+	}
+	if _, err := backend.ListObjects("bound-bucket", "", "", "", 1); err != nil {
+		t.Fatalf("bound bucket was deleted: %v", err)
+	}
+}
+
+func TestBucketHandlerDeleteBucketAllowsUnboundEmptyBucket(t *testing.T) {
+	root := t.TempDir()
+	backend, err := storage.NewFileBackend(root)
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	gdb, err := dbpkg.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := dbpkg.Migrate(gdb); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, root, time.Second)
+	if err := bucketStore.Create("empty-bucket"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	h := NewBucketHandlerWithCredentialChecker(backend, bucketStore, func(string) (bool, error) { return false, nil })
+	req := httptest.NewRequest(http.MethodDelete, "/empty-bucket", nil)
+	rr := httptest.NewRecorder()
+
+	h.DeleteBucket(rr, req, "empty-bucket")
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rr.Code, rr.Body.String())
 	}
 }
 

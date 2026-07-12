@@ -19,6 +19,7 @@ import (
 type MultipartHandler struct {
 	store  *storage.MultipartStore
 	commit UsageCommitter
+	quota  QuotaManager
 	hooks  EventEmitter
 }
 
@@ -28,6 +29,10 @@ func NewMultipartHandler(store *storage.MultipartStore, commit UsageCommitter) *
 
 func NewMultipartHandlerWithHooks(store *storage.MultipartStore, commit UsageCommitter, emitter EventEmitter) *MultipartHandler {
 	return &MultipartHandler{store: store, commit: commit, hooks: emitter}
+}
+
+func NewMultipartHandlerWithQuotaManager(store *storage.MultipartStore, manager QuotaManager, emitter EventEmitter) *MultipartHandler {
+	return &MultipartHandler{store: store, quota: manager, hooks: emitter}
 }
 
 func (h *MultipartHandler) Create(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -85,10 +90,28 @@ func (h *MultipartHandler) Complete(w http.ResponseWriter, r *http.Request, buck
 		writeMultipartStorageError(w, err, r.URL.Path)
 		return
 	}
-	if id, ok := auth.IdentityFromContext(r.Context()); !ok || id == nil {
+	id, ok := auth.IdentityFromContext(r.Context())
+	if !ok || id == nil {
 		WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
 		return
-	} else if err := quota.Check(id, total); err != nil {
+	}
+	var reservation *quota.Reservation
+	settled := false
+	replacedBytes, err := h.store.ExistingObjectSize(uploadID)
+	if err != nil {
+		writeMultipartStorageError(w, err, r.URL.Path)
+		return
+	}
+	reserveBytes := total - replacedBytes
+	if reserveBytes < 0 {
+		reserveBytes = 0
+	}
+	if h.quota != nil {
+		reservation, err = h.quota.Reserve(id.CredentialID, reserveBytes)
+	} else {
+		err = quota.Check(id, total)
+	}
+	if err != nil {
 		if errors.Is(err, quota.ErrQuotaExceeded) {
 			if abortErr := h.store.Abort(uploadID); abortErr != nil {
 				slog.Warn("abort quota-exceeded multipart", "upload_id", uploadID, "error", abortErr)
@@ -99,10 +122,27 @@ func (h *MultipartHandler) Complete(w http.ResponseWriter, r *http.Request, buck
 		WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
 		return
 	}
+	if reservation != nil {
+		defer func() {
+			if !settled {
+				if releaseErr := h.quota.Release(reservation); releaseErr != nil {
+					slog.Warn("release multipart quota reservation", "credential_id", reservation.CredentialID, "bytes", reservation.Bytes, "error", releaseErr)
+				}
+			}
+		}()
+	}
 	info, err := h.store.Complete(uploadID, parts)
 	if err != nil {
 		writeMultipartStorageError(w, err, r.URL.Path)
 		return
+	}
+	if reservation != nil {
+		if err := h.quota.Settle(reservation, info.Size, replacedBytes, quota.OpPut); err != nil {
+			settled = true
+			WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
+			return
+		}
+		settled = true
 	}
 	WriteXML(w, http.StatusOK, completeMultipartUploadResult{
 		XMLNS:    "http://s3.amazonaws.com/doc/2006-03-01/",
@@ -111,7 +151,9 @@ func (h *MultipartHandler) Complete(w http.ResponseWriter, r *http.Request, buck
 		Key:      key,
 		ETag:     quoteETag(info.ETag),
 	})
-	h.commitUsage(r, info.Size, quota.OpPut)
+	if reservation == nil {
+		h.commitUsage(r, info.Size, quota.OpPut)
+	}
 	h.emitObjectCreated(r, bucket, key, info)
 }
 
@@ -176,14 +218,20 @@ func (h *MultipartHandler) ListUploads(w http.ResponseWriter, r *http.Request, b
 }
 
 func (h *MultipartHandler) commitUsage(r *http.Request, deltaBytes int64, op quota.Op) {
-	if h.commit == nil {
+	if h.commit == nil && h.quota == nil {
 		return
 	}
 	id, ok := auth.IdentityFromContext(r.Context())
 	if !ok || id == nil {
 		return
 	}
-	if err := h.commit(id.CredentialID, deltaBytes, op); err != nil {
+	var err error
+	if h.quota != nil {
+		err = h.quota.Record(id.CredentialID, deltaBytes, op)
+	} else {
+		err = h.commit(id.CredentialID, deltaBytes, op)
+	}
+	if err != nil {
 		slog.Warn("commit usage", "credential_id", id.CredentialID, "op", op, "delta_bytes", deltaBytes, "error", err)
 	}
 }
@@ -218,6 +266,8 @@ func writeMultipartStorageError(w http.ResponseWriter, err error, resource strin
 		WriteS3Error(w, "InvalidPartOrder", http.StatusBadRequest, resource)
 	case errors.Is(err, storage.ErrInvalidPart):
 		WriteS3Error(w, "InvalidPart", http.StatusBadRequest, resource)
+	case errors.Is(err, storage.ErrMultipartStorageLimit):
+		WriteS3Error(w, "QuotaExceeded", http.StatusForbidden, resource)
 	default:
 		writeStorageError(w, err, resource)
 	}

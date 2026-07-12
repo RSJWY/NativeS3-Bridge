@@ -1,6 +1,6 @@
 server:
   s3_addr: "0.0.0.0:9000"
-  admin_addr: "0.0.0.0:9001"
+  admin_addr: "127.0.0.1:9001"
   tls:
     enabled: false
     cert_file: ""
@@ -18,6 +18,7 @@ storage:
   metadata_suffix: ".s3meta"
   multipart_gc_interval: "1h"
   multipart_ttl: "24h"
+  multipart_max_pending_bytes: 10737418240
 
 database:
   driver: "sqlite"
@@ -32,7 +33,7 @@ hooks:
 webadmin:
   password_hash: ""
   admin_bootstrap_password: ""
-  session_secret: "change-me-32bytes-random"
+  session_secret: "replace-with-random-secret-at-least-32-bytes"
   session_ttl_minutes: 720
   login_max_failures: 5
   login_lockout_window: "15m"

@@ -121,6 +121,35 @@ func TestMultipartRejectsNonUUIDUploadID(t *testing.T) {
 	}
 }
 
+func TestMultipartPendingStorageLimitPreservesExistingPart(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewMultipartStore(root, filepath.Join(root, ".multipart"), ".s3meta")
+	if err != nil {
+		t.Fatalf("new multipart store: %v", err)
+	}
+	store.SetMaxPendingBytes(5)
+	uploadID, err := store.Create("bucket", "key", "", nil, nil)
+	if err != nil {
+		t.Fatalf("create upload: %v", err)
+	}
+	if _, err := store.UploadPart(uploadID, 1, strings.NewReader("12345")); err != nil {
+		t.Fatalf("upload initial part: %v", err)
+	}
+	if _, err := store.UploadPart(uploadID, 2, strings.NewReader("x")); !errors.Is(err, ErrMultipartStorageLimit) {
+		t.Fatalf("over-limit second part error = %v, want ErrMultipartStorageLimit", err)
+	}
+	if _, err := store.UploadPart(uploadID, 1, strings.NewReader("123456")); !errors.Is(err, ErrMultipartStorageLimit) {
+		t.Fatalf("over-limit replacement error = %v, want ErrMultipartStorageLimit", err)
+	}
+	parts, err := store.ListParts(uploadID)
+	if err != nil {
+		t.Fatalf("list parts: %v", err)
+	}
+	if len(parts) != 1 || parts[0].PartNumber != 1 || parts[0].Size != 5 {
+		t.Fatalf("parts after rejected writes = %+v, want original five-byte part", parts)
+	}
+}
+
 func TestMultipartValidateTargetRejectsMismatchedBucketOrKey(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewMultipartStore(root, filepath.Join(root, ".multipart"), ".s3meta")

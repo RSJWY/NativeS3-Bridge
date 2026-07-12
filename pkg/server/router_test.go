@@ -3,12 +3,14 @@ package server
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
@@ -23,6 +25,14 @@ type stubAuthenticator struct {
 	verifyCalls int
 	id          *auth.Identity
 	err         error
+}
+
+type fixedAuthenticator struct {
+	id *auth.Identity
+}
+
+func (a fixedAuthenticator) Verify(*http.Request) (*auth.Identity, error) {
+	return a.id, nil
 }
 
 func (s *stubAuthenticator) Verify(r *http.Request) (*auth.Identity, error) {
@@ -207,6 +217,28 @@ func TestQuotaSkipsCopyObjectRequestBodyLength(t *testing.T) {
 	}
 }
 
+func TestQuotaRejectsBodyLargerThanDeclaredLength(t *testing.T) {
+	reached := false
+	h := Quota(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		_, err := io.ReadAll(r.Body)
+		if !errors.Is(err, quota.ErrQuotaExceeded) {
+			t.Fatalf("read body error = %v, want ErrQuotaExceeded", err)
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	req := httptest.NewRequest(http.MethodPut, "/bucket/key.txt", strings.NewReader("larger"))
+	req.ContentLength = 3
+	req = req.WithContext(auth.WithIdentity(req.Context(), &auth.Identity{CredentialID: 1, QuotaBytes: 100}))
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if !reached || rr.Code != http.StatusForbidden {
+		t.Fatalf("reached=%v status=%d, want true/403", reached, rr.Code)
+	}
+}
+
 func TestLoggingAddsRequestIDHeaderAndLogField(t *testing.T) {
 	var logBuf bytes.Buffer
 	previousLogger := slog.Default()
@@ -360,6 +392,27 @@ func TestAnonRateLimitTrustForwardedUsesForwardedIP(t *testing.T) {
 	}
 }
 
+func TestAnonRateLimitTrustForwardedIgnoresSpoofedPrefix(t *testing.T) {
+	h := AnonRateLimit(config.RateLimitConfig{AnonymousRPS: 1, AnonymousBurst: 1, TrustForwarded: true})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for i, xff := range []string{"198.51.100.1, 203.0.113.10", "198.51.100.2, 203.0.113.10"} {
+		req := httptest.NewRequest(http.MethodGet, "/bucket/key.txt", nil)
+		req.RemoteAddr = "192.0.2.1:1234"
+		req.Header.Set("X-Forwarded-For", xff)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		want := http.StatusNoContent
+		if i == 1 {
+			want = http.StatusServiceUnavailable
+		}
+		if rr.Code != want {
+			t.Fatalf("request %d status = %d, want %d", i, rr.Code, want)
+		}
+	}
+}
+
 func TestRouterAnonymousRateLimitAndQuotaSkip(t *testing.T) {
 	gdb := newServerTestDB(t)
 	dataRoot := t.TempDir()
@@ -430,6 +483,155 @@ func TestRouterPutCreatesBucketMetadataForImplicitNativeBucket(t *testing.T) {
 	}
 	if _, err := backend.HeadObject("implicit-bucket", "key.txt"); err != nil {
 		t.Fatalf("object not stored: %v", err)
+	}
+}
+
+func TestRouterQuotaManagerConcurrentPutsCannotExceedQuota(t *testing.T) {
+	gdb := newServerTestDB(t)
+	credential := dbpkg.Credential{AccessKey: "test", SecretKey: "secret", Status: "enabled", QuotaBytes: 10}
+	if err := gdb.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	dataRoot := t.TempDir()
+	backend, err := storage.NewFileBackend(dataRoot)
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, dataRoot, storage.DefaultBucketACLCacheTTL)
+	if err := bucketStore.Create("test-bucket"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	authenticator := fixedAuthenticator{id: &auth.Identity{CredentialID: credential.ID, AccessKey: credential.AccessKey, QuotaBytes: 10}}
+	router := NewRouterWithQuotaManager(backend, nil, bucketStore, authenticator, quota.NewManager(gdb), nil, nil, config.RateLimitConfig{})
+
+	statuses := make(chan int, 2)
+	var wg sync.WaitGroup
+	for _, key := range []string{"a.txt", "b.txt"} {
+		wg.Add(1)
+		go func(key string) {
+			defer wg.Done()
+			req := headerSignedRequest(http.MethodPut, "/test-bucket/"+key)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, requestBody(req, "123456"))
+			statuses <- rr.Code
+		}(key)
+	}
+	wg.Wait()
+	close(statuses)
+	okCount := 0
+	quotaCount := 0
+	for status := range statuses {
+		switch status {
+		case http.StatusOK:
+			okCount++
+		case http.StatusForbidden:
+			quotaCount++
+		default:
+			t.Fatalf("unexpected status %d", status)
+		}
+	}
+	if okCount != 1 || quotaCount != 1 {
+		t.Fatalf("status counts ok=%d quota=%d, want 1/1", okCount, quotaCount)
+	}
+	var got dbpkg.Credential
+	if err := gdb.First(&got, credential.ID).Error; err != nil {
+		t.Fatalf("read credential: %v", err)
+	}
+	if got.UsedBytes != 6 {
+		t.Fatalf("used_bytes = %d, want 6", got.UsedBytes)
+	}
+}
+
+func TestRouterQuotaManagerUnderreportedPutPreservesObject(t *testing.T) {
+	gdb := newServerTestDB(t)
+	credential := dbpkg.Credential{AccessKey: "test", SecretKey: "secret", Status: "enabled", QuotaBytes: 100}
+	if err := gdb.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	dataRoot := t.TempDir()
+	backend, err := storage.NewFileBackend(dataRoot)
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	if _, err := backend.PutObject("test-bucket", "keep.txt", strings.NewReader("original"), "text/plain"); err != nil {
+		t.Fatalf("put original: %v", err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, dataRoot, storage.DefaultBucketACLCacheTTL)
+	if err := bucketStore.Create("test-bucket"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	authenticator := &stubAuthenticator{id: &auth.Identity{CredentialID: credential.ID, AccessKey: credential.AccessKey, QuotaBytes: 100}}
+	router := NewRouterWithQuotaManager(backend, nil, bucketStore, authenticator, quota.NewManager(gdb), nil, nil, config.RateLimitConfig{})
+
+	req := headerSignedRequest(http.MethodPut, "/test-bucket/keep.txt")
+	req.Body = io.NopCloser(strings.NewReader("replacement"))
+	req.ContentLength = 3
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rr.Code, rr.Body.String())
+	}
+	rc, _, err := backend.GetObject("test-bucket", "keep.txt", nil)
+	if err != nil {
+		t.Fatalf("get preserved object: %v", err)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read preserved object: %v", err)
+	}
+	if string(body) != "original" {
+		t.Fatalf("preserved object = %q, want original", body)
+	}
+	var got dbpkg.Credential
+	if err := gdb.First(&got, credential.ID).Error; err != nil {
+		t.Fatalf("read credential: %v", err)
+	}
+	if got.UsedBytes != 0 {
+		t.Fatalf("used_bytes = %d, want released reservation", got.UsedBytes)
+	}
+}
+
+func TestRouterQuotaManagerOverwriteSettlesNetGrowth(t *testing.T) {
+	gdb := newServerTestDB(t)
+	credential := dbpkg.Credential{AccessKey: "test", SecretKey: "secret", Status: "enabled", QuotaBytes: 10, UsedBytes: 8}
+	if err := gdb.Create(&credential).Error; err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	dataRoot := t.TempDir()
+	backend, err := storage.NewFileBackend(dataRoot)
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	if _, err := backend.PutObject("test-bucket", "key.txt", strings.NewReader("12345678"), "text/plain"); err != nil {
+		t.Fatalf("put original: %v", err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, dataRoot, storage.DefaultBucketACLCacheTTL)
+	if err := bucketStore.Create("test-bucket"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	authenticator := &stubAuthenticator{id: &auth.Identity{CredentialID: credential.ID, AccessKey: credential.AccessKey, QuotaBytes: 10, UsedBytes: 8}}
+	router := NewRouterWithQuotaManager(backend, nil, bucketStore, authenticator, quota.NewManager(gdb), nil, nil, config.RateLimitConfig{})
+
+	req := headerSignedRequest(http.MethodPut, "/test-bucket/key.txt")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, requestBody(req, "123456789"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var got dbpkg.Credential
+	if err := gdb.First(&got, credential.ID).Error; err != nil {
+		t.Fatalf("read credential: %v", err)
+	}
+	if got.UsedBytes != 9 {
+		t.Fatalf("used_bytes = %d, want net object size 9", got.UsedBytes)
+	}
+	var stat dbpkg.RequestStat
+	if err := gdb.Where("credential_id = ?", credential.ID).First(&stat).Error; err != nil {
+		t.Fatalf("read stat: %v", err)
+	}
+	if stat.PutCount != 1 || stat.BytesIn != 9 {
+		t.Fatalf("unexpected stat: %+v", stat)
 	}
 }
 

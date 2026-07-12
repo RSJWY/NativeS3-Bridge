@@ -303,6 +303,15 @@ func (a *API) deleteBucket(w http.ResponseWriter, _ *http.Request, name string) 
 		writeJSONError(w, http.StatusInternalServerError, "bucket store is not configured")
 		return
 	}
+	var boundCredentials int64
+	if err := a.db.Model(&dbpkg.Credential{}).Where("bucket = ?", name).Count(&boundCredentials).Error; err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "query bound credentials failed")
+		return
+	}
+	if boundCredentials > 0 {
+		writeJSONError(w, http.StatusConflict, "bucket has bound credentials")
+		return
+	}
 	if err := a.buckets.Delete(name); err != nil {
 		a.writeBucketStoreError(w, err, "delete bucket failed")
 		return
@@ -345,6 +354,9 @@ func (a *API) createCredential(w http.ResponseWriter, r *http.Request) {
 	bucket, err := normalizeCredentialBucket(req.Bucket)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !a.validateCredentialBucketExists(w, bucket) {
 		return
 	}
 
@@ -411,6 +423,9 @@ func (a *API) updateCredential(w http.ResponseWriter, r *http.Request, idOrAcces
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if !a.validateCredentialBucketExists(w, bucket) {
+			return
+		}
 		updates["bucket"] = bucket
 	}
 	if req.QuotaBytes != nil {
@@ -432,6 +447,26 @@ func (a *API) updateCredential(w http.ResponseWriter, r *http.Request, idOrAcces
 		a.invalidate(cred.AccessKey)
 	}
 	writeJSON(w, http.StatusOK, credentialToResponse(cred))
+}
+
+func (a *API) validateCredentialBucketExists(w http.ResponseWriter, bucket string) bool {
+	if bucket == "" {
+		return true
+	}
+	if a.buckets == nil {
+		writeJSONError(w, http.StatusInternalServerError, "bucket store is not configured")
+		return false
+	}
+	_, exists, err := a.buckets.GetACL(bucket)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "query bucket failed")
+		return false
+	}
+	if !exists {
+		writeJSONError(w, http.StatusBadRequest, "bucket does not exist")
+		return false
+	}
+	return true
 }
 
 func (a *API) deleteCredential(w http.ResponseWriter, _ *http.Request, idOrAccessKey string) {

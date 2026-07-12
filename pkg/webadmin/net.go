@@ -9,8 +9,9 @@ import (
 func clientIP(r *http.Request, trustForwarded bool) string {
 	if trustForwarded {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			for _, part := range strings.Split(xff, ",") {
-				if ip := strings.TrimSpace(part); ip != "" {
+			parts := strings.Split(xff, ",")
+			for i := len(parts) - 1; i >= 0; i-- {
+				if ip := strings.TrimSpace(parts[i]); ip != "" {
 					return ip
 				}
 			}

@@ -9,12 +9,17 @@ import (
 )
 
 type BucketHandler struct {
-	backend     storage.Backend
-	bucketStore *storage.BucketStore
+	backend                storage.Backend
+	bucketStore            *storage.BucketStore
+	boundCredentialChecker func(bucket string) (bool, error)
 }
 
 func NewBucketHandler(backend storage.Backend, bucketStore *storage.BucketStore) *BucketHandler {
 	return &BucketHandler{backend: backend, bucketStore: bucketStore}
+}
+
+func NewBucketHandlerWithCredentialChecker(backend storage.Backend, bucketStore *storage.BucketStore, checker func(bucket string) (bool, error)) *BucketHandler {
+	return &BucketHandler{backend: backend, bucketStore: bucketStore, boundCredentialChecker: checker}
 }
 
 func (h *BucketHandler) ListBuckets(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +84,17 @@ func (h *BucketHandler) CreateBucket(w http.ResponseWriter, r *http.Request, buc
 }
 
 func (h *BucketHandler) DeleteBucket(w http.ResponseWriter, r *http.Request, bucket string) {
+	if h.boundCredentialChecker != nil {
+		bound, err := h.boundCredentialChecker(bucket)
+		if err != nil {
+			WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
+			return
+		}
+		if bound {
+			WriteS3Error(w, "BucketNotEmpty", http.StatusConflict, r.URL.Path)
+			return
+		}
+	}
 	listed, err := h.backend.ListObjects(bucket, "", "", "", 1)
 	if err != nil {
 		writeStorageError(w, err, r.URL.Path)

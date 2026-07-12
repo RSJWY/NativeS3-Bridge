@@ -32,8 +32,8 @@ func TestClientIPTrustForwarded(t *testing.T) {
 	if got := clientIP(req, false); got != "10.0.0.1" {
 		t.Fatalf("clientIP trust off = %q, want remote host", got)
 	}
-	if got := clientIP(req, true); got != "203.0.113.10" {
-		t.Fatalf("clientIP trust on = %q, want first XFF", got)
+	if got := clientIP(req, true); got != "10.0.0.2" {
+		t.Fatalf("clientIP trust on = %q, want rightmost XFF", got)
 	}
 
 	req.Header.Del("X-Forwarded-For")

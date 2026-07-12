@@ -21,10 +21,22 @@ import (
 
 type UsageCommitter func(credID uint, deltaBytes int64, op quota.Op) error
 
+type QuotaManager interface {
+	Reserve(credID uint, bytes int64) (*quota.Reservation, error)
+	Settle(reservation *quota.Reservation, actualBytes, replacedBytes int64, op quota.Op) error
+	Release(reservation *quota.Reservation) error
+	Record(credID uint, bytes int64, op quota.Op) error
+}
+
 type ObjectHandler struct {
 	backend storage.Backend
 	commit  UsageCommitter
+	quota   QuotaManager
 	hooks   EventEmitter
+}
+
+func NewObjectHandlerWithQuotaManager(backend storage.Backend, manager QuotaManager, emitter EventEmitter) *ObjectHandler {
+	return &ObjectHandler{backend: backend, quota: manager, hooks: emitter}
 }
 
 type EventEmitter interface {
@@ -40,6 +52,20 @@ func NewObjectHandlerWithHooks(backend storage.Backend, commit UsageCommitter, e
 }
 
 func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	reservation, replacedBytes, ok := h.reserveDeclaredWrite(w, r, bucket, key)
+	if !ok {
+		return
+	}
+	settled := false
+	if reservation != nil {
+		defer func() {
+			if !settled {
+				if err := h.quota.Release(reservation); err != nil {
+					slog.Warn("release quota reservation", "credential_id", reservation.CredentialID, "bytes", reservation.Bytes, "error", err)
+				}
+			}
+		}()
+	}
 	var info storage.ObjectInfo
 	metadata := extractUserMetadata(r.Header)
 	putOptions, err := parsePutObjectOptions(r, metadata)
@@ -62,11 +88,58 @@ func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key 
 		writeStorageError(w, err, r.URL.Path)
 		return
 	}
+	if reservation != nil {
+		if err := h.quota.Settle(reservation, info.Size, replacedBytes, quota.OpPut); err != nil {
+			settled = true
+			writeStorageError(w, err, r.URL.Path)
+			return
+		}
+		settled = true
+	}
 	SetStandardHeaders(w)
 	w.Header().Set("ETag", quoteETag(info.ETag))
 	w.WriteHeader(http.StatusOK)
-	h.commitUsage(r, info.Size, quota.OpPut)
+	if reservation == nil {
+		h.commitUsage(r, info.Size, quota.OpPut)
+	}
 	h.emitObjectEvent(r, hooks.ObjectCreated, bucket, key, info)
+}
+
+func (h *ObjectHandler) reserveDeclaredWrite(w http.ResponseWriter, r *http.Request, bucket, key string) (*quota.Reservation, int64, bool) {
+	if h.quota == nil {
+		return nil, 0, true
+	}
+	id, ok := auth.IdentityFromContext(r.Context())
+	if !ok || id == nil || auth.IsAnonymous(id) {
+		WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+		return nil, 0, false
+	}
+	declared, ok := quota.DeclaredSizeFromContext(r.Context())
+	if !ok || declared < 0 {
+		WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
+		return nil, 0, false
+	}
+	replacedBytes := int64(0)
+	if existing, err := h.backend.HeadObject(bucket, key); err == nil {
+		replacedBytes = existing.Size
+	} else if !errors.Is(err, storage.ErrNoSuchKey) && !errors.Is(err, storage.ErrNoSuchBucket) {
+		writeStorageError(w, err, r.URL.Path)
+		return nil, 0, false
+	}
+	reserveBytes := declared - replacedBytes
+	if reserveBytes < 0 {
+		reserveBytes = 0
+	}
+	reservation, err := h.quota.Reserve(id.CredentialID, reserveBytes)
+	if err != nil {
+		if errors.Is(err, quota.ErrQuotaExceeded) {
+			WriteS3Error(w, "QuotaExceeded", http.StatusForbidden, r.URL.Path)
+		} else {
+			WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
+		}
+		return nil, 0, false
+	}
+	return reservation, replacedBytes, true
 }
 
 func (h *ObjectHandler) Get(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -397,8 +470,8 @@ func writeStorageError(w http.ResponseWriter, err error, resource string) {
 		WriteS3Error(w, "InvalidDigest", http.StatusBadRequest, resource)
 	case errors.Is(err, storage.ErrBucketNotEmpty):
 		WriteS3Error(w, "BucketNotEmpty", http.StatusConflict, resource)
-	case errors.Is(err, storage.ErrBadDigest):
-		WriteS3Error(w, "BadDigest", http.StatusBadRequest, resource)
+	case errors.Is(err, quota.ErrQuotaExceeded):
+		WriteS3Error(w, "QuotaExceeded", http.StatusForbidden, resource)
 	default:
 		WriteS3Error(w, "InternalError", http.StatusInternalServerError, resource)
 	}
@@ -410,7 +483,7 @@ const (
 )
 
 func (h *ObjectHandler) commitUsage(r *http.Request, deltaBytes int64, op quota.Op) {
-	if h.commit == nil {
+	if h.commit == nil && h.quota == nil {
 		return
 	}
 	id, ok := auth.IdentityFromContext(r.Context())
@@ -420,7 +493,13 @@ func (h *ObjectHandler) commitUsage(r *http.Request, deltaBytes int64, op quota.
 	if auth.IsAnonymous(id) {
 		return
 	}
-	if err := h.commit(id.CredentialID, deltaBytes, op); err != nil {
+	var err error
+	if h.quota != nil {
+		err = h.quota.Record(id.CredentialID, deltaBytes, op)
+	} else {
+		err = h.commit(id.CredentialID, deltaBytes, op)
+	}
+	if err != nil {
 		slog.Warn("commit usage", "credential_id", id.CredentialID, "op", op, "delta_bytes", deltaBytes, "error", err)
 	}
 }

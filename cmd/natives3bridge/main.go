@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -79,6 +80,7 @@ func main() {
 		slog.Error("init multipart store", "error", err)
 		os.Exit(1)
 	}
+	multipartStore.SetMaxPendingBytes(cfg.Storage.MultipartMaxPendingBytes)
 	bucketStore := storage.NewBucketStore(gdb, cfg.Storage.DataRoot, storage.DefaultBucketACLCacheTTL)
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -92,9 +94,13 @@ func main() {
 	hookManager := hooks.NewManager(gdb, hooks.Config{QueueSize: cfg.Hooks.QueueSize, Workers: cfg.Hooks.Workers, MaxRetry: cfg.Hooks.MaxRetry, Timeout: cfg.Hooks.Timeout})
 	hookManager.Start()
 	defer hookManager.Stop()
-	s3Server := server.New(cfg.Server, cfg.RateLimit, backend, multipartStore, bucketStore, authenticator, func(credID uint, deltaBytes int64, op quota.Op) error {
-		return quota.Commit(gdb, credID, deltaBytes, op)
-	}, hookManager)
+	quotaManager := quota.NewManager(gdb)
+	boundCredentialChecker := func(bucket string) (bool, error) {
+		var count int64
+		err := gdb.Model(&db.Credential{}).Where("bucket = ?", bucket).Count(&count).Error
+		return count > 0, err
+	}
+	s3Server := server.NewWithQuotaManager(cfg.Server, cfg.RateLimit, backend, multipartStore, bucketStore, authenticator, quotaManager, boundCredentialChecker, hookManager)
 	adminServer, err := webadmin.NewServer(cfg.Server, cfg.WebAdmin, gdb, credentialStore, bucketStore, cfg.RateLimit.TrustForwarded)
 	if err != nil {
 		slog.Error("init admin server", "error", err)
@@ -119,6 +125,15 @@ func main() {
 }
 
 func seedCredential(gdb *gorm.DB, accessKey, secretKey string, quotaBytes int64, bucket string) error {
+	if bucket != "" {
+		var count int64
+		if err := gdb.Model(&db.Bucket{}).Where("name = ?", bucket).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return fmt.Errorf("seed bucket %q does not exist", bucket)
+		}
+	}
 	cred := db.Credential{AccessKey: accessKey, SecretKey: secretKey, Name: "local seed", Bucket: bucket, Status: "enabled", QuotaBytes: quotaBytes}
 	return gdb.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "access_key"}},

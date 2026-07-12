@@ -1,7 +1,9 @@
 package webadmin
 
 import (
+	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
@@ -35,6 +38,8 @@ type Auth struct {
 	captchaSiteKey  string
 	limiter         *loginLimiter
 	now             func() time.Time
+	sessionsMu      sync.Mutex
+	activeSessions  map[string]int64
 }
 
 type loginRequest struct {
@@ -44,8 +49,11 @@ type loginRequest struct {
 }
 
 type sessionPayload struct {
-	ExpiresAt int64 `json:"exp"`
+	SessionID string `json:"sid"`
+	ExpiresAt int64  `json:"exp"`
 }
+
+type sessionContextKey struct{}
 
 func BootstrapPasswordHash(cfg *config.WebAdminConfig) error {
 	if cfg.PasswordHash != "" || cfg.AdminBootstrapPassword == "" {
@@ -91,6 +99,7 @@ func NewAuth(cfg config.WebAdminConfig, secureCookie ...bool) *Auth {
 		captchaProvider: cfg.Captcha.Provider,
 		captchaSiteKey:  cfg.Captcha.SiteKey,
 		now:             time.Now,
+		activeSessions:  make(map[string]int64),
 	}
 	if cfg.Captcha.Enabled {
 		a.captchaVerifier = newCaptchaVerifier(cfg.Captcha)
@@ -132,7 +141,7 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	a.limiter.recordSuccess(ip)
 
 	expires := a.now().UTC().Add(a.ttl)
-	value, err := a.signSession(sessionPayload{ExpiresAt: expires.Unix()})
+	value, err := a.issueSession(expires)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "create session failed")
 		return
@@ -175,6 +184,9 @@ func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if payload, ok := r.Context().Value(sessionContextKey{}).(sessionPayload); ok {
+		a.revokeSession(payload.SessionID)
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
@@ -195,12 +207,33 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		if _, err := a.verifySession(cookie.Value); err != nil {
+		payload, err := a.verifySession(cookie.Value)
+		if err != nil {
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionContextKey{}, payload)))
 	})
+}
+
+func (a *Auth) issueSession(expires time.Time) (string, error) {
+	randomID := make([]byte, 32)
+	if _, err := rand.Read(randomID); err != nil {
+		return "", err
+	}
+	payload := sessionPayload{
+		SessionID: base64.RawURLEncoding.EncodeToString(randomID),
+		ExpiresAt: expires.UTC().Unix(),
+	}
+	value, err := a.signSession(payload)
+	if err != nil {
+		return "", err
+	}
+	a.sessionsMu.Lock()
+	a.cleanupSessionsLocked(a.now().UTC().Unix())
+	a.activeSessions[payload.SessionID] = payload.ExpiresAt
+	a.sessionsMu.Unlock()
+	return value, nil
 }
 
 func (a *Auth) signSession(payload sessionPayload) (string, error) {
@@ -235,7 +268,31 @@ func (a *Auth) verifySession(value string) (sessionPayload, error) {
 	if payload.ExpiresAt <= a.now().UTC().Unix() {
 		return sessionPayload{}, errors.New("session expired")
 	}
+	if payload.SessionID == "" {
+		return sessionPayload{}, errors.New("session id missing")
+	}
+	a.sessionsMu.Lock()
+	a.cleanupSessionsLocked(a.now().UTC().Unix())
+	activeExpiry, ok := a.activeSessions[payload.SessionID]
+	a.sessionsMu.Unlock()
+	if !ok || activeExpiry != payload.ExpiresAt {
+		return sessionPayload{}, errors.New("session revoked")
+	}
 	return payload, nil
+}
+
+func (a *Auth) revokeSession(sessionID string) {
+	a.sessionsMu.Lock()
+	delete(a.activeSessions, sessionID)
+	a.sessionsMu.Unlock()
+}
+
+func (a *Auth) cleanupSessionsLocked(now int64) {
+	for sessionID, expiresAt := range a.activeSessions {
+		if expiresAt <= now {
+			delete(a.activeSessions, sessionID)
+		}
+	}
 }
 
 func (a *Auth) hmac(body []byte) []byte {

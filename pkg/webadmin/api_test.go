@@ -196,6 +196,12 @@ func newBucketAPITestHandlerWithRoot(t *testing.T) (http.Handler, *Auth, string)
 
 func TestCredentialBucketScoping(t *testing.T) {
 	handler, auth := newBucketAPITestHandler(t)
+	for _, bucket := range []string{"my-bucket", "other-bucket"} {
+		rr := authRequest(t, handler, auth, http.MethodPost, "/api/admin/buckets", []byte(`{"name":"`+bucket+`"}`))
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("create bucket %q status = %d, body = %s", bucket, rr.Code, rr.Body.String())
+		}
+	}
 
 	rr := authRequest(t, handler, auth, http.MethodPost, "/api/admin/credentials", []byte(`{"name":"scoped-key","bucket":"my-bucket","quota_bytes":0}`))
 	if rr.Code != http.StatusCreated {
@@ -250,6 +256,42 @@ func TestCredentialBucketScoping(t *testing.T) {
 	}
 }
 
+func TestCredentialBucketMustExistAndBlocksBucketDelete(t *testing.T) {
+	handler, auth := newBucketAPITestHandler(t)
+
+	missing := authRequest(t, handler, auth, http.MethodPost, "/api/admin/credentials", []byte(`{"name":"missing","bucket":"missing-bucket","quota_bytes":0}`))
+	if missing.Code != http.StatusBadRequest {
+		t.Fatalf("missing bucket credential status = %d, want 400; body=%s", missing.Code, missing.Body.String())
+	}
+	assertJSONError(t, missing.Body.Bytes(), "bucket does not exist")
+
+	createdBucket := authRequest(t, handler, auth, http.MethodPost, "/api/admin/buckets", []byte(`{"name":"bound-bucket"}`))
+	if createdBucket.Code != http.StatusCreated {
+		t.Fatalf("create bucket status = %d; body=%s", createdBucket.Code, createdBucket.Body.String())
+	}
+	createdCredential := authRequest(t, handler, auth, http.MethodPost, "/api/admin/credentials", []byte(`{"name":"bound","bucket":"bound-bucket","quota_bytes":0}`))
+	if createdCredential.Code != http.StatusCreated {
+		t.Fatalf("create credential status = %d; body=%s", createdCredential.Code, createdCredential.Body.String())
+	}
+	var credential createCredentialResponse
+	decodeJSONBody(t, createdCredential.Body.Bytes(), &credential)
+
+	blocked := authRequest(t, handler, auth, http.MethodDelete, "/api/admin/buckets/bound-bucket", nil)
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("bound bucket delete status = %d, want 409; body=%s", blocked.Code, blocked.Body.String())
+	}
+	assertJSONError(t, blocked.Body.Bytes(), "bucket has bound credentials")
+
+	unbind := authRequest(t, handler, auth, http.MethodPatch, "/api/admin/credentials/"+strconv.FormatUint(uint64(credential.ID), 10), []byte(`{"bucket":""}`))
+	if unbind.Code != http.StatusOK {
+		t.Fatalf("unbind status = %d; body=%s", unbind.Code, unbind.Body.String())
+	}
+	deleted := authRequest(t, handler, auth, http.MethodDelete, "/api/admin/buckets/bound-bucket", nil)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete after unbind status = %d; body=%s", deleted.Code, deleted.Body.String())
+	}
+}
+
 func TestCredentialBucketValidationRejectsInvalidName(t *testing.T) {
 	handler, auth := newBucketAPITestHandler(t)
 
@@ -293,7 +335,7 @@ func authRequest(t *testing.T, handler http.Handler, auth *Auth, method, path st
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	session, err := auth.signSession(sessionPayload{ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	session, err := auth.issueSession(time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("sign session: %v", err)
 	}

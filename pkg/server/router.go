@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -32,12 +33,20 @@ type Router struct {
 }
 
 func NewRouter(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, commit handlers.UsageCommitter, emitter handlers.EventEmitter, rateLimit config.RateLimitConfig) http.Handler {
+	return newRouter(backend, multipartStore, bucketStore, authenticator, handlers.NewObjectHandlerWithHooks(backend, commit, emitter), handlers.NewMultipartHandlerWithHooks(multipartStore, commit, emitter), handlers.NewBucketHandler(backend, bucketStore), rateLimit, Quota)
+}
+
+func NewRouterWithQuotaManager(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, manager handlers.QuotaManager, boundCredentialChecker func(string) (bool, error), emitter handlers.EventEmitter, rateLimit config.RateLimitConfig) http.Handler {
+	return newRouter(backend, multipartStore, bucketStore, authenticator, handlers.NewObjectHandlerWithQuotaManager(backend, manager, emitter), handlers.NewMultipartHandlerWithQuotaManager(multipartStore, manager, emitter), handlers.NewBucketHandlerWithCredentialChecker(backend, bucketStore, boundCredentialChecker), rateLimit, QuotaWithReservations)
+}
+
+func newRouter(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, objectHandler *handlers.ObjectHandler, multipartHandler *handlers.MultipartHandler, bucketHandler *handlers.BucketHandler, rateLimit config.RateLimitConfig, quotaMiddleware Middleware) http.Handler {
 	r := &Router{
-		objectHandler:    handlers.NewObjectHandlerWithHooks(backend, commit, emitter),
-		bucketHandler:    handlers.NewBucketHandler(backend, bucketStore),
-		multipartHandler: handlers.NewMultipartHandlerWithHooks(multipartStore, commit, emitter),
+		objectHandler:    objectHandler,
+		bucketHandler:    bucketHandler,
+		multipartHandler: multipartHandler,
 		bucketStore:      bucketStore,
-		chain:            []Middleware{Recover, Logging, AnonRateLimit(rateLimit), Auth(authenticator, bucketStore.GetACL), Quota},
+		chain:            []Middleware{Recover, Logging, AnonRateLimit(rateLimit), Auth(authenticator, bucketStore.GetACL), quotaMiddleware},
 	}
 	var h http.Handler = http.HandlerFunc(r.dispatch)
 	for i := len(r.chain) - 1; i >= 0; i-- {
@@ -302,6 +311,14 @@ func hasAnonymousBlockedSubresource(r *http.Request) bool {
 }
 
 func Quota(next http.Handler) http.Handler {
+	return quotaMiddleware(next, true)
+}
+
+func QuotaWithReservations(next http.Handler) http.Handler {
+	return quotaMiddleware(next, false)
+}
+
+func quotaMiddleware(next http.Handler, precheck bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bucket, key := parseS3Path(r.URL.Path)
 		if r.Method == http.MethodPut && bucket != "" && key != "" && !hasQuery(r, "tagging") && r.URL.Query().Get("uploadId") == "" && r.Header.Get("x-amz-copy-source") == "" {
@@ -315,17 +332,50 @@ func Quota(next http.Handler) http.Handler {
 				handlers.WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
 				return
 			}
-			if err := quota.Check(id, size); err != nil {
-				if errors.Is(err, quota.ErrQuotaExceeded) {
-					handlers.WriteS3Error(w, "QuotaExceeded", http.StatusForbidden, r.URL.Path)
+			if precheck {
+				if err := quota.Check(id, size); err != nil {
+					if errors.Is(err, quota.ErrQuotaExceeded) {
+						handlers.WriteS3Error(w, "QuotaExceeded", http.StatusForbidden, r.URL.Path)
+						return
+					}
+					handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
 					return
 				}
-				handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
-				return
 			}
+			if r.Body != nil {
+				r.Body = &quotaLimitReadCloser{reader: r.Body, closer: r.Body, remaining: size}
+			}
+			r = r.WithContext(quota.WithDeclaredSize(r.Context(), size))
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+type quotaLimitReadCloser struct {
+	reader    io.Reader
+	closer    io.Closer
+	remaining int64
+}
+
+func (r *quotaLimitReadCloser) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		var probe [1]byte
+		n, err := r.reader.Read(probe[:])
+		if n > 0 {
+			return 0, quota.ErrQuotaExceeded
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	return n, err
+}
+
+func (r *quotaLimitReadCloser) Close() error {
+	return r.closer.Close()
 }
 
 func contentLengthForQuota(r *http.Request) int64 {

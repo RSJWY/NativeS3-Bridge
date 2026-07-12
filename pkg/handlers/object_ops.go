@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,14 +45,45 @@ func (h *ObjectHandler) Copy(w http.ResponseWriter, r *http.Request, bucket, key
 		return
 	}
 
-	// Quota: the copy writes srcInfo.Size new bytes to the destination, but the
-	// request has no body so the Quota middleware cannot see it. Check here.
 	id, ok := auth.IdentityFromContext(r.Context())
-	if ok && id != nil && !auth.IsAnonymous(id) {
-		if err := quota.Check(id, srcInfo.Size); err != nil {
+	if !ok || id == nil || auth.IsAnonymous(id) {
+		WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+		return
+	}
+	var reservation *quota.Reservation
+	settled := false
+	replacedBytes := int64(0)
+	if existing, headErr := h.backend.HeadObject(bucket, key); headErr == nil {
+		replacedBytes = existing.Size
+	} else if !errors.Is(headErr, storage.ErrNoSuchKey) && !errors.Is(headErr, storage.ErrNoSuchBucket) {
+		writeStorageError(w, headErr, r.URL.Path)
+		return
+	}
+	reserveBytes := srcInfo.Size - replacedBytes
+	if reserveBytes < 0 {
+		reserveBytes = 0
+	}
+	if h.quota != nil {
+		reservation, err = h.quota.Reserve(id.CredentialID, reserveBytes)
+	} else {
+		err = quota.Check(id, srcInfo.Size)
+	}
+	if err != nil {
+		if errors.Is(err, quota.ErrQuotaExceeded) {
 			WriteS3Error(w, "QuotaExceeded", http.StatusForbidden, r.URL.Path)
-			return
+		} else {
+			WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
 		}
+		return
+	}
+	if reservation != nil {
+		defer func() {
+			if !settled {
+				if releaseErr := h.quota.Release(reservation); releaseErr != nil {
+					slog.Warn("release copy quota reservation", "credential_id", reservation.CredentialID, "bytes", reservation.Bytes, "error", releaseErr)
+				}
+			}
+		}()
 	}
 
 	contentType := srcInfo.ContentType
@@ -82,6 +114,14 @@ func (h *ObjectHandler) Copy(w http.ResponseWriter, r *http.Request, bucket, key
 		writeStorageError(w, err, r.URL.Path)
 		return
 	}
+	if reservation != nil {
+		if err := h.quota.Settle(reservation, info.Size, replacedBytes, quota.OpPut); err != nil {
+			settled = true
+			WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
+			return
+		}
+		settled = true
+	}
 	if tagBackend, ok := h.backend.(interface {
 		GetObjectTags(string, string) (map[string]string, error)
 		PutObjectTags(string, string, map[string]string) error
@@ -97,7 +137,9 @@ func (h *ObjectHandler) Copy(w http.ResponseWriter, r *http.Request, bucket, key
 		}
 	}
 
-	h.commitUsage(r, info.Size, quota.OpPut)
+	if reservation == nil {
+		h.commitUsage(r, info.Size, quota.OpPut)
+	}
 	h.emitObjectEvent(r, hooks.ObjectCreated, bucket, key, info)
 	WriteXML(w, http.StatusOK, copyObjectResult{
 		ETag:         quoteETag(info.ETag),
