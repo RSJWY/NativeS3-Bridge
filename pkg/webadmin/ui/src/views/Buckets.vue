@@ -152,7 +152,7 @@ async function changeACL(bucket: Bucket, event: Event) {
 
 async function remove(bucket: Bucket) {
   if (deleting.value || updatingACL.value) return
-  if (!window.confirm(`确认删除桶 ${bucket.name}？仅空桶可以删除，非空桶会保留数据并返回失败。`)) {
+  if (!window.confirm(`确认删除桶 ${bucket.name}？仅空桶可删；若仍有密钥绑定该桶，将无法删除。`)) {
     return
   }
   deleting.value = bucket.name
@@ -186,6 +186,8 @@ function toBucketError(err: unknown, fallback: string) {
       return '桶名称不合法：需为 3-63 位小写字母、数字或连字符，并以字母或数字开头和结尾。'
     case 'bucket not empty':
       return '桶非空，无法删除。请先删除桶内对象后再重试。'
+    case 'bucket has bound credentials':
+      return '该桶仍有密钥绑定，请先在密钥管理中解绑或改绑后再删除。'
     case 'bucket not found':
       return '桶不存在，请刷新列表后重试。'
     case 'acl must be private or public-read':

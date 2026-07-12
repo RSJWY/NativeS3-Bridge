@@ -34,7 +34,10 @@
           <tr v-for="credential in credentials" :key="credential.id">
             <td><code>{{ credential.access_key }}</code></td>
             <td>{{ credential.name || '未命名' }}</td>
-            <td>{{ credential.bucket || '全部桶' }}</td>
+            <td>
+              {{ credential.bucket || '全部桶' }}
+              <span v-if="isMissingBucket(credential.bucket)" class="error-text">桶已不存在</span>
+            </td>
             <td>
               <span :class="['status-badge', credential.status === 'enabled' ? 'status-enabled' : 'status-disabled']">
                 {{ credential.status === 'enabled' ? '启用' : '禁用' }}
@@ -62,8 +65,12 @@
         <h2>{{ editing ? '编辑密钥' : '新建密钥' }}</h2>
         <label for="credential-name">名称</label>
         <input id="credential-name" v-model="form.name" type="text" maxlength="128" :disabled="saving" />
-        <label for="credential-bucket">绑定桶（留空表示可访问全部桶）</label>
-        <input id="credential-bucket" v-model="form.bucket" type="text" maxlength="63" :disabled="saving" placeholder="例如 my-bucket" />
+        <label for="credential-bucket">绑定桶</label>
+        <select id="credential-bucket" v-model="form.bucket" :disabled="saving">
+          <option value="">全部桶</option>
+          <option v-if="isMissingBucket(form.bucket)" :value="form.bucket" disabled>{{ form.bucket }}（已不存在，请改选）</option>
+          <option v-for="bucket in buckets" :key="bucket.name" :value="bucket.name">{{ bucket.name }}</option>
+        </select>
         <label for="quota-bytes">配额字节数（0 表示不限）</label>
         <input id="quota-bytes" v-model="form.quotaBytes" type="number" min="0" step="1" :disabled="saving" />
         <p v-if="formError" class="error-text">{{ formError }}</p>
@@ -92,10 +99,11 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { adminApi, type CreatedCredential, type Credential } from '../api/client'
+import { adminApi, type Bucket, type CreatedCredential, type Credential } from '../api/client'
 import { formatBytes, formatQuota, parseQuotaToBytes } from '../utils/format'
 
 const credentials = ref<Credential[]>([])
+const buckets = ref<Bucket[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const togglingCredential = ref<number | null>(null)
@@ -107,6 +115,7 @@ const editing = ref<Credential | null>(null)
 const created = ref<CreatedCredential | null>(null)
 const form = reactive({ name: '', bucket: '', quotaBytes: '0' })
 const tableMutating = computed(() => togglingCredential.value !== null || deletingCredential.value !== null)
+const bucketNames = computed(() => new Set(buckets.value.map((bucket) => bucket.name)))
 
 onMounted(load)
 
@@ -114,7 +123,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    credentials.value = await adminApi.listCredentials()
+    ;[credentials.value, buckets.value] = await Promise.all([adminApi.listCredentials(), adminApi.listBuckets()])
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载密钥失败'
   } finally {
@@ -154,6 +163,10 @@ async function saveForm() {
     formError.value = '配额必须是非负整数且不能超过安全范围'
     return
   }
+  if (isMissingBucket(form.bucket)) {
+    formError.value = '绑定桶已不存在，请选择现有桶或全部桶'
+    return
+  }
   saving.value = true
   formError.value = ''
   try {
@@ -169,6 +182,10 @@ async function saveForm() {
   } finally {
     saving.value = false
   }
+}
+
+function isMissingBucket(bucket: string) {
+  return bucket !== '' && !bucketNames.value.has(bucket)
 }
 
 async function toggleStatus(credential: Credential) {
