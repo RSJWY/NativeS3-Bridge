@@ -68,7 +68,8 @@ func (a *API) reconcileBucket(w http.ResponseWriter, r *http.Request, bucket str
 		}
 		return
 	}
-	response := reconcileResponse{Bucket: bucket, Apply: request.Apply, ObjectCount: report.ObjectCount, ScannedBytes: report.ScannedBytes, OrphanSidecarCount: report.OrphanSidecarCount(), OrphanSidecarSamples: report.OrphanSidecars, BoundCredentials: []reconcileCredential{}}
+	response := reconcileResponse{Bucket: bucket, Apply: request.Apply, ObjectCount: report.ObjectCount, ScannedBytes: report.ScannedBytes, OrphanSidecarCount: report.OrphanSidecarCount(), OrphanSidecarSamples: []string{}, BoundCredentials: []reconcileCredential{}}
+	response.OrphanSidecarSamples = append(response.OrphanSidecarSamples, report.OrphanSidecars...)
 	var credentials []dbpkg.Credential
 	if err := a.db.Where("bucket = ? AND bucket <> ''", bucket).Order("id ASC").Find(&credentials).Error; err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "query credentials failed")

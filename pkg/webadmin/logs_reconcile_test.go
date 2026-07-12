@@ -162,3 +162,25 @@ func TestReconcileBucketAuthAndErrors(t *testing.T) {
 		t.Fatalf("missing status = %d, body = %s", missing.Code, missing.Body.String())
 	}
 }
+
+func TestReconcileBucketEmptyCollectionsAreArrays(t *testing.T) {
+	gdb := newWebadminTestDB(t)
+	root := t.TempDir()
+	bucket := "empty-bucket"
+	if err := os.MkdirAll(filepath.Join(root, bucket), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Create(&dbpkg.Bucket{Name: bucket, ACL: storage.ACLPrivate}).Error; err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(gdb, nil, storage.NewBucketStore(gdb, root, time.Second), APIOptions{DataRoot: root, MetadataSuffix: ".s3meta"})
+
+	response := httptest.NewRecorder()
+	api.BucketByName(response, httptest.NewRequest(http.MethodPost, "/api/admin/buckets/empty-bucket/reconcile", bytes.NewBufferString(`{"apply":false}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("reconcile = %d, %s", response.Code, response.Body.String())
+	}
+	if body := response.Body.String(); !bytes.Contains([]byte(body), []byte(`"orphan_sidecar_samples":[]`)) || !bytes.Contains([]byte(body), []byte(`"bound_credentials":[]`)) {
+		t.Fatalf("empty collections must be arrays: %s", body)
+	}
+}
