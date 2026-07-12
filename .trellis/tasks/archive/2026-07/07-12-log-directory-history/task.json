@@ -1,0 +1,32 @@
+{
+  "id": "log-directory-history",
+  "name": "log-directory-history",
+  "title": "日志目录化与历史文件管理",
+  "description": "支持 log.dir 目录化落盘，并在管理后台列出和选择查看当前及历史轮转日志文件",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "rsjwy",
+  "assignee": "rsjwy",
+  "createdAt": "2026-07-12",
+  "completedAt": "2026-07-12",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "pkg/config/config.go",
+    "cmd/natives3bridge/main.go",
+    "pkg/webadmin/logs.go",
+    "pkg/webadmin/ui/src/views/Logs.vue",
+    "pkg/webadmin/ui/src/api/client.ts"
+  ],
+  "notes": "Complex full-stack task split from s3-auth-access-logging; no code dependency, implement after the auth/access logging task.",
+  "meta": {}
+}
