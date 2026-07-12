@@ -4,7 +4,7 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 
 项目目标很明确：在不引入专有对象格式的前提下，让本地文件系统可以被 S3 客户端、业务服务、脚本和浏览器直链安全访问。
 
-## 目录
+## 文档导航
 
 - [核心能力](#核心能力)
 - [界面预览](#界面预览)
@@ -14,6 +14,8 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 - [配置说明](#配置说明)
 - [S3 API 使用](#s3-api-使用)
 - [管理后台](#管理后台)
+  - [日志查看与轮转落盘](#日志查看与轮转落盘)
+  - [存储对账](#存储对账)
 - [公网安全部署](#公网安全部署)
 - [运维端点与监控](#运维端点与监控)
 - [事件钩子](#事件钩子)
@@ -21,6 +23,7 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 - [发布流程](#发布流程)
 - [开发与验证](#开发与验证)
 - [仓库文件与忽略规则](#仓库文件与忽略规则)
+- [License](#license)
 
 ## 核心能力
 
@@ -37,10 +40,10 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 
 ## 界面预览
 
-<details>
-<summary>展开管理后台截图</summary>
-
 管理后台提供容量、请求趋势、访问密钥和 bucket ACL 的集中视图。截图来自本地临时实例，示例数据通过真实 S3 上传和管理 API 写入。
+
+<details>
+<summary>查看管理后台截图</summary>
 
 ### 仪表盘
 
@@ -58,9 +61,6 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 
 ## 适用场景
 
-<details>
-<summary>展开适用 / 不适合场景</summary>
-
 - 局域网或内网环境中，把已有目录快速暴露为 S3 接口。
 - 游戏、互动引擎、AI 工作流、媒体处理脚本需要 S3 API，但希望对象仍是普通文件。
 - 业务服务生成私有对象的短时预签名直链，终端用户通过浏览器或 HTTP 客户端直接下载。
@@ -72,12 +72,7 @@ NativeS3-Bridge 是一个轻量的本地 S3 桥接中间件。它把操作系统
 - 需要分布式高可用、跨节点副本、纠删码、版本化或对象锁。
 - 需要把文件存储为专有块格式或跨盘卷合并。
 
-</details>
-
 ## 架构与数据模型
-
-<details>
-<summary>展开架构图、原生文件布局和数据库模型</summary>
 
 ```text
                  ┌──────────────────────────┐
@@ -157,12 +152,7 @@ data/
 
 对象字节、对象 metadata 和 tags 不存入数据库。
 
-</details>
-
 ## 快速开始
-
-<details>
-<summary>展开构建、配置和启动步骤</summary>
 
 ### 1. 环境要求
 
@@ -259,12 +249,7 @@ webadmin:
 
 该命令只加载和校验配置，不启动服务。它会输出 TLS、示例 session secret、bootstrap password、TOTP、captcha、ops endpoint 和 `trust_forwarded` 等生产安全 warning。
 
-</details>
-
 ## 配置说明
-
-<details>
-<summary>展开完整配置字段说明</summary>
 
 完整示例见 [configs/config.example.yaml](configs/config.example.yaml) 和 [configs/config.docker.example.yaml](configs/config.docker.example.yaml)。
 
@@ -417,12 +402,7 @@ log_level: "info"
 - `region`：SigV4 region，客户端签名必须匹配。
 - `log_level`：`debug`、`info`、`warn`、`error`。
 
-</details>
-
 ## S3 API 使用
-
-<details>
-<summary>展开 AWS CLI、支持范围和访问方式</summary>
 
 ### AWS CLI 环境变量
 
@@ -535,12 +515,7 @@ S3 API 错误统一返回标准 XML：
 
 每个 S3 响应都会带 `x-amz-request-id`，该 ID 也会出现在错误 XML 和访问日志中。
 
-</details>
-
 ## 管理后台
-
-<details>
-<summary>展开登录流程和 Admin API</summary>
 
 浏览器访问 `http://127.0.0.1:9001/`。管理后台是单用户模型，不提供多用户、RBAC 或 OIDC。
 
@@ -622,12 +597,29 @@ curl -b cookie.txt \
   -d '{"acl":"public-read"}'
 ```
 
-</details>
+### 日志查看与轮转落盘
+
+管理后台的「日志」页面可查看最近的运行日志和 S3 请求日志。默认仅保存在进程内存 ring 中（最多 2000 条，重启清空），stdout 始终保留。配置 `log.file` 后会同时写入轮转文件，并优先从当前日志文件读取管理页数据：
+
+```yaml
+log_level: "info"
+log:
+  file: "/state/logs/natives3bridge.log"
+  max_size_mb: 100
+  max_backups: 5
+  max_age_days: 14
+  compress: false
+```
+
+日志文件建议放在 Docker `state` 卷，禁止放入对象 `storage.data_root`。配置了不可写路径时服务会启动失败，避免静默丢日志。`max_backups: 0` 表示不保留历史文件；`max_age_days > 0` 时 lumberjack 会在轮转维护中清理超过该天数的历史文件。
+
+### 存储对账
+
+桶管理中的「存储对账」按单桶扫描原生对象文件，报告磁盘字节数、孤儿 `.s3meta` 和绑定密钥的 `used_bytes` 差异。首次操作始终为 dry-run；确认执行后，服务端会重新扫描、删除孤儿 sidecar，并把仅绑定该桶的每把密钥用量回写为本次扫描值。全桶密钥（`bucket` 为空）和其他桶密钥不会被修改，对账也不会删除或恢复对象文件。
+
+大桶扫描为同步操作，建议在低峰期执行。磁盘是对象存在性的唯一真相源，对账不会创建 objects 数据库表。
 
 ## 公网安全部署
-
-<details>
-<summary>展开反向代理示例和生产检查清单</summary>
 
 公网部署要把 S3 API 和管理后台视为不同安全边界。
 
@@ -719,12 +711,7 @@ server {
 - 日志不记录 Authorization、Cookie、captcha token、session secret、完整 presigned URL 或对象内容。
 - public-read bucket 中只有明确公开的对象。
 
-</details>
-
 ## 运维端点与监控
-
-<details>
-<summary>展开健康检查和 Prometheus 指标</summary>
 
 Ops endpoints 在 admin listener 上注册：
 
@@ -767,12 +754,7 @@ natives3_database_up
 
 指标不会包含 bucket name、object key、access key、secret 或 session。
 
-</details>
-
 ## 事件钩子
-
-<details>
-<summary>展开 Webhook 事件格式和投递规则</summary>
 
 Hook manager 从数据库的 `hook_configs` 表加载启用的 Webhook 配置。对象创建、对象删除和 multipart complete 会投递事件。
 
@@ -802,12 +784,7 @@ Hook manager 从数据库的 `hook_configs` 表加载启用的 Webhook 配置。
 
 当前 README 不提供 hook 配置管理 API。可通过数据库初始化或后续管理能力写入 `hook_configs`。
 
-</details>
-
 ## Docker 部署
-
-<details>
-<summary>展开 docker run 和 compose 示例</summary>
 
 ### docker run
 
@@ -924,12 +901,7 @@ docker compose --profile postgres up -d
 无论使用哪种数据库，`storage.data_root` 都应保持为 `/data`，因为对象文件不存
 在关系数据库中。
 
-</details>
-
 ## 发布流程
-
-<details>
-<summary>展开 GitHub Release 和镜像发布说明</summary>
 
 GitHub Actions 的 release workflow 支持 tag 触发和手动触发。
 
@@ -955,12 +927,7 @@ ghcr.io/rsjwy/natives3-bridge:latest
 
 手动运行 `Release` workflow 时可以输入发布 tag。若 tag 不存在，workflow 会基于当前构建提交创建该 tag；如需指定源码，可填写 `source_ref`。
 
-</details>
-
 ## 开发与验证
-
-<details>
-<summary>展开本地命令、冒烟测试和代码结构</summary>
 
 ### 常用命令
 
@@ -1024,12 +991,7 @@ configs/                 # 示例配置
 scripts/                 # 冒烟测试脚本
 ```
 
-</details>
-
 ## 仓库文件与忽略规则
-
-<details>
-<summary>展开应提交和不应提交清单</summary>
 
 提交前建议检查：
 
@@ -1057,30 +1019,6 @@ git status --ignored --short
 
 `.trellis/.template-hashes.json` 当前在仓库中已跟踪，但它容易记录本地模板刷新、runtime session 和 Python cache 哈希。除非明确在升级 Trellis 模板并审查了 diff，否则不要把它和业务或文档提交混在一起。
 
-</details>
-
 ## License
 
 见仓库 LICENSE。若仓库尚未提供 LICENSE，请在正式分发前补充。
-
-### 日志查看与轮转落盘
-
-管理后台的「日志」页面可查看最近的运行日志和 S3 请求日志。默认仅保存在进程内存 ring 中（最多 2000 条，重启清空），stdout 始终保留。配置 `log.file` 后会同时写入轮转文件，并优先从当前日志文件读取管理页数据：
-
-```yaml
-log_level: "info"
-log:
-  file: "/state/logs/natives3bridge.log"
-  max_size_mb: 100
-  max_backups: 5
-  max_age_days: 14
-  compress: false
-```
-
-日志文件建议放在 Docker `state` 卷，禁止放入对象 `storage.data_root`。配置了不可写路径时服务会启动失败，避免静默丢日志。`max_backups: 0` 表示不保留历史文件；`max_age_days > 0` 时 lumberjack 会在轮转维护中清理超过该天数的历史文件。
-
-### 存储对账
-
-桶管理中的「存储对账」按单桶扫描原生对象文件，报告磁盘字节数、孤儿 `.s3meta` 和绑定密钥的 `used_bytes` 差异。首次操作始终为 dry-run；确认执行后，服务端会重新扫描、删除孤儿 sidecar，并把仅绑定该桶的每把密钥用量回写为本次扫描值。全桶密钥（`bucket` 为空）和其他桶密钥不会被修改，对账也不会删除或恢复对象文件。
-
-大桶扫描为同步操作，建议在低峰期执行。磁盘是对象存在性的唯一真相源，对账不会创建 objects 数据库表。
