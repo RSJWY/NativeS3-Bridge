@@ -407,3 +407,37 @@ Implemented rotating file logging with admin log viewer and single-bucket storag
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: 完成 S3 诊断日志与历史日志管理
+
+**Date**: 2026-07-12
+**Task**: 完成 S3 诊断日志与历史日志管理
+**Branch**: `main`
+
+### Summary
+
+增强 S3 access/auth 诊断日志；新增 log.dir、历史日志安全枚举、gzip 读取、管理 API 与前端文件选择器，并完成全量验证。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `fc0d6dd` | (see git log) |
+| `66af0ff` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
