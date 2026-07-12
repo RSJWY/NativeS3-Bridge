@@ -1,20 +1,30 @@
 <template>
   <main class="login-page">
-    <form class="login-card" @submit.prevent="submit">
-      <h1>管理后台登录</h1>
-      <p class="muted">输入配置中的单管理员密码。</p>
-      <label for="password">密码</label>
-      <input id="password" v-model="password" type="password" autocomplete="current-password" required autofocus />
-      <template v-if="settings.totp_required">
-        <label for="totp-code">动态验证码</label>
-        <input id="totp-code" v-model="totpCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required />
-      </template>
-      <div v-if="settings.captcha_enabled" class="captcha-slot">
-        <div ref="captchaEl"></div>
+    <div class="login-shell">
+      <div class="login-brand">
+        <div class="brand-mark" aria-hidden="true">NS</div>
+        <div>
+          <div class="brand">NativeS3 Bridge</div>
+          <div class="brand-description">对象存储管理</div>
+        </div>
       </div>
-      <p v-if="error" class="error-text">{{ error }}</p>
-      <button class="primary-button" type="submit" :disabled="loading || settingsLoading">{{ loading ? '登录中…' : '登录' }}</button>
-    </form>
+      <form class="login-card" @submit.prevent="submit">
+        <h1>管理后台登录</h1>
+        <p class="muted">输入配置中的单管理员密码。</p>
+        <label for="password">密码</label>
+        <input id="password" v-model="password" type="password" autocomplete="current-password" required autofocus />
+        <template v-if="settings.totp_required">
+          <label for="totp-code">动态验证码</label>
+          <input id="totp-code" v-model="totpCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required />
+        </template>
+        <div v-if="settings.captcha_enabled" class="captcha-slot">
+          <div ref="captchaEl"></div>
+        </div>
+        <p v-if="error" class="error-text">{{ error }}</p>
+        <button class="primary-button" type="submit" :disabled="loading || settingsLoading">{{ loading ? '登录中…' : '登录' }}</button>
+      </form>
+      <ProjectMeta />
+    </div>
   </main>
 </template>
 
@@ -22,6 +32,7 @@
 import { nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { adminApi, type AuthSettings } from '../api/client'
+import ProjectMeta from '../components/ProjectMeta.vue'
 import { markLoggedIn } from '../state/auth'
 
 const password = ref('')

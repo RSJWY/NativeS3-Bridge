@@ -107,6 +107,8 @@ jobs:
 
       - name: Build embedded admin UI
         working-directory: pkg/webadmin/ui
+        env:
+          APP_VERSION: ${{ steps.release.outputs.tag }}
         run: |
           npm ci
           npm run build
@@ -186,6 +188,8 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            APP_VERSION=${{ steps.release.outputs.tag }}
           tags: |
             ${{ steps.release.outputs.image }}:${{ steps.release.outputs.docker_tag }}
             ${{ steps.release.outputs.image }}:latest

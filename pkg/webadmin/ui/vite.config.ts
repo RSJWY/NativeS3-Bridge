@@ -2,7 +2,12 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { writeFileSync } from 'node:fs'
 
+const appVersion = process.env.APP_VERSION?.trim() || 'dev'
+
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion)
+  },
   plugins: [
     vue(),
     {

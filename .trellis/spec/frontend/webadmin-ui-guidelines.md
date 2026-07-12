@@ -19,6 +19,7 @@
 - Admin API methods: `login`, `logout`, `listCredentials`, `createCredential`, `updateCredential`, `deleteCredential`, `listBuckets`, `createBucket`, `deleteBucket`, `setBucketACL`, `dashboardSummary`, `usageRanking`, `requestTrend`.
 - Vite proxy: `server.proxy['/api'] = 'http://localhost:9001'`.
 - Build command: `npm run build` runs `vue-tsc --noEmit && vite build` into `dist/`.
+- Build version input: optional `APP_VERSION`; Vite exposes it as the compile-time string `__APP_VERSION__`.
 
 ### 3. Contracts
 
@@ -35,6 +36,8 @@
 - Editing a credential must choose the largest unit that represents its existing `quota_bytes` exactly; legacy values smaller than 1 KB fall back to a precise fractional KB value so saving without changes preserves the byte count.
 - Dashboard must render three real ECharts charts from API data: capacity usage donut, usage ranking bar chart, request trend line chart.
 - UI styling should stay functional and restrained: normal sidebar, simple cards/tables/forms, no gradients, no glass shells, no decorative hero copy, no oversized radii.
+- Application release metadata has one frontend source: `APP_VERSION` is trimmed and falls back to `dev`; Release workflow and Docker Buildx must pass the same release tag, while local builds omit it.
+- GitHub URL and compiled version must be defined in shared project config and rendered through a shared component on both login and protected application shells. External repository links use `target="_blank"` and `rel="noopener noreferrer"`.
 - Reuse shared visual state classes instead of one-off styles: wrap wide tables in `.table-scroll`, use `.state-row` for loading/empty table rows, use `.status-badge` for credential status, and use `.chart-state` overlays for dashboard loading/empty chart states.
 
 ### 4. Validation & Error Matrix
@@ -48,6 +51,7 @@
 - Bucket non-empty delete -> visible error that the bucket is not empty and objects must be removed first.
 - Missing dashboard data -> render empty charts/zero values without throwing.
 - Mobile viewport under 900px -> sidebar becomes top navigation and charts/tables remain reachable.
+- Empty or whitespace-only `APP_VERSION` -> compile `dev`; non-empty release tag -> render that exact tag without a runtime request.
 - Wide credential or bucket tables on narrow viewports -> horizontal scrolling within `.table-scroll`, not page-level overflow.
 
 ### 5. Good/Base/Bad Cases
@@ -57,6 +61,9 @@
 - Good: entering `10` with unit `GB` sends `quota_bytes: 10737418240`; editing that credential shows `10 GB`.
 - Good: opening `/buckets` after login lists bucket `name`, `acl`, and `created_at`; creating a valid bucket refreshes the table; switching ACL to `public-read` refreshes and shows the `公开下载` badge.
 - Base: refresh with stale local auth state may hit an API `401`, clear state, and redirect to login.
+- Base: `npm run build` without release environment renders `dev` on login and protected pages.
+- Good: Release binary and Docker image built for tag `v1.2.3` both render `v1.2.3` and the canonical GitHub URL.
+- Bad: using `package.json` dependency version as the application release, or passing a tag only to the binary build while Docker falls back to `dev`.
 - Bad: hiding a failed bucket delete or leaving the ACL select visually changed after the server rejects the update.
 - Bad: asking users to enter raw bytes, or silently converting invalid quota text to `0`, because the former is error-prone and the latter grants unlimited capacity.
 - Bad: storing the secret key in localStorage or showing it in the credential table.
@@ -70,6 +77,7 @@
 - API smoke through the UI session cookie: create credential, list credentials, confirm list response lacks `secret_key`.
 - Real `aws-cli` smoke using a UI-created credential, followed by disabling that credential and confirming S3 rejects it.
 - Responsive manual/browser check at desktop and mobile widths when changing layout or CSS.
+- Build metadata check: inspect default assets for `dev`, rebuild with `APP_VERSION=<tag>`, and assert the tag and canonical GitHub URL are present; verify Release UI env and Docker build arg use the same tag output.
 
 ### 7. Wrong vs Correct
 
@@ -120,6 +128,19 @@ try {
   target.value = bucket.acl
   error.value = toBucketError(err, '更新访问权限失败')
 }
+```
+
+Wrong:
+
+```ts
+export const appVersion = '0.1.0' // package metadata is not the application release
+```
+
+Correct:
+
+```ts
+const appVersion = process.env.APP_VERSION?.trim() || 'dev'
+define: { __APP_VERSION__: JSON.stringify(appVersion) }
 ```
 
 ---

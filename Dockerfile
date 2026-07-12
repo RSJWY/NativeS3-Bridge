@@ -1,11 +1,12 @@
 # syntax=docker/dockerfile:1
 
 FROM --platform=$BUILDPLATFORM node:18-alpine AS web
+ARG APP_VERSION
 WORKDIR /src/pkg/webadmin/ui
 COPY pkg/webadmin/ui/package*.json ./
 RUN npm ci
 COPY pkg/webadmin/ui/ ./
-RUN npm run build
+RUN APP_VERSION="${APP_VERSION}" npm run build
 
 FROM --platform=$BUILDPLATFORM golang:1.21-alpine AS build
 WORKDIR /src
