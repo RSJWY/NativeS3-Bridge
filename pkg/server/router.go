@@ -228,15 +228,42 @@ func Recover(next http.Handler) http.Handler {
 	})
 }
 
+type statusResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *statusResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *statusResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func Logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		requestID := newS3RequestID(started)
 		w.Header().Set("x-amz-request-id", requestID)
+		statusWriter := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
-			slog.Info("s3 request", "request_id", requestID, "method", r.Method, "path", r.URL.Path, "elapsed", time.Since(started))
+			slog.Info("s3 request", "request_id", requestID, "method", r.Method, "path", r.URL.Path, "status", statusWriter.status, "elapsed", time.Since(started))
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(statusWriter, r)
 	})
 }
 
@@ -252,12 +279,14 @@ func Auth(authenticator auth.Authenticator, aclLookup ACLLookup) Middleware {
 				id, err := authenticator.Verify(r)
 				if err != nil {
 					code := auth.ErrorCode(err)
+					logAuthDenied(w, r, "verify_failed", code)
 					handlers.WriteS3Error(w, code, http.StatusForbidden, r.URL.Path)
 					return
 				}
 				if id.Bucket != "" {
 					bucket, _ := parseS3Path(r.URL.Path)
 					if bucket != id.Bucket {
+						logAuthDenied(w, r, "bucket_mismatch", auth.CodeAccessDenied, "bound_bucket", id.Bucket, "request_bucket", bucket)
 						handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
 						return
 					}
@@ -267,23 +296,41 @@ func Auth(authenticator auth.Authenticator, aclLookup ACLLookup) Middleware {
 			}
 
 			bucket, key := parseS3Path(r.URL.Path)
-			if !isAnonymousObjectRead(r, bucket, key) || aclLookup == nil {
+			if !isAnonymousObjectRead(r, bucket, key) {
+				logAuthDenied(w, r, "credentials_required", auth.CodeAccessDenied)
+				handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
+				return
+			}
+			if aclLookup == nil {
+				logAuthDenied(w, r, "acl_lookup_unavailable", auth.CodeAccessDenied, "bucket", bucket)
 				handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
 				return
 			}
 			acl, exists, err := aclLookup(bucket)
 			if err != nil {
-				slog.Error("lookup bucket acl", "bucket", bucket, "error", err)
+				logAuthDenied(w, r, "acl_lookup_failed", "InternalError", "bucket", bucket, "error", err)
 				handlers.WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
 				return
 			}
 			if !exists || acl != storage.ACLPublicRead {
+				logAuthDenied(w, r, "anonymous_not_allowed", auth.CodeAccessDenied, "bucket", bucket, "bucket_exists", exists, "acl", acl)
 				handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), auth.AnonymousIdentity())))
 		})
 	}
+}
+
+func logAuthDenied(w http.ResponseWriter, r *http.Request, reason, code string, attrs ...any) {
+	args := []any{
+		"request_id", w.Header().Get("x-amz-request-id"),
+		"method", r.Method,
+		"path", r.URL.Path,
+		"reason", reason,
+		"code", code,
+	}
+	slog.Warn("s3 auth denied", append(args, attrs...)...)
 }
 
 func hasCredentials(r *http.Request) bool {

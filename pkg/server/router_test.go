@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -259,11 +260,218 @@ func TestLoggingAddsRequestIDHeaderAndLogField(t *testing.T) {
 		`"request_id":"` + requestID + `"`,
 		`"method":"HEAD"`,
 		`"path":"/bucket/key.txt"`,
+		`"status":204`,
 		`"elapsed":`,
 	} {
 		if !strings.Contains(logLine, want) {
 			t.Fatalf("log entry = %s, want %s", logLine, want)
 		}
+	}
+}
+
+func TestLoggingRecordsNetHTTPStatusSemantics(t *testing.T) {
+	tests := []struct {
+		name       string
+		handler    http.HandlerFunc
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name: "explicit status",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name: "implicit ok",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("ok"))
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   "ok",
+		},
+		{
+			name: "first header wins",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				w.WriteHeader(http.StatusInternalServerError)
+			},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name: "write locks implicit ok",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("ok"))
+				w.WriteHeader(http.StatusNotFound)
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   "ok",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logBuf := captureDefaultLogger(t)
+			rr := httptest.NewRecorder()
+			Logging(tt.handler).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/bucket/key.txt", nil))
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("response status = %d, want %d", rr.Code, tt.wantStatus)
+			}
+			if rr.Body.String() != tt.wantBody {
+				t.Fatalf("response body = %q, want %q", rr.Body.String(), tt.wantBody)
+			}
+			entry := requireJSONLogEntry(t, logBuf, "s3 request")
+			if entry["status"] != float64(tt.wantStatus) {
+				t.Fatalf("logged status = %#v, want %d; log=%s", entry["status"], tt.wantStatus, logBuf.String())
+			}
+		})
+	}
+
+	rr := httptest.NewRecorder()
+	w := &statusResponseWriter{ResponseWriter: rr, status: http.StatusOK}
+	if w.Unwrap() != rr {
+		t.Fatal("Unwrap did not return the underlying response writer")
+	}
+}
+
+func TestAuthDeniedLogsDiagnosticFields(t *testing.T) {
+	sensitiveAuthorization := "AUTHORIZATION-SENTINEL secret-sentinel"
+	tests := []struct {
+		name       string
+		method     string
+		target     string
+		signed     bool
+		id         *auth.Identity
+		verifyErr  error
+		acl        string
+		exists     bool
+		aclErr     error
+		nilLookup  bool
+		wantStatus int
+		wantReason string
+		wantCode   string
+		wantFields map[string]any
+	}{
+		{
+			name:   "verify failed",
+			method: http.MethodGet, target: "/bucket/key.txt?X-Amz-Signature=query-secret", signed: true,
+			verifyErr: auth.NewError(auth.CodeSignatureDoesNotMatch), wantStatus: http.StatusForbidden,
+			wantReason: "verify_failed", wantCode: auth.CodeSignatureDoesNotMatch,
+		},
+		{
+			name:   "bound bucket mismatch",
+			method: http.MethodGet, target: "/other/key.txt", signed: true,
+			id: &auth.Identity{CredentialID: 9, AccessKey: "scoped", Bucket: "bound"}, wantStatus: http.StatusForbidden,
+			wantReason: "bucket_mismatch", wantCode: auth.CodeAccessDenied,
+			wantFields: map[string]any{"bound_bucket": "bound", "request_bucket": "other"},
+		},
+		{
+			name:   "credentials required",
+			method: http.MethodPut, target: "/bucket/key.txt", wantStatus: http.StatusForbidden,
+			wantReason: "credentials_required", wantCode: auth.CodeAccessDenied,
+		},
+		{
+			name:   "acl lookup unavailable",
+			method: http.MethodGet, target: "/bucket/key.txt", nilLookup: true, wantStatus: http.StatusForbidden,
+			wantReason: "acl_lookup_unavailable", wantCode: auth.CodeAccessDenied,
+			wantFields: map[string]any{"bucket": "bucket"},
+		},
+		{
+			name:   "acl lookup failed",
+			method: http.MethodGet, target: "/bucket/key.txt", aclErr: errors.New("acl unavailable"), wantStatus: http.StatusInternalServerError,
+			wantReason: "acl_lookup_failed", wantCode: "InternalError",
+			wantFields: map[string]any{"bucket": "bucket", "error": "acl unavailable"},
+		},
+		{
+			name:   "private bucket",
+			method: http.MethodHead, target: "/bucket/key.txt", acl: storage.ACLPrivate, exists: true, wantStatus: http.StatusForbidden,
+			wantReason: "anonymous_not_allowed", wantCode: auth.CodeAccessDenied,
+			wantFields: map[string]any{"bucket": "bucket", "bucket_exists": true, "acl": storage.ACLPrivate},
+		},
+		{
+			name:   "missing bucket metadata",
+			method: http.MethodGet, target: "/missing/key.txt", wantStatus: http.StatusForbidden,
+			wantReason: "anonymous_not_allowed", wantCode: auth.CodeAccessDenied,
+			wantFields: map[string]any{"bucket": "missing", "bucket_exists": false, "acl": ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logBuf := captureDefaultLogger(t)
+			authenticator := &stubAuthenticator{id: tt.id, err: tt.verifyErr}
+			var aclLookup ACLLookup
+			if !tt.nilLookup {
+				aclLookup = func(string) (string, bool, error) {
+					return tt.acl, tt.exists, tt.aclErr
+				}
+			}
+			h := Logging(Auth(authenticator, aclLookup)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			})))
+			req := httptest.NewRequest(tt.method, tt.target, nil)
+			if tt.signed {
+				req.Header.Set("Authorization", sensitiveAuthorization)
+			}
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			requestID := rr.Header().Get("x-amz-request-id")
+			assertGeneratedRequestID(t, requestID)
+			denied := requireJSONLogEntry(t, logBuf, "s3 auth denied")
+			for key, want := range map[string]any{
+				"request_id": requestID,
+				"method":     tt.method,
+				"path":       req.URL.Path,
+				"reason":     tt.wantReason,
+				"code":       tt.wantCode,
+			} {
+				if denied[key] != want {
+					t.Fatalf("auth log %s = %#v, want %#v; log=%s", key, denied[key], want, logBuf.String())
+				}
+			}
+			for key, want := range tt.wantFields {
+				if denied[key] != want {
+					t.Fatalf("auth log %s = %#v, want %#v; log=%s", key, denied[key], want, logBuf.String())
+				}
+			}
+			access := requireJSONLogEntry(t, logBuf, "s3 request")
+			if access["request_id"] != requestID || access["status"] != float64(tt.wantStatus) {
+				t.Fatalf("access log does not correlate status/request id: %v", access)
+			}
+			if tt.name == "verify failed" {
+				for _, secret := range []string{sensitiveAuthorization, "secret-sentinel", "query-secret", "Authorization", "X-Amz-Signature"} {
+					if strings.Contains(logBuf.String(), secret) {
+						t.Fatalf("log leaked sensitive value %q: %s", secret, logBuf.String())
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRouterSignedHeadMissingKeyLogsNotFound(t *testing.T) {
+	logBuf := captureDefaultLogger(t)
+	router, _, _ := newOpsTestRouter(t)
+	req := headerSignedRequest(http.MethodHead, "/test-bucket/missing")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "<Code>NoSuchKey</Code>") {
+		t.Fatalf("body = %s, want NoSuchKey XML", rr.Body.String())
+	}
+	requestID := rr.Header().Get("x-amz-request-id")
+	access := requireJSONLogEntry(t, logBuf, "s3 request")
+	if access["request_id"] != requestID || access["status"] != float64(http.StatusNotFound) {
+		t.Fatalf("access log = %v, want request_id=%q status=404", access, requestID)
 	}
 }
 
@@ -700,4 +908,28 @@ func assertGeneratedRequestID(t *testing.T, requestID string) {
 		}
 		t.Fatalf("request id = %q contains unsafe character %q", requestID, r)
 	}
+}
+
+func captureDefaultLogger(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logBuf bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	return &logBuf
+}
+
+func requireJSONLogEntry(t *testing.T, logBuf *bytes.Buffer, message string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(logBuf.String()), "\n") {
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("parse log entry: %v; line=%s", err, line)
+		}
+		if entry["msg"] == message {
+			return entry
+		}
+	}
+	t.Fatalf("log entry %q not found: %s", message, logBuf.String())
+	return nil
 }
