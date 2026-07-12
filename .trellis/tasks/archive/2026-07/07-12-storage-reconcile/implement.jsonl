@@ -1,0 +1,11 @@
+{"path":".trellis/spec/backend/webadmin-guidelines.md","note":"admin API session, buckets routes, credential JSON contracts"}
+{"path":".trellis/spec/backend/auth-quota-guidelines.md","note":"used_bytes commit/invalidate; reconcile must Invalidate after rewrite"}
+{"path":".trellis/spec/backend/storage-guidelines.md","note":"native path, sidecar suffix, list filters"}
+{"path":"pkg/db/models.go","note":"credentials.bucket and used_bytes only; no objects table"}
+{"path":"pkg/storage/file_backend.go","note":"ListObjects filters; DeleteObject/sidecar; walk semantics"}
+{"path":"pkg/webadmin/api.go","note":"extend with reconcile route"}
+{"path":"pkg/webadmin/server.go","note":"wire data_root / backend into API"}
+{"path":"pkg/auth/credential_store.go","note":"Invalidate after used_bytes update"}
+{"path":"pkg/webadmin/ui/src/views/Buckets.vue","note":"UI entry for reconcile"}
+{"path":"pkg/webadmin/ui/src/api/client.ts","note":"reconcileBucket client"}
+{"path":"README.md","note":"document storage reconcile; objects not in DB"}

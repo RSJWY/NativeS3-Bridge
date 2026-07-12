@@ -1,0 +1,32 @@
+{
+  "id": "storage-reconcile",
+  "name": "storage-reconcile",
+  "title": "管理端存储对账：扫盘核对与配额回写",
+  "description": "管理端按桶扫盘对账：dry-run 报告对象/孤儿 sidecar 与 used_bytes 差异；apply 清孤儿 sidecar 并回写绑定密钥 used_bytes。不建对象表。仅规划，待后续实现。",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "rsjwy",
+  "assignee": "rsjwy",
+  "createdAt": "2026-07-12",
+  "completedAt": "2026-07-12",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "pkg/webadmin/api.go",
+    "pkg/storage/file_backend.go",
+    "pkg/db/models.go",
+    "pkg/auth/credential_store.go",
+    "pkg/webadmin/ui/src/views/Buckets.vue"
+  ],
+  "notes": "User: create only, do not implement yet. Do not task.py start until ready. Artifacts: prd.md design.md implement.md ready.",
+  "meta": {}
+}

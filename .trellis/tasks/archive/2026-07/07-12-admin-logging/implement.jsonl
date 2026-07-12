@@ -1,0 +1,12 @@
+{"path":".trellis/spec/backend/webadmin-guidelines.md","note":"admin session routes; add logs API contract when implementing"}
+{"path":"pkg/config/config.go","note":"LogLevel today; add LogConfig"}
+{"path":"cmd/natives3bridge/main.go","note":"setupSlog stdout-only today"}
+{"path":"pkg/server/router.go","note":"Logging middleware s3 request slog"}
+{"path":"pkg/webadmin/server.go","note":"register /api/admin/logs under auth"}
+{"path":"pkg/webadmin/api.go","note":"Logs handler"}
+{"path":"pkg/webadmin/ui/src/App.vue","note":"sidebar link"}
+{"path":"pkg/webadmin/ui/src/router.ts","note":"/logs route"}
+{"path":"pkg/webadmin/ui/src/api/client.ts","note":"logs client"}
+{"path":"configs/config.example.yaml","note":"document log block"}
+{"path":"README.md","note":"logging and admin logs page"}
+{"path":"go.mod","note":"add lumberjack"}

@@ -1,0 +1,33 @@
+{
+  "id": "admin-logging",
+  "name": "admin-logging",
+  "title": "日志落盘与管理端日志查看",
+  "description": "可选 log.file 落盘（lumberjack 大小/数量/天数轮转）+ stdout 保留；内存 ring；管理端 GET /api/admin/logs 与日志页。仅规划，不实现。",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "rsjwy",
+  "assignee": "rsjwy",
+  "createdAt": "2026-07-12",
+  "completedAt": "2026-07-12",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "cmd/natives3bridge/main.go",
+    "pkg/config/config.go",
+    "pkg/webadmin/api.go",
+    "pkg/webadmin/server.go",
+    "pkg/webadmin/ui/src/App.vue",
+    "configs/config.example.yaml"
+  ],
+  "notes": "User: plan file logging + admin UI together; do not implement or task.py start yet. Separate from 07-12-storage-reconcile.",
+  "meta": {}
+}

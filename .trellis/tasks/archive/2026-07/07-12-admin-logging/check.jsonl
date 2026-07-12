@@ -1,0 +1,5 @@
+{"path":".trellis/tasks/07-12-admin-logging/prd.md","note":"acceptance criteria"}
+{"path":".trellis/tasks/07-12-admin-logging/design.md","note":"rotation and API design"}
+{"path":".trellis/spec/backend/webadmin-guidelines.md","note":"auth and admin surface"}
+{"path":"pkg/config/config.go","note":"config defaults and validation"}
+{"path":"cmd/natives3bridge/main.go","note":"setupSlog wiring"}

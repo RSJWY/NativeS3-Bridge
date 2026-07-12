@@ -1,0 +1,5 @@
+{"path":".trellis/tasks/07-12-storage-reconcile/prd.md","note":"acceptance criteria"}
+{"path":".trellis/tasks/07-12-storage-reconcile/design.md","note":"API and apply order"}
+{"path":".trellis/spec/backend/webadmin-guidelines.md","note":"auth and error matrix"}
+{"path":".trellis/spec/backend/auth-quota-guidelines.md","note":"quota cache invalidation"}
+{"path":".trellis/spec/backend/storage-guidelines.md","note":"path safety and filters"}

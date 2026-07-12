@@ -335,3 +335,9 @@ Added startup-safe database migration with SQLite pre-upgrade backups, SQLite in
 ### Next Steps
 
 - None - task complete
+
+## 2026-07-12
+- 创建任务 `07-12-storage-reconcile`（存储对账）：prd/design/implement 已齐，status=planning；用户要求暂不 start、不实现。
+
+## 2026-07-12
+- 创建任务 `07-12-admin-logging`（日志落盘+管理页查看）：prd/design/implement 已齐，status=planning；用户要求暂不实现。与 storage-reconcile 独立。
