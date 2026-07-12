@@ -264,3 +264,69 @@ func TestProductionWarningsDoNotIncludeSecretValues(t *testing.T) {
 		t.Fatalf("warnings leaked secret value: %s", warnings)
 	}
 }
+
+func TestLogConfigDefaultsAndValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+storage:
+  data_root: "` + filepath.ToSlash(t.TempDir()) + `"
+database:
+  driver: sqlite
+  dsn: test.db
+webadmin:
+  session_secret: "` + validTestSessionSecret + `"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Log.File != "" || cfg.Log.MaxSizeMB != 100 || cfg.Log.MaxBackups != 5 || cfg.Log.MaxAgeDays != 0 {
+		t.Fatalf("log defaults = %+v", cfg.Log)
+	}
+
+	cfg.Log.File = filepath.Join(t.TempDir(), "app.log")
+	cfg.Log.MaxSizeMB = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_size_mb") {
+		t.Fatalf("max size validation = %v", err)
+	}
+	cfg.Log.MaxSizeMB = 1
+	cfg.Log.MaxBackups = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_backups") {
+		t.Fatalf("max backups validation = %v", err)
+	}
+
+	explicitPath := filepath.Join(t.TempDir(), "explicit.yaml")
+	explicit := `
+storage:
+  data_root: "` + filepath.ToSlash(t.TempDir()) + `"
+database:
+  driver: sqlite
+  dsn: test.db
+webadmin:
+  session_secret: "` + validTestSessionSecret + `"
+log:
+  file: app.log
+  max_size_mb: 0
+  max_backups: 0
+`
+	if err := os.WriteFile(explicitPath, []byte(explicit), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(explicitPath); err == nil || !strings.Contains(err.Error(), "max_size_mb") {
+		t.Fatalf("explicit zero max size error = %v", err)
+	}
+	explicit = strings.Replace(explicit, "max_size_mb: 0", "max_size_mb: 1", 1)
+	if err := os.WriteFile(explicitPath, []byte(explicit), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	explicitCfg, err := Load(explicitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitCfg.Log.MaxBackups != 0 {
+		t.Fatalf("explicit max_backups = %d, want 0", explicitCfg.Log.MaxBackups)
+	}
+}

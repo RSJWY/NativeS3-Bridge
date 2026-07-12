@@ -96,3 +96,35 @@ slog.Info("s3 request", "request_id", requestID, "method", r.Method, "path", r.U
 
 - Do not generate separate IDs for the log, response header, and XML error body; generate once in `Logging` and let S3 error helpers preserve the header.
 - Do not log signed URL query strings with `r.URL.String()` on S3 requests; prefer `r.URL.Path` to avoid persisting signatures or other query parameters.
+
+## Scenario: Rotating File And Admin Ring Logging
+
+### 1. Scope / Trigger
+- Trigger: changes to `config.LogConfig`, `setupSlog`, `pkg/logging`, or the admin log viewer.
+
+### 2. Signatures
+- `setupSlog(level string, cfg config.LogConfig) (*logging.Ring, error)`.
+- `GET /api/admin/logs?limit=200&level=&q=` under admin session middleware.
+
+### 3. Contracts
+- Stdout is always enabled; non-empty `log.file` adds lumberjack rotation; the in-memory ring always stores the newest 2000 enabled records.
+- `log.max_size_mb` defaults to 100, `max_backups` to 5, `max_age_days` to 0, and `compress` to false. Explicit `max_backups: 0` is preserved.
+- The API returns newest-first entries and never accepts a path from the request. File read failure falls back to the ring with `warning`.
+- Attr keys containing secret, password, authorization, cookie, signature, or token are excluded case-insensitively.
+
+### 4. Validation & Error Matrix
+- Non-empty file with `max_size_mb < 1`, negative backups, or negative age -> config load error.
+- Log directory/file cannot be created -> startup error.
+- Missing admin session -> 401; non-GET -> 405; limit is clamped to 1..1000 with 200 default.
+
+### 5. Good/Base/Bad Cases
+- Good: `/state/logs/natives3bridge.log` writes stdout + rotating file + ring.
+- Base: empty file keeps stdout + ring and remains compatible with old configs.
+- Bad: writing logs below `storage.data_root`, exposing an arbitrary file path query, or returning secret attrs.
+
+### 6. Tests Required
+- Assert old config defaults, explicit zero backups, invalid rotation values, file writes, ring wrap/filter/concurrency, API 401, file tail, and ring fallback.
+
+### 7. Wrong vs Correct
+- Wrong: `slog.NewTextHandler(file, ...)`, which removes stdout and ring.
+- Correct: wrap a stdout/file `io.MultiWriter` handler with `logging.NewRingHandler` and fail startup if configured file initialization fails.

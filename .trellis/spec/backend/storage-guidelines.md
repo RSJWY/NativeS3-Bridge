@@ -230,3 +230,33 @@ if err := store.ValidateTarget(uploadID, bucket, key); err != nil {
 }
 etag, err := store.UploadPart(uploadID, partNumber, r.Body)
 ```
+
+## Scenario: Bucket Reconciliation Scan
+
+### 1. Scope / Trigger
+- Trigger: changes to manual disk reconciliation or object-list exclusion rules.
+
+### 2. Signatures
+- `storage.ReconcileBucket(root, bucket, metadataSuffix) (ReconcileReport, error)`.
+- `ReconcileReport.DeleteOrphanSidecars() (int, error)`.
+
+### 3. Contracts
+- Scan one valid existing bucket; count only regular object files and bytes.
+- Skip `.multipart` directories plus metadata suffix, `.s3meta`, `.db`, `.sqlite`, and `.sqlite3` files exactly as object listing does.
+- A sidecar is orphaned only when its corresponding regular object is absent. Slash-relative samples are capped at 50.
+- Delete only discovered orphan sidecars; never delete objects or create missing sidecars.
+
+### 4. Validation & Error Matrix
+- Invalid bucket -> `ErrInvalidBucketName`; missing directory -> `ErrNoSuchBucket`; filesystem failures propagate to the admin layer for sanitized handling.
+
+### 5. Good/Base/Bad Cases
+- Good: native bytes contribute to size while a missing object's `.s3meta` is reported.
+- Base: empty bucket reports zeros.
+- Bad: counting sidecars/database files, following symlinks as objects, or deleting an object during apply.
+
+### 6. Tests Required
+- Assert object bytes, sidecar exclusion, orphan detection/deletion, missing/invalid bucket, and object preservation.
+
+### 7. Wrong vs Correct
+- Wrong: infer objects from a database table or sidecars.
+- Correct: walk the native bucket directory with `ListObjects` exclusions because disk is the object truth source.

@@ -186,3 +186,32 @@ if !hasCredentials(r) && isAnonymousObjectRead(r, bucket, key) {
 }
 handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
 ```
+
+## Scenario: Reconcile Quota Rewrite
+
+### 1. Scope / Trigger
+- Trigger: admin reconciliation writes `credentials.used_bytes` outside S3 PUT/DELETE accounting.
+
+### 2. Signatures
+- `POST /api/admin/buckets/{name}/reconcile` with `{"apply": boolean}`.
+- `CredentialStore.Invalidate(accessKey string)` after each committed rewrite.
+
+### 3. Contracts
+- Dry-run changes nothing. Apply rescans, deletes orphan sidecars, then sets every non-empty `credentials.bucket = name` row to scanned bytes.
+- Global and other-bucket credentials are unchanged. Multiple keys bound to one bucket each receive its full scanned bytes.
+- Quota limits and request statistics are unchanged; reconciled use may exceed quota.
+
+### 4. Validation & Error Matrix
+- Sidecar deletion failure -> 500 before DB rewrite; DB transaction failure -> 500; commit -> invalidate every updated access key.
+
+### 5. Good/Base/Bad Cases
+- Good: a cached bound credential reads the reconciled value after invalidation.
+- Base: a bucket without bound keys can still scan and remove orphans.
+- Bad: rewriting global credentials from a single-bucket scan or omitting invalidation.
+
+### 6. Tests Required
+- Assert dry-run immutability, apply value, global/other-bucket preservation, invalidation, and unchanged objects.
+
+### 7. Wrong vs Correct
+- Wrong: update every credential that can access the bucket.
+- Correct: update only explicitly bound credentials and invalidate after commit.

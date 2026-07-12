@@ -256,3 +256,34 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 - Do not rely on `configs/config.sqlite.yaml` for admin login smoke unless it has a password configured. Use a temporary local config with `admin_bootstrap_password` for validation.
 - Do not commit built `dist/assets/*`; keep only `.gitkeep` tracked. Build artifacts are regenerated before embedding and are ignored by `.gitignore`.
 - Do not add sensitive or high-cardinality labels to `/metrics`; keep labels limited to bounded operational dimensions such as S3 operation names.
+
+## Scenario: Logs And Storage Reconcile Admin APIs
+
+### 1. Scope / Trigger
+- Trigger: changes to `/api/admin/logs` or `/api/admin/buckets/{name}/reconcile` and their UI clients.
+
+### 2. Signatures
+- `GET /api/admin/logs?limit=&level=&q=`.
+- `POST /api/admin/buckets/{name}/reconcile`, body `{"apply": false|true}`.
+
+### 3. Contracts
+- Both routes exist only behind admin session middleware, never public ops or S3 routers.
+- Logs return `source`, `file_enabled`, `limit`, `entries`, and optional `warning`.
+- Reconcile returns disk counts, at most 50 orphan samples, bound credential identifiers/diffs, and actual apply counts; never `secret_key`.
+- UI performs dry-run first and confirms apply; apply always rescans server-side.
+
+### 4. Validation & Error Matrix
+- Missing session -> 401; wrong method -> 405; invalid body/name -> 400; missing bucket -> 404; internal scan/delete/DB error -> sanitized 500.
+
+### 5. Good/Base/Bad Cases
+- Good: file-read failure visibly falls back to ring; reconcile confirmation states sidecar and used-byte effects.
+- Base: empty logs and no-difference reports render useful empty states.
+- Bad: client log paths, applying stale browser totals, returning secrets, or mounting routes publicly.
+
+### 6. Tests Required
+- Backend: auth, methods, filters, fallback, dry-run immutability, apply side effects, invalidation, and sanitized errors.
+- Frontend: type-check/Vite build and browser checks for `/logs`, report, and confirmation.
+
+### 7. Wrong vs Correct
+- Wrong: trust dry-run bytes sent back by the browser.
+- Correct: accept only `apply`, rescan configured storage, and derive mutations server-side.

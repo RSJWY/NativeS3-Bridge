@@ -69,10 +69,49 @@
               <button class="danger-button" type="button" :disabled="bucketMutating" @click="remove(bucket)">
                 {{ deleting === bucket.name ? '删除中…' : '删除' }}
               </button>
+              <button class="secondary-button" type="button" :disabled="bucketMutating" @click="reconcile(bucket)">
+                {{ reconciling === bucket.name ? '扫描中…' : '存储对账' }}
+              </button>
             </td>
           </tr>
         </tbody>
         </table>
+      </div>
+    </section>
+
+    <section v-if="reconcileReport" class="panel reconcile-panel">
+      <div class="reconcile-heading">
+        <div>
+          <h2>{{ reconcileReport.bucket }} 对账报告</h2>
+          <p class="muted">扫描 {{ reconcileReport.object_count }} 个对象，共 {{ formatBytes(reconcileReport.scanned_bytes) }}。</p>
+        </div>
+        <button class="text-button" type="button" @click="reconcileReport = null">关闭</button>
+      </div>
+      <div class="reconcile-summary">
+        <span>孤儿 sidecar：{{ reconcileReport.orphan_sidecar_count }}</span>
+        <span>绑定密钥：{{ reconcileReport.bound_credentials.length }}</span>
+      </div>
+      <div v-if="reconcileReport.bound_credentials.length" class="table-scroll">
+        <table class="data-table reconcile-table">
+          <thead><tr><th>密钥</th><th>当前用量</th><th>差异</th></tr></thead>
+          <tbody>
+            <tr v-for="credential in reconcileReport.bound_credentials" :key="credential.id">
+              <td>{{ credential.name || '未命名' }} <code>{{ credential.access_key }}</code></td>
+              <td>{{ formatBytes(credential.used_bytes) }}</td>
+              <td>{{ formatSignedBytes(credential.diff_bytes) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p v-if="reconcileReport.orphan_sidecar_samples.length" class="muted">
+        孤儿示例：<code>{{ reconcileReport.orphan_sidecar_samples.join('、') }}</code>
+      </p>
+      <div class="reconcile-actions">
+        <p>执行校正会删除孤儿 sidecar，并将绑定密钥的用量设为本次扫描值；不会恢复已从磁盘删除的对象。</p>
+        <button v-if="needsApply" class="danger-button" type="button" :disabled="applying" @click="applyReconcile">
+          {{ applying ? '校正中…' : '执行校正' }}
+        </button>
+        <span v-else class="success-text">无需校正</span>
       </div>
     </section>
   </section>
@@ -80,17 +119,22 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { adminApi, type Bucket, type BucketACL } from '../api/client'
+import { adminApi, type Bucket, type BucketACL, type ReconcileReport } from '../api/client'
+import { formatBytes } from '../utils/format'
 
 const buckets = ref<Bucket[]>([])
 const loading = ref(false)
 const creating = ref(false)
 const deleting = ref('')
 const updatingACL = ref('')
+const reconciling = ref('')
+const applying = ref(false)
+const reconcileReport = ref<ReconcileReport | null>(null)
 const error = ref('')
 const formError = ref('')
 const newBucketName = ref('')
-const bucketMutating = computed(() => creating.value || deleting.value !== '' || updatingACL.value !== '')
+const bucketMutating = computed(() => creating.value || deleting.value !== '' || updatingACL.value !== '' || reconciling.value !== '' || applying.value)
+const needsApply = computed(() => reconcileReport.value !== null && (reconcileReport.value.orphan_sidecar_count > 0 || reconcileReport.value.bound_credentials.some((credential) => credential.diff_bytes !== 0)))
 
 onMounted(load)
 
@@ -165,6 +209,40 @@ async function remove(bucket: Bucket) {
   } finally {
     deleting.value = ''
   }
+}
+
+async function reconcile(bucket: Bucket) {
+  if (bucketMutating.value) return
+  reconciling.value = bucket.name
+  error.value = ''
+  try {
+    reconcileReport.value = await adminApi.reconcileBucket(bucket.name, false)
+  } catch (err) {
+    error.value = toBucketError(err, '存储对账失败')
+  } finally {
+    reconciling.value = ''
+  }
+}
+
+async function applyReconcile() {
+  const report = reconcileReport.value
+  if (!report || applying.value) return
+  const message = `确认校正 ${report.bucket}？\n将删除 ${report.orphan_sidecar_count} 个孤儿 sidecar，并将 ${report.bound_credentials.length} 把绑定密钥的 used_bytes 设为 ${formatBytes(report.scanned_bytes)}。\n此操作无法恢复已从磁盘删除的文件。`
+  if (!window.confirm(message)) return
+  applying.value = true
+  error.value = ''
+  try {
+    reconcileReport.value = await adminApi.reconcileBucket(report.bucket, true)
+  } catch (err) {
+    error.value = toBucketError(err, '执行存储校正失败')
+  } finally {
+    applying.value = false
+  }
+}
+
+function formatSignedBytes(value: number) {
+  if (value === 0) return '一致'
+  return `${value > 0 ? '+' : '-'}${formatBytes(Math.abs(value))}`
 }
 
 function aclText(acl: BucketACL) {

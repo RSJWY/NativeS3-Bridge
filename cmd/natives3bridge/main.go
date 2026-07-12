@@ -4,9 +4,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -14,10 +16,12 @@ import (
 	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/db"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/hooks"
+	loggingpkg "github.com/RSJWY/NativeS3-Bridge/pkg/logging"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/quota"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/server"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/webadmin"
+	"gopkg.in/natefinch/lumberjack.v2"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -37,7 +41,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupSlog(cfg.LogLevel)
+	logRing, err := setupSlog(cfg.LogLevel, cfg.Log)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "configure logging:", err)
+		os.Exit(1)
+	}
 	db.SetLogLevel(cfg.LogLevel)
 	logProductionWarnings(cfg)
 	if *checkConfig {
@@ -101,7 +109,13 @@ func main() {
 		return count > 0, err
 	}
 	s3Server := server.NewWithQuotaManager(cfg.Server, cfg.RateLimit, backend, multipartStore, bucketStore, authenticator, quotaManager, boundCredentialChecker, hookManager)
-	adminServer, err := webadmin.NewServer(cfg.Server, cfg.WebAdmin, gdb, credentialStore, bucketStore, cfg.RateLimit.TrustForwarded)
+	adminServer, err := webadmin.NewServer(cfg.Server, cfg.WebAdmin, gdb, credentialStore, bucketStore, webadmin.ServerOptions{
+		TrustForwarded: cfg.RateLimit.TrustForwarded,
+		LogRing:        logRing,
+		LogFile:        cfg.Log.File,
+		DataRoot:       cfg.Storage.DataRoot,
+		MetadataSuffix: cfg.Storage.MetadataSuffix,
+	})
 	if err != nil {
 		slog.Error("init admin server", "error", err)
 		os.Exit(1)
@@ -146,7 +160,7 @@ func seedCredential(gdb *gorm.DB, accessKey, secretKey string, quotaBytes int64,
 	}).Create(&cred).Error
 }
 
-func setupSlog(level string) {
+func setupSlog(level string, logCfg config.LogConfig) (*loggingpkg.Ring, error) {
 	var slogLevel slog.Level
 	switch strings.ToLower(level) {
 	case "debug":
@@ -159,8 +173,29 @@ func setupSlog(level string) {
 		slogLevel = slog.LevelInfo
 	}
 
-	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slogLevel})
-	slog.SetDefault(slog.New(handler))
+	writers := []io.Writer{os.Stdout}
+	if logCfg.File != "" {
+		directory := filepath.Dir(logCfg.File)
+		if err := os.MkdirAll(directory, 0o750); err != nil {
+			return nil, fmt.Errorf("create log directory %q: %w", directory, err)
+		}
+		fileWriter := &lumberjack.Logger{
+			Filename:   logCfg.File,
+			MaxSize:    logCfg.MaxSizeMB,
+			MaxBackups: logCfg.MaxBackups,
+			MaxAge:     logCfg.MaxAgeDays,
+			Compress:   logCfg.Compress,
+			LocalTime:  true,
+		}
+		if _, err := fileWriter.Write(nil); err != nil {
+			return nil, fmt.Errorf("open log file %q: %w", logCfg.File, err)
+		}
+		writers = append(writers, fileWriter)
+	}
+	ring := loggingpkg.NewRing(loggingpkg.DefaultRingCapacity)
+	base := slog.NewTextHandler(io.MultiWriter(writers...), &slog.HandlerOptions{Level: slogLevel})
+	slog.SetDefault(slog.New(loggingpkg.NewRingHandler(base, ring)))
+	return ring, nil
 }
 
 func logProductionWarnings(cfg *config.Config) {

@@ -3,6 +3,7 @@ import Login from './views/Login.vue'
 import Dashboard from './views/Dashboard.vue'
 import Credentials from './views/Credentials.vue'
 import Buckets from './views/Buckets.vue'
+import Logs from './views/Logs.vue'
 import { authState } from './state/auth'
 
 const router = createRouter({
@@ -12,7 +13,8 @@ const router = createRouter({
     { path: '/', redirect: '/dashboard' },
     { path: '/dashboard', name: 'dashboard', component: Dashboard },
     { path: '/credentials', name: 'credentials', component: Credentials },
-    { path: '/buckets', name: 'buckets', component: Buckets, meta: { requiresAuth: true } }
+    { path: '/buckets', name: 'buckets', component: Buckets, meta: { requiresAuth: true } },
+    { path: '/logs', name: 'logs', component: Logs, meta: { requiresAuth: true } }
   ]
 })
 

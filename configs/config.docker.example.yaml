@@ -62,3 +62,10 @@ rate_limit:
 
 region: "us-east-1"
 log_level: "info"
+log:
+  file: ""
+  # Docker deployments can use /state/logs/natives3bridge.log.
+  max_size_mb: 100
+  max_backups: 5
+  max_age_days: 14
+  compress: false

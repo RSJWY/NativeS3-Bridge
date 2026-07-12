@@ -21,6 +21,35 @@ type Config struct {
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
 	Region    string          `yaml:"region"`
 	LogLevel  string          `yaml:"log_level"`
+	Log       LogConfig       `yaml:"log"`
+}
+
+type LogConfig struct {
+	File          string `yaml:"file"`
+	MaxSizeMB     int    `yaml:"max_size_mb"`
+	MaxBackups    int    `yaml:"max_backups"`
+	MaxAgeDays    int    `yaml:"max_age_days"`
+	Compress      bool   `yaml:"compress"`
+	maxSizeSet    bool
+	maxBackupsSet bool
+}
+
+func (c *LogConfig) UnmarshalYAML(node *yaml.Node) error {
+	type rawLogConfig LogConfig
+	var raw rawLogConfig
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	*c = LogConfig(raw)
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		switch node.Content[index].Value {
+		case "max_size_mb":
+			c.maxSizeSet = true
+		case "max_backups":
+			c.maxBackupsSet = true
+		}
+	}
+	return nil
 }
 
 type ServerConfig struct {
@@ -164,6 +193,12 @@ func (c *Config) applyDefaults() {
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
+	if !c.Log.maxSizeSet && c.Log.MaxSizeMB == 0 {
+		c.Log.MaxSizeMB = 100
+	}
+	if !c.Log.maxBackupsSet && c.Log.MaxBackups == 0 {
+		c.Log.MaxBackups = 5
+	}
 	if c.WebAdmin.SessionTTLMinutes == 0 {
 		c.WebAdmin.SessionTTLMinutes = 720
 	}
@@ -206,6 +241,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.MultipartMaxPendingBytes < 0 {
 		return fmt.Errorf("storage.multipart_max_pending_bytes must be positive")
+	}
+	if c.Log.File != "" && c.Log.MaxSizeMB < 1 {
+		return fmt.Errorf("log.max_size_mb must be at least 1 when log.file is set")
+	}
+	if c.Log.MaxBackups < 0 {
+		return fmt.Errorf("log.max_backups must not be negative")
+	}
+	if c.Log.MaxAgeDays < 0 {
+		return fmt.Errorf("log.max_age_days must not be negative")
 	}
 	if err := validateSessionSecret(c.WebAdmin.SessionSecret); err != nil {
 		return err

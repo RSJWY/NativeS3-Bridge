@@ -1062,3 +1062,25 @@ git status --ignored --short
 ## License
 
 见仓库 LICENSE。若仓库尚未提供 LICENSE，请在正式分发前补充。
+
+### 日志查看与轮转落盘
+
+管理后台的「日志」页面可查看最近的运行日志和 S3 请求日志。默认仅保存在进程内存 ring 中（最多 2000 条，重启清空），stdout 始终保留。配置 `log.file` 后会同时写入轮转文件，并优先从当前日志文件读取管理页数据：
+
+```yaml
+log_level: "info"
+log:
+  file: "/state/logs/natives3bridge.log"
+  max_size_mb: 100
+  max_backups: 5
+  max_age_days: 14
+  compress: false
+```
+
+日志文件建议放在 Docker `state` 卷，禁止放入对象 `storage.data_root`。配置了不可写路径时服务会启动失败，避免静默丢日志。`max_backups: 0` 表示不保留历史文件；`max_age_days > 0` 时 lumberjack 会在轮转维护中清理超过该天数的历史文件。
+
+### 存储对账
+
+桶管理中的「存储对账」按单桶扫描原生对象文件，报告磁盘字节数、孤儿 `.s3meta` 和绑定密钥的 `used_bytes` 差异。首次操作始终为 dry-run；确认执行后，服务端会重新扫描、删除孤儿 sidecar，并把仅绑定该桶的每把密钥用量回写为本次扫描值。全桶密钥（`bucket` 为空）和其他桶密钥不会被修改，对账也不会删除或恢复对象文件。
+
+大桶扫描为同步操作，建议在低峰期执行。磁盘是对象存在性的唯一真相源，对账不会创建 objects 数据库表。

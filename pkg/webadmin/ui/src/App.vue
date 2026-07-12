@@ -7,6 +7,7 @@
         <RouterLink to="/dashboard">仪表盘</RouterLink>
         <RouterLink to="/credentials">密钥管理</RouterLink>
         <RouterLink to="/buckets">桶管理</RouterLink>
+        <RouterLink to="/logs">日志</RouterLink>
       </nav>
       <button class="text-button sidebar-logout" type="button" @click="logout">退出登录</button>
     </aside>

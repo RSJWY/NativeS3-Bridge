@@ -46,6 +46,42 @@ export interface RequestTrendItem {
   bytes_out: number
 }
 
+export interface LogEntry {
+  time: string
+  level: string
+  msg: string
+  attrs?: Record<string, unknown>
+}
+
+export interface LogsResponse {
+  source: 'ring' | 'file'
+  file_enabled: boolean
+  limit: number
+  entries: LogEntry[]
+  warning?: string
+}
+
+export interface ReconcileCredential {
+  id: number
+  access_key: string
+  name: string
+  used_bytes: number
+  diff_bytes: number
+  updated: boolean
+}
+
+export interface ReconcileReport {
+  bucket: string
+  apply: boolean
+  object_count: number
+  scanned_bytes: number
+  orphan_sidecar_count: number
+  orphan_sidecar_samples: string[]
+  bound_credentials: ReconcileCredential[]
+  orphans_deleted: number
+  credentials_updated: number
+}
+
 export interface AuthSettings {
   totp_required: boolean
   captcha_enabled: boolean
@@ -155,6 +191,12 @@ export const adminApi = {
       body: JSON.stringify({ acl })
     })
   },
+  reconcileBucket(name: string, apply: boolean) {
+    return apiFetch<ReconcileReport>(`/api/admin/buckets/${encodeURIComponent(name)}/reconcile`, {
+      method: 'POST',
+      body: JSON.stringify({ apply })
+    })
+  },
   dashboardSummary() {
     return apiFetch<DashboardSummary>('/api/admin/dashboard/summary')
   },
@@ -163,5 +205,11 @@ export const adminApi = {
   },
   requestTrend(days = 30) {
     return apiFetch<RequestTrendItem[]>(`/api/admin/dashboard/request-trend?days=${days}`)
+  },
+  logs(params: { limit: number; level?: string; q?: string }) {
+    const query = new URLSearchParams({ limit: String(params.limit) })
+    if (params.level) query.set('level', params.level)
+    if (params.q) query.set('q', params.q)
+    return apiFetch<LogsResponse>(`/api/admin/logs?${query.toString()}`)
   }
 }

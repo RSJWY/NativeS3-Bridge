@@ -12,6 +12,7 @@ import (
 
 	s3auth "github.com/RSJWY/NativeS3-Bridge/pkg/auth"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/logging"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/webadmin/ui"
 	"gorm.io/gorm"
@@ -22,13 +23,28 @@ type Server struct {
 	tls        config.TLSConfig
 }
 
-func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb *gorm.DB, credentialStore *s3auth.CredentialStore, bucketStore *storage.BucketStore, trustForwarded ...bool) (*Server, error) {
+type ServerOptions struct {
+	TrustForwarded bool
+	LogRing        *logging.Ring
+	LogFile        string
+	DataRoot       string
+	MetadataSuffix string
+}
+
+func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb *gorm.DB, credentialStore *s3auth.CredentialStore, bucketStore *storage.BucketStore, optionValues ...any) (*Server, error) {
+	var options ServerOptions
+	for _, value := range optionValues {
+		switch option := value.(type) {
+		case bool:
+			options.TrustForwarded = option
+		case ServerOptions:
+			options = option
+		}
+	}
 	effectiveTLS := serverCfg.EffectiveAdminTLS()
 	authenticator := NewAuth(webCfg, effectiveTLS.Enabled)
-	if len(trustForwarded) > 0 {
-		authenticator.trustForwarded = trustForwarded[0]
-	}
-	api := NewAPI(gdb, credentialStore, bucketStore)
+	authenticator.trustForwarded = options.TrustForwarded
+	api := NewAPI(gdb, credentialStore, bucketStore, APIOptions{LogRing: options.LogRing, LogFile: options.LogFile, DataRoot: options.DataRoot, MetadataSuffix: options.MetadataSuffix})
 	staticFS, err := fs.Sub(ui.DistFS, "dist")
 	if err != nil {
 		return nil, err
@@ -46,6 +62,7 @@ func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb 
 	mux.Handle("/api/admin/credentials/", authenticator.Middleware(http.HandlerFunc(api.CredentialByID)))
 	mux.Handle("/api/admin/buckets", authenticator.Middleware(http.HandlerFunc(api.Buckets)))
 	mux.Handle("/api/admin/buckets/", authenticator.Middleware(http.HandlerFunc(api.BucketByName)))
+	mux.Handle("/api/admin/logs", authenticator.Middleware(http.HandlerFunc(api.Logs)))
 	mux.Handle("/api/admin/dashboard/summary", authenticator.Middleware(http.HandlerFunc(api.DashboardSummary)))
 	mux.Handle("/api/admin/dashboard/usage-ranking", authenticator.Middleware(http.HandlerFunc(api.UsageRanking)))
 	mux.Handle("/api/admin/dashboard/request-trend", authenticator.Middleware(http.HandlerFunc(api.RequestTrend)))

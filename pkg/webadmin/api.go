@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	dbpkg "github.com/RSJWY/NativeS3-Bridge/pkg/db"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/logging"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 	"gorm.io/gorm"
 )
@@ -31,9 +32,20 @@ type credentialInvalidator interface {
 }
 
 type API struct {
-	db          *gorm.DB
-	invalidator credentialInvalidator
-	buckets     *storage.BucketStore
+	db             *gorm.DB
+	invalidator    credentialInvalidator
+	buckets        *storage.BucketStore
+	logRing        *logging.Ring
+	logFile        string
+	dataRoot       string
+	metadataSuffix string
+}
+
+type APIOptions struct {
+	LogRing        *logging.Ring
+	LogFile        string
+	DataRoot       string
+	MetadataSuffix string
 }
 
 type bucketResponse struct {
@@ -101,8 +113,12 @@ type requestTrendItem struct {
 	BytesOut    int64  `json:"bytes_out"`
 }
 
-func NewAPI(gdb *gorm.DB, invalidator credentialInvalidator, buckets *storage.BucketStore) *API {
-	return &API{db: gdb, invalidator: invalidator, buckets: buckets}
+func NewAPI(gdb *gorm.DB, invalidator credentialInvalidator, buckets *storage.BucketStore, optionValues ...APIOptions) *API {
+	var options APIOptions
+	if len(optionValues) > 0 {
+		options = optionValues[0]
+	}
+	return &API{db: gdb, invalidator: invalidator, buckets: buckets, logRing: options.LogRing, logFile: options.LogFile, dataRoot: options.DataRoot, metadataSuffix: options.MetadataSuffix}
 }
 
 func (a *API) Credentials(w http.ResponseWriter, r *http.Request) {
@@ -162,6 +178,19 @@ func (a *API) BucketByName(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.updateBucketACL(w, r, name)
+		return
+	}
+	if strings.HasSuffix(tail, "/reconcile") {
+		name := strings.TrimSuffix(tail, "/reconcile")
+		if name == "" || strings.Contains(name, "/") {
+			writeJSONError(w, http.StatusNotFound, "bucket not found")
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		a.reconcileBucket(w, r, name)
 		return
 	}
 
