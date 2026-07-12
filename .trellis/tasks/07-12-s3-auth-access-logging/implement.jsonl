@@ -1,4 +1,0 @@
-{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "S3/request logging field conventions and redaction rules"}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "S3 error codes and status mapping expectations"}
-{"file": ".trellis/spec/backend/auth-quota-guidelines.md", "reason": "Auth, bound-bucket, and anonymous access rules that failures must log"}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Test and safety expectations for server changes"}
