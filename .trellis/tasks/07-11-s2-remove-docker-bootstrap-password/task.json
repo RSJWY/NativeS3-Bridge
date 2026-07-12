@@ -3,7 +3,7 @@
   "name": "s2-remove-docker-bootstrap-password",
   "title": "S2: Remove hardcoded bootstrap password from Docker example",
   "description": "Docker example must not ship a known admin password. Operator sets real hash before login works.",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

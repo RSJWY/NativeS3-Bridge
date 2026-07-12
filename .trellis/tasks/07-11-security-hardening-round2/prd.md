@@ -82,11 +82,11 @@ Three vectors found in `pkg/quota` and middleware:
 
 ## Acceptance criteria
 
-- [ ] S1: `Validate()` rejects example/short session secrets; all example configs and tests updated.
-- [ ] S2: Docker example does not ship a known bootstrap password.
-- [ ] S3: Admin port does not expose plaintext login/secret-key on public interfaces by default.
-- [ ] S4: `trust_forwarded` uses the correct (rightmost) untrusted hop; tests updated.
-- [ ] S5: Admin sessions can be revoked (logout invalidates token, or password change invalidates all sessions).
-- [ ] S6: Quota race closed, client-size underreport blocked, multipart disk usage bounded.
-- [ ] All existing tests pass; new tests cover each fix.
-- [ ] `go build ./...` and `go test ./...` green.
+- [x] S1: `Validate()` rejects example/short session secrets; all example configs and tests updated.
+- [x] S2: Docker example does not ship a known bootstrap password.
+- [x] S3: Admin port does not expose plaintext login/secret-key on public interfaces by default.
+- [x] S4: `trust_forwarded` uses the correct (rightmost) untrusted hop; tests updated.
+- [x] S5: Admin sessions can be revoked (logout invalidates token, or password change invalidates all sessions).
+- [x] S6: Quota race closed, client-size underreport blocked, multipart disk usage bounded.
+- [x] All existing tests pass; new tests cover each fix.
+- [x] `go build ./...` and `go test ./...` green.

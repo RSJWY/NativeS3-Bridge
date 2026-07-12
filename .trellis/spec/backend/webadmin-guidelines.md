@@ -39,7 +39,8 @@
 - Bucket admin APIs are session-protected under `/api/admin/buckets*` and must use the shared `storage.BucketStore`, not S3 ACL routes:
   - `GET /api/admin/buckets` returns `[{name, acl, created_at}]` from `BucketStore.List`.
   - `POST /api/admin/buckets` accepts `{"name":"<bucket>"}`, calls `BucketStore.Create`, and returns the created bucket with default ACL `private`.
-  - `DELETE /api/admin/buckets/{name}` calls `BucketStore.Delete` and only deletes empty buckets.
+  - `DELETE /api/admin/buckets/{name}` only deletes buckets that contain no objects and have no credentials bound to their name.
+- Non-empty credential `bucket` values on create/update must reference an existing bucket; historical dangling bindings remain readable but cannot be newly written.
   - `PUT /api/admin/buckets/{name}/acl` accepts `{"acl":"private"|"public-read"}`, calls `BucketStore.SetACL`, and returns the updated bucket.
 - If `server.tls.enabled=false`, startup must log `admin UI served over plain HTTP; enable TLS for production`, and README must warn that the admin UI is plain HTTP.
 - SPA fallback must serve `index.html` for non-API deep links and return JSON errors for unknown `/api/*` paths.
@@ -58,6 +59,8 @@
 - Invalid bucket ACL outside `private` / `public-read` -> HTTP `400` JSON error.
 - Missing bucket on delete or ACL update -> HTTP `404` JSON `{"error":"bucket not found"}`.
 - Non-empty bucket delete -> HTTP `409` JSON `{"error":"bucket not empty"}`.
+- Bucket with bound credentials delete -> HTTP `409` JSON `{"error":"bucket has bound credentials"}`.
+- Credential references a missing bucket -> HTTP `400` JSON `{"error":"bucket does not exist"}`.
 - DB failures -> HTTP `500` JSON error without leaking SQL/internal details.
 
 ### 5. Good/Base/Bad Cases

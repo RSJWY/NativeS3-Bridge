@@ -27,6 +27,7 @@
 - A `401` from the API marks local auth state logged out and redirects to `/login`.
 - Login redirects must be normalized to safe internal paths only; never redirect to protocol-relative or external URLs.
 - Credential list/update/delete UI must not display or persist `secret_key`; only the create modal displays `secret_key` once from the create response.
+- Credential bucket scope uses the admin bucket list as a select (`全部桶` plus existing names); dangling historical bindings are visibly marked and must be changed before saving.
 - Bucket management UI must call `/api/admin/buckets*` through the shared API client with `credentials: 'include'`; it must not implement or call S3 `PutBucketAcl`.
 - Bucket ACL values in the UI are exactly `private` and `public-read`; display copy is Chinese (`私有`, `公开下载`) and `public-read` rows must warn that objects can be anonymously downloaded.
 - Bucket delete actions require `window.confirm` or an equivalent explicit second confirmation; non-empty bucket `409` must show a visible friendly error and must not be treated as success.

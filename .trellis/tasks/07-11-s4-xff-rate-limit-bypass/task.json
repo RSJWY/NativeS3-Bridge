@@ -3,7 +3,7 @@
   "name": "s4-xff-rate-limit-bypass",
   "title": "S4: Fix XFF-spoofable rate limiting and login lockout",
   "description": "Use rightmost untrusted hop instead of leftmost XFF when trust_forwarded is on. Update tests.",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

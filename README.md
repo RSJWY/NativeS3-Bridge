@@ -201,11 +201,18 @@ Docker 部署建议从 Docker 示例开始：
 cp -n configs/config.docker.example.yaml configs/config.yaml
 ```
 
-首次启动前至少设置一个临时管理密码：
+先生成管理密码的 bcrypt hash：
+
+```bash
+htpasswd -bnBC 12 "" '你的高强度管理密码' | tr -d ':\n'
+```
+
+将 hash 写入配置，并生成随机 session secret。`password_hash` 为空时管理端登录保持禁用：
 
 ```yaml
 webadmin:
-  admin_bootstrap_password: "replace-with-a-strong-password"
+  password_hash: "$2y$12$..."
+  admin_bootstrap_password: ""
   session_secret: "replace-with-a-random-32-byte-secret"
 ```
 
@@ -225,7 +232,9 @@ webadmin:
   -seed-bucket ""
 ```
 
-`-seed-bucket` 留空表示该密钥可访问所有桶；填入桶名则密钥只能操作该桶。
+`-seed-bucket` 留空表示该密钥可访问所有桶；填入桶名则密钥只能操作该桶，且该桶必须已存在于 `buckets` 表中。
+
+删除桶时，桶内存在对象或仍有密钥绑定都会被拒绝。请先清空对象，并在密钥管理中解绑或改绑相关密钥。
 
 启动后默认端口：
 
@@ -264,7 +273,7 @@ webadmin:
 ```yaml
 server:
   s3_addr: "0.0.0.0:9000"
-  admin_addr: "0.0.0.0:9001"
+  admin_addr: "127.0.0.1:9001"
   tls:
     enabled: false
     cert_file: ""
@@ -276,7 +285,7 @@ server:
 ```
 
 - `s3_addr`：S3 listener 地址。
-- `admin_addr`：管理后台 listener 地址。
+- `admin_addr`：管理后台 listener 地址，默认 `127.0.0.1:9001`；监听公网地址时必须启用 `admin_tls`。
 - `tls`：S3 listener TLS 配置，也作为 `admin_tls` 省略时的兼容默认值。
 - `admin_tls`：管理后台 TLS，可独立于 S3 listener 配置。
 
@@ -290,6 +299,7 @@ storage:
   multipart_tmp: "./data/.multipart"
   metadata_suffix: ".s3meta"
   multipart_gc_interval: "1h"
+  multipart_max_pending_bytes: 10737418240
   multipart_ttl: "24h"
 ```
 
@@ -297,6 +307,7 @@ storage:
 - `multipart_tmp`：multipart 上传临时目录。生产建议放在 `data_root` 之外，例如 `/state/multipart`。
 - `metadata_suffix`：sidecar 后缀。
 - `multipart_gc_interval`：残留 multipart 目录清理周期。
+- `multipart_max_pending_bytes`：所有待完成 multipart 分片的全局字节上限，默认 10 GiB。
 - `multipart_ttl`：未完成 multipart 上传保留时间。
 
 ### database
@@ -340,7 +351,7 @@ database:
 webadmin:
   password_hash: ""
   admin_bootstrap_password: ""
-  session_secret: "change-me-32bytes-random"
+  session_secret: "replace-with-random-secret-at-least-32-bytes"
   session_ttl_minutes: 720
   login_max_failures: 5
   login_lockout_window: "15m"

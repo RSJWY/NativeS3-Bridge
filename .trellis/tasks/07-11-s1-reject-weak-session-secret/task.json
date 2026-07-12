@@ -3,7 +3,7 @@
   "name": "s1-reject-weak-session-secret",
   "title": "S1: Reject weak session_secret at config load",
   "description": "Validate() rejects example/short session_secret like metrics_token does. Update all example configs and tests.",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

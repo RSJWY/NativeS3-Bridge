@@ -3,7 +3,7 @@
   "name": "s6-quota-bypass",
   "title": "S6: Close quota bypass vectors",
   "description": "Fix TOCTOU race, client-declared size underreport, and multipart temp-data disk exhaustion.",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
