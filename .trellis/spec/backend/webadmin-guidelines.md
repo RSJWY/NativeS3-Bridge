@@ -20,6 +20,8 @@
 - `func (a *Auth) Middleware(next http.Handler) http.Handler`
 - `func NewAPI(gdb *gorm.DB, invalidator interface{ Invalidate(string) }, buckets *storage.BucketStore) *API`
 - `func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb *gorm.DB, credentialStore *auth.CredentialStore, bucketStore *storage.BucketStore) (*Server, error)`
+- `func (c *Config) Validate() error`
+- `func (c *Config) ProductionWarnings() []string`
 - Embedded static bundle: `pkg/webadmin/ui.DistFS` from `//go:embed all:dist`.
 
 ### 3. Contracts
@@ -42,7 +44,8 @@
   - `DELETE /api/admin/buckets/{name}` only deletes buckets that contain no objects and have no credentials bound to their name.
 - Non-empty credential `bucket` values on create/update must reference an existing bucket; historical dangling bindings remain readable but cannot be newly written.
   - `PUT /api/admin/buckets/{name}/acl` accepts `{"acl":"private"|"public-read"}`, calls `BucketStore.SetACL`, and returns the updated bucket.
-- If `server.tls.enabled=false`, startup must log `admin UI served over plain HTTP; enable TLS for production`, and README must warn that the admin UI is plain HTTP.
+- If effective admin TLS is disabled, startup must log `admin UI served over plain HTTP; enable TLS for production`, and README must warn that the admin UI is plain HTTP.
+- A public `server.admin_addr` without effective admin TLS is allowed for container port publishing and trusted reverse-proxy deployments, but `ProductionWarnings` must emit `server.admin_addr listens publicly without admin TLS`; deployment controls must restrict or encrypt the host-side entry point.
 - SPA fallback must serve `index.html` for non-API deep links and return JSON errors for unknown `/api/*` paths.
 
 ### 4. Validation & Error Matrix
@@ -61,6 +64,8 @@
 - Non-empty bucket delete -> HTTP `409` JSON `{"error":"bucket not empty"}`.
 - Bucket with bound credentials delete -> HTTP `409` JSON `{"error":"bucket has bound credentials"}`.
 - Credential references a missing bucket -> HTTP `400` JSON `{"error":"bucket does not exist"}`.
+- Public `server.admin_addr` with admin TLS disabled -> configuration remains valid and emits a production warning rather than preventing startup.
+- Enabled effective admin TLS without both certificate and key paths -> configuration error naming `server.admin_tls`.
 - DB failures -> HTTP `500` JSON error without leaking SQL/internal details.
 
 ### 5. Good/Base/Bad Cases
@@ -69,9 +74,11 @@
 - Good: list credentials after create and verify the response includes `access_key` but not `secret_key`.
 - Base: moving the compiled binary to a directory without source still serves the embedded Vue app and admin JSON APIs.
 - Base: creating a bucket through `/api/admin/buckets` creates the native bucket directory and DB row with ACL `private`; switching to `public-read` is immediately visible in a subsequent admin list response.
+- Base: Docker listens on `0.0.0.0:9001` inside the container while Compose publishes `127.0.0.1:9001:9001` on the host; config validation passes and reports the plaintext-listener warning.
 - Bad: exposing admin routes on the S3 listener, serving `/api/admin/credentials` without a session, or returning `secret_key` from list/update/delete.
 - Bad: updating credential status/quota/name without invalidating `CredentialStore`, because S3 auth can keep stale status/quota.
 - Bad: implementing bucket ACL changes as S3 `PutBucketAcl` or any unauthenticated admin endpoint; bucket ACL management belongs only to the session-protected webadmin API.
+- Bad: rejecting every plaintext `0.0.0.0` admin listener at config load, because container networking requires a non-loopback listener even when the host publish or trusted proxy is restricted.
 
 ### 6. Tests Required
 
@@ -83,6 +90,7 @@
 - Real `aws-cli` smoke: UI-created credential can upload/download; after admin disable, the same credential is rejected.
 - Browser smoke: login page renders; successful login reaches dashboard; three ECharts canvases render; credentials page renders.
 - Single-binary smoke: copy `natives3bridge` to a no-source temp directory and verify the embedded admin UI is still served.
+- Config regression: `0.0.0.0:9001` without admin TLS passes `Validate` and emits the public-listener warning; loopback plaintext and public TLS do not emit that warning.
 
 ### 7. Wrong vs Correct
 
@@ -96,6 +104,18 @@ Correct:
 
 ```go
 mux.Handle("/api/admin/credentials", auth.Middleware(http.HandlerFunc(api.Credentials)))
+```
+
+Wrong:
+
+```go
+return fmt.Errorf("server.admin_addr must not listen publicly without server.admin_tls enabled")
+```
+
+Correct:
+
+```go
+warnings = append(warnings, "server.admin_addr listens publicly without admin TLS; use a trusted HTTPS reverse proxy or enable server.admin_tls")
 ```
 
 Wrong:

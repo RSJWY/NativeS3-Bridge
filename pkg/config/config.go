@@ -217,9 +217,6 @@ func (c *Config) Validate() error {
 	if adminTLS.Enabled && (adminTLS.CertFile == "" || adminTLS.KeyFile == "") {
 		return fmt.Errorf("server.admin_tls cert_file and key_file are required when enabled")
 	}
-	if c.Server.AdminAddr != "" && isPublicListenAddr(c.Server.AdminAddr) && !adminTLS.Enabled {
-		return fmt.Errorf("server.admin_addr must not listen publicly without server.admin_tls enabled")
-	}
 	if c.WebAdmin.TOTP.Enabled {
 		if _, err := decodeTOTPSecret(c.WebAdmin.TOTP.Secret); err != nil {
 			return fmt.Errorf("webadmin.totp.secret must be valid base32: %w", err)

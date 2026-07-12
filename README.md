@@ -285,11 +285,11 @@ server:
 ```
 
 - `s3_addr`：S3 listener 地址。
-- `admin_addr`：管理后台 listener 地址，默认 `127.0.0.1:9001`；监听公网地址时必须启用 `admin_tls`。
+- `admin_addr`：管理后台 listener 地址，默认 `127.0.0.1:9001`。容器内通常使用 `0.0.0.0:9001`，再通过宿主机回环端口映射或可信 HTTPS 反向代理限制入口；明文公共监听会输出生产安全 warning。
 - `tls`：S3 listener TLS 配置，也作为 `admin_tls` 省略时的兼容默认值。
 - `admin_tls`：管理后台 TLS，可独立于 S3 listener 配置。
 
-生产公网建议通过可信反向代理终止 HTTPS，并把应用 admin listener 绑定到内网地址；简单直连部署可以启用 `admin_tls`。
+生产公网建议通过可信反向代理终止 HTTPS，并把应用 admin listener 绑定到内网地址；容器部署可在容器内监听通配地址，但宿主机端口应绑定回环地址。简单直连部署可以启用 `admin_tls`。
 
 ### storage
 

@@ -146,7 +146,7 @@ func TestValidateRejectsEnabledTLSMissingFiles(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsPublicAdminWithoutTLS(t *testing.T) {
+func TestValidateAllowsPublicAdminWithoutTLSWithWarning(t *testing.T) {
 	base := Config{
 		Storage:  StorageConfig{DataRoot: t.TempDir()},
 		Database: DatabaseConfig{Driver: "sqlite", DSN: "test.db"},
@@ -155,8 +155,11 @@ func TestValidateRejectsPublicAdminWithoutTLS(t *testing.T) {
 
 	cfg := base
 	cfg.Server.AdminAddr = "0.0.0.0:9001"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must not listen publicly") {
-		t.Fatalf("public plaintext admin validation error = %v, want public-listener error", err)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("public plaintext admin returned error: %v", err)
+	}
+	if warnings := strings.Join(cfg.ProductionWarnings(), "\n"); !strings.Contains(warnings, "server.admin_addr listens publicly without admin TLS") {
+		t.Fatalf("public plaintext admin warnings = %q, want admin TLS warning", warnings)
 	}
 
 	cfg = base
@@ -164,12 +167,18 @@ func TestValidateRejectsPublicAdminWithoutTLS(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("loopback plaintext admin returned error: %v", err)
 	}
+	if warnings := strings.Join(cfg.ProductionWarnings(), "\n"); strings.Contains(warnings, "server.admin_addr listens publicly without admin TLS") {
+		t.Fatalf("loopback plaintext admin warnings = %q, do not want public-listener warning", warnings)
+	}
 
 	cfg = base
 	cfg.Server.AdminAddr = "0.0.0.0:9001"
 	cfg.Server.AdminTLS = &TLSConfig{Enabled: true, CertFile: "admin.crt", KeyFile: "admin.key"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("public TLS admin returned error: %v", err)
+	}
+	if warnings := strings.Join(cfg.ProductionWarnings(), "\n"); strings.Contains(warnings, "server.admin_addr listens publicly without admin TLS") {
+		t.Fatalf("public TLS admin warnings = %q, do not want admin TLS warning", warnings)
 	}
 }
 
@@ -246,7 +255,7 @@ func TestProductionWarningsDoNotIncludeSecretValues(t *testing.T) {
 	}
 
 	warnings := strings.Join(cfg.ProductionWarnings(), "\n")
-	for _, want := range []string{"session_secret", "admin_bootstrap_password", "public_metrics", "trust_forwarded"} {
+	for _, want := range []string{"session_secret", "admin_bootstrap_password", "server.admin_addr", "public_metrics", "trust_forwarded"} {
 		if !strings.Contains(warnings, want) {
 			t.Fatalf("warnings missing %q: %s", want, warnings)
 		}
