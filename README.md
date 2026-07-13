@@ -665,7 +665,9 @@ server {
     location / {
         proxy_pass http://127.0.0.1:9000;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_cache off;
+        proxy_cache_convert_head off;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
@@ -697,6 +699,10 @@ server {
     }
 }
 ```
+
+> **已有反向代理部署必须更新配置：** NativeS3-Bridge 镜像或二进制不会自动修改宿主机 Nginx 配置。升级或迁移后，应重新编辑/保存 S3 站点的反向代理块，确保 `location /` 包含 `proxy_cache off`、`proxy_cache_convert_head off` 和 `proxy_set_header Host $http_host`，然后执行 `nginx -t` 并 reload；无需为此重新构建 NativeS3-Bridge 镜像。
+
+S3 SigV4 会把 HTTP method 纳入签名。Nginx 的代理缓存配置可能把客户端 `HEAD` 转成上游 `GET`，导致 `HeadObject`/`HeadBucket` 返回 `SignatureDoesNotMatch`，而 PUT/GET/DELETE 仍然正常。使用宝塔等面板生成配置时，还要检查额外 include 文件是否重新启用了 `proxy_cache` 或覆盖 `proxy_cache_convert_head off`。修复后，Nginx access log 与 NativeS3 `s3 request` 日志应同时记录 `HEAD`。
 
 若开启 `rate_limit.trust_forwarded: true`，必须确保 NativeS3-Bridge 不能被绕过代理直接访问。
 

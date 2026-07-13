@@ -55,6 +55,29 @@ func TestLocalSigV4AuthenticatorVerify(t *testing.T) {
 	}
 }
 
+func TestLocalSigV4AuthenticatorVerifyHeadRequest(t *testing.T) {
+	gdb := testDB(t)
+	cred := db.Credential{AccessKey: "HEADACCESS", SecretKey: "HEADSECRET", Status: "enabled"}
+	if err := gdb.Create(&cred).Error; err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	issuedAt := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	authenticator := NewLocalSigV4Authenticator(NewCredentialStore(gdb, time.Second), "hk-1")
+	authenticator.now = func() time.Time { return issuedAt }
+
+	req := signedHeaderTestRequest(t, http.MethodHead, "https://s3.example.test/test/folder/", cred.AccessKey, cred.SecretKey, issuedAt, "hk-1", nil)
+	if _, err := authenticator.Verify(req); err != nil {
+		t.Fatalf("verify HEAD request: %v", err)
+	}
+
+	rewritten := signedHeaderTestRequest(t, http.MethodHead, "https://s3.example.test/test/folder/", cred.AccessKey, cred.SecretKey, issuedAt, "hk-1", nil)
+	rewritten.Method = http.MethodGet
+	_, err := authenticator.Verify(rewritten)
+	if ErrorCode(err) != CodeSignatureDoesNotMatch {
+		t.Fatalf("HEAD signed request rewritten to GET error = %v, want SignatureDoesNotMatch", err)
+	}
+}
+
 func TestLocalSigV4AuthenticatorVerifyPresignedURL(t *testing.T) {
 	gdb := testDB(t)
 	cred := db.Credential{AccessKey: "PRESIGNAK", SecretKey: "PRESIGNSK", Status: "enabled", QuotaBytes: 100, UsedBytes: 5}
@@ -135,23 +158,32 @@ func TestCredentialStoreRefreshesUsedBytesOnCacheHit(t *testing.T) {
 func signedTestRequest(t *testing.T, accessKey, secretKey string, at time.Time) *http.Request {
 	t.Helper()
 	body := []byte("hello")
-	req, err := http.NewRequest(http.MethodPut, "http://localhost:9000/test-bucket/a.txt", bytes.NewReader(body))
+	return signedHeaderTestRequest(t, http.MethodPut, "http://localhost:9000/test-bucket/a.txt", accessKey, secretKey, at, "us-east-1", body)
+}
+
+func signedHeaderTestRequest(t *testing.T, method, rawURL, accessKey, secretKey string, at time.Time, region string, body []byte) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, rawURL, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Host = "localhost:9000"
+	req.Host = req.URL.Host
 	req.ContentLength = int64(len(body))
 	req.Header.Set("x-amz-date", at.UTC().Format("20060102T150405Z"))
-	req.Header.Set("x-amz-content-sha256", UnsignedPayload)
+	payloadHash := UnsignedPayload
+	if method == http.MethodHead {
+		payloadHash = hexSHA256("")
+	}
+	req.Header.Set("x-amz-content-sha256", payloadHash)
 	signedHeaders := []string{"host", "x-amz-content-sha256", "x-amz-date"}
-	canonical, err := CanonicalRequest(req, signedHeaders, UnsignedPayload)
+	canonical, err := CanonicalRequest(req, signedHeaders, payloadHash)
 	if err != nil {
 		t.Fatalf("canonical request: %v", err)
 	}
 	date := at.UTC().Format("20060102")
-	stringToSign := StringToSign(req.Header.Get("x-amz-date"), date, "us-east-1", "s3", canonical)
-	signature := SignString(DeriveSigningKey(secretKey, date, "us-east-1", "s3"), stringToSign)
-	req.Header.Set("Authorization", Algorithm+" Credential="+accessKey+"/"+date+"/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature="+signature)
+	stringToSign := StringToSign(req.Header.Get("x-amz-date"), date, region, ServiceS3, canonical)
+	signature := SignString(DeriveSigningKey(secretKey, date, region, ServiceS3), stringToSign)
+	req.Header.Set("Authorization", Algorithm+" Credential="+accessKey+"/"+date+"/"+region+"/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature="+signature)
 	return req
 }
 

@@ -22,11 +22,13 @@
 - `func Check(id *auth.Identity, incoming int64) error`
 - `func Commit(gdb *gorm.DB, credID uint, deltaBytes int64, op Op) error`
 - Startup seed flags: `--seed-access-key`, `--seed-secret-key`, `--seed-quota-bytes`.
+- Nginx S3 location contract: `proxy_cache off;`, `proxy_cache_convert_head off;`, and `proxy_set_header Host $http_host;`.
 
 ### 3. Contracts
 
 - Only header-based `Authorization: AWS4-HMAC-SHA256 ...` is accepted in this layer. Query presigned URL validation belongs to the presigned task.
 - SigV4 canonical request helpers must remain pure and reusable: canonical URI/query/headers, signed headers, string-to-sign, signing key derivation, and constant-time signature comparison.
+- Reverse proxies must preserve the exact client HTTP method and Host used by SigV4. For Nginx S3 locations, disable generic proxy caching and set `proxy_cache_convert_head off`; converting signed HEAD requests to upstream GET requests causes `SignatureDoesNotMatch`.
 - `X-Amz-Date` clock skew is limited to plus or minus 15 minutes and returns `RequestTimeTooSkewed` on violation.
 - Credential lookup is by `Credential.AccessKey`; missing keys return `InvalidAccessKeyId`, disabled credentials return `AccessDenied`, and bad signatures return `SignatureDoesNotMatch`.
 - Credential cache may cache secret/status/quota for the TTL, but enabled credentials must not serve stale `UsedBytes` for quota checks. Refresh `used_bytes` on cache hit or explicitly invalidate after every usage mutation.
@@ -45,6 +47,7 @@
 - Disabled credential -> HTTP 403 `AccessDenied` XML.
 - Clock skew over 15 minutes -> HTTP 403 `RequestTimeTooSkewed` XML.
 - Signature mismatch -> HTTP 403 `SignatureDoesNotMatch` XML.
+- Reverse proxy changes signed HEAD to upstream GET -> HTTP 403 `SignatureDoesNotMatch`; both proxy and application logs must record HEAD after correction.
 - Quota exceeded -> HTTP 403 `QuotaExceeded` XML.
 - Unknown PUT content length -> HTTP 400 `InvalidArgument` XML.
 - Multipart complete quota exceeded -> HTTP 403 `QuotaExceeded` XML; temporary multipart upload data is aborted/removed and `used_bytes` is unchanged.
@@ -53,8 +56,10 @@
 ### 5. Good/Base/Bad Cases
 
 - Good: aws-cli signs a PUT with an enabled DB credential, `Verify` returns identity, `Check` passes, object writes natively, and `Commit` records `used_bytes += actualSize`, `put_count += 1`, `bytes_in += actualSize`.
+- Good: Nginx forwards a signed HeadObject as HEAD with the original Host; an existing key returns 200 and a missing key reaches the handler and returns 404.
 - Good: aws-cli multipart upload stores parts without quota mutation; Complete computes total part size, checks quota once, merges to one native file, then commits `used_bytes += totalSize`.
 - Base: aws-cli `--no-sign-request` receives standard 403 `<Error><Code>AccessDenied</Code>...` without leaking internal DB or filesystem details.
+- Bad: an inherited hosting-panel proxy cache converts client HEAD to upstream GET, so uploads and lists work while folder creation fails during its HeadObject preflight.
 - Bad: caching an enabled credential's `UsedBytes` for 60 seconds and allowing sequential uploads to bypass quota until TTL expiry.
 - Bad: computing `UsedBytes + incoming > QuotaBytes` directly, which can overflow for large signed integers.
 - Bad: incrementing GET `bytes_out` before `io.Copy` succeeds.
@@ -64,6 +69,7 @@
 
 - Unit test canonical request and string-to-sign against AWS S3 documentation vectors.
 - Unit test successful `LocalSigV4Authenticator.Verify` plus wrong secret, unknown access key, disabled credential, and clock skew errors.
+- Unit test a correctly signed HEAD request and prove that changing its method to GET invalidates the signature.
 - Unit test credential cache hit refreshes `UsedBytes` for enabled credentials.
 - Unit test `quota.Check` for unlimited, exact limit, exceeded limit, negative incoming, and overflow-safe comparisons.
 - Unit test `quota.Commit` for put/get/delete counters, positive and negative delete deltas, lower-bound zero, invalid ops, and concurrent put updates.
@@ -86,6 +92,26 @@ Correct:
 ```go
 if id.QuotaBytes > 0 && incoming > id.QuotaBytes-id.UsedBytes {
     return ErrQuotaExceeded
+}
+```
+
+Wrong:
+
+```nginx
+location / {
+    proxy_cache s3_cache;
+    proxy_pass http://127.0.0.1:9000;
+}
+```
+
+Correct:
+
+```nginx
+location / {
+    proxy_cache off;
+    proxy_cache_convert_head off;
+    proxy_set_header Host $http_host;
+    proxy_pass http://127.0.0.1:9000;
 }
 ```
 
