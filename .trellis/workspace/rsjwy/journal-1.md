@@ -441,3 +441,36 @@ Implemented rotating file logging with admin log viewer and single-bucket storag
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: 修复 S3 HEAD 反向代理验签失败
+
+**Date**: 2026-07-13
+**Task**: 修复 S3 HEAD 反向代理验签失败
+**Branch**: `main`
+
+### Summary
+
+定位到 Nginx 代理缓存将签名 HEAD 转为上游 GET，补充禁用转换的反代配置说明、HEAD 方法回归测试和后端规范；生产修改配置后创建目录恢复正常。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b96fbc9` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
