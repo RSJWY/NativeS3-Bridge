@@ -1,44 +1,84 @@
-# NativeS3-Bridge Docker Compose example.
+# NativeS3-Bridge multi-node Docker Compose example.
 #
-# Default mode: SQLite
-#   1. cp configs/config.docker.example.yaml configs/config.yaml
-#   2. mkdir -p data state
-#   3. sudo chown -R 10001:10001 data state
-#   4. docker compose -f docker-compose.example.yml up -d
+# Hard cutover (design §8.1/§8.3): the legacy single natives3bridge binary is
+# replaced by two images built from this repo:
+#   - panel: admin UI/REST (9001) + node control-plane listener (9443), no S3
+#   - node : S3 data plane (9000) only, dials the panel; no management port
 #
-# To use MySQL or PostgreSQL:
-#   1. Edit configs/config.yaml database.driver and database.dsn.
-#   2. Start the matching profile, for example:
-#        docker compose -f docker-compose.example.yml --profile mysql up -d
-#        docker compose -f docker-compose.example.yml --profile postgres up -d
+# Setup:
+#   1. cp configs/panel.example.yaml configs/panel.yaml   # edit secrets/PKI paths
+#      cp configs/node.example.yaml  configs/node.yaml    # edit panel URLs/node_id
+#   2. Provision the panel recovery set (see docs/multi-node-operations.md §6):
+#        - master key file (32 bytes), kept OUT of the DB backup
+#        - offline root CA + online intermediate CA (cert+key)
+#        - agent listener server cert/key
+#   3. mkdir -p panel-data node-data
+#   4. docker compose -f docker-compose.example.yml build
+#      docker compose -f docker-compose.example.yml up -d panel
+#   5. In the panel UI: create the node, issue a single-use registration token,
+#      put node_id + token into configs/node.yaml, then start the node:
+#      docker compose -f docker-compose.example.yml up -d node
 #
-# Run one database mode at a time.
+# To use MySQL/PostgreSQL for the panel DB, edit configs/panel.yaml database.*
+# and start the matching profile (mysql / postgres). Run one DB mode at a time.
 
 services:
-  natives3bridge:
-    image: ghcr.io/rsjwy/natives3-bridge:latest
-    # Use the current checkout instead of the published image:
-    # build: .
-    # image: natives3bridge:local
-    container_name: natives3bridge
+  panel:
+    build:
+      context: .
+      target: panel
+      args:
+        APP_VERSION: dev
+    image: natives3-panel:local
+    container_name: natives3-panel
     restart: unless-stopped
     ports:
-      - "9000:9000"
-      # Keep the admin UI on localhost unless it is behind HTTPS/authenticated proxy.
+      # Keep the admin UI on localhost unless it is behind an HTTPS/auth proxy.
       - "127.0.0.1:9001:9001"
+      - "9443:9443"   # node接入: mTLS WebSocket + one-shot registration endpoint
     volumes:
-      - ./configs/config.yaml:/app/configs/config.yaml:ro
-      - ./data:/data
-      - ./state:/state
+      - ./configs/panel.yaml:/app/configs/panel.yaml:ro
+      # Panel data: DB + PKI + master key. Back up the DB and the master key
+      # SEPARATELY (design §7.3): a DB backup alone must not yield plaintext secrets.
+      - ./panel-data:/data
+    healthcheck:
+      test: ["CMD", "/app/panel", "-check-config", "-config", "/app/configs/panel.yaml"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  node:
+    build:
+      context: .
+      target: node
+      args:
+        APP_VERSION: dev
+    image: natives3-node:local
+    container_name: natives3-node
+    restart: unless-stopped
+    ports:
+      - "9000:9000"   # S3 data plane only; the node exposes no management port
+    volumes:
+      - ./configs/node.yaml:/app/configs/node.yaml:ro
+      # Node data: objects + node DB + node PKI (private key generated locally,
+      # never uploaded). Objects and history are never migrated by the panel.
+      - ./node-data:/data
+    healthcheck:
+      test: ["CMD", "/app/node", "-check-config", "-config", "/app/configs/node.yaml"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   mysql:
     image: mysql:8.4
     profiles:
       - mysql
-    container_name: natives3bridge-mysql
+    container_name: natives3-panel-mysql
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: natives3
+      MYSQL_DATABASE: natives3panel
       MYSQL_USER: natives3
       MYSQL_PASSWORD: change-me-mysql-password
       MYSQL_ROOT_PASSWORD: change-me-root-password
@@ -57,10 +97,10 @@ services:
     image: postgres:16-alpine
     profiles:
       - postgres
-    container_name: natives3bridge-postgres
+    container_name: natives3-panel-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: natives3
+      POSTGRES_DB: natives3panel
       POSTGRES_USER: natives3
       POSTGRES_PASSWORD: change-me-postgres-password
     volumes:

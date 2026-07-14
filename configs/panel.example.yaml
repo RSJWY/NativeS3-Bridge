@@ -1,0 +1,60 @@
+# Panel configuration (国内集中管理面). The panel hosts the admin UI/REST and the
+# node control-plane listener. It has NO S3 data plane: object traffic never
+# transits the panel (design §1.3).
+
+# Human admin surface (UI + REST). Put behind a trusted HTTPS reverse proxy, or
+# enable admin_tls below.
+admin_addr: "0.0.0.0:9001"
+# admin_tls:
+#   enabled: true
+#   cert_file: "/data/pki/admin.crt"
+#   key_file: "/data/pki/admin.key"
+
+# Node control-plane listener (mTLS WebSocket + one-shot registration endpoint).
+# Physically separate from admin_addr so certificate/firewall policy differ per
+# surface (design §1.3). Nodes verify the panel via this server cert.
+agent:
+  addr: "0.0.0.0:9443"
+  cert_file: "/data/pki/panel-server.crt"
+  key_file: "/data/pki/panel-server.key"
+
+# Online intermediate CA used to sign node client certificates. The offline root
+# CA is NOT referenced here — it only signs/rotates the intermediate out of band
+# (design §3.1).
+pki:
+  intermediate_cert_file: "/data/pki/intermediate-ca.crt"
+  intermediate_key_file: "/data/pki/intermediate-ca.key"
+  client_cert_ttl: 2160h        # 90 days
+
+# AEAD master key that encrypts S3 secret keys at rest. It MUST live outside the
+# database and be backed up SEPARATELY (design §2.3, §7.3): a DB backup alone must
+# never yield plaintext secrets. The panel refuses to start if this is missing or
+# the wrong length (fail-closed).
+master_key_file: "/data/secrets/master.key"
+
+database:
+  driver: "sqlite"
+  dsn: "/data/panel.db"
+
+region: "us-east-1"
+log_level: "info"
+
+heartbeat_interval: 15s
+offline_multiplier: 3
+
+webadmin:
+  # bcrypt hash of the admin password. Generate with admin_bootstrap_password on
+  # first boot, then copy the logged hash here and clear the bootstrap password.
+  password_hash: ""
+  admin_bootstrap_password: ""
+  session_secret: "replace-with-a-random-32-byte-secret-value"
+  session_ttl_minutes: 720
+  login_max_failures: 5
+  login_lockout_window: 15m
+  totp:
+    enabled: false
+    issuer: "NativeS3-Bridge"
+    account: "admin"
+    secret: ""
+  captcha:
+    enabled: false

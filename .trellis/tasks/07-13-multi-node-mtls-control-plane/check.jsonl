@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端层 Quality Check 清单，验收代码前逐项核对"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "后端质量红线：lint/type-check/测试与错误处理基线"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "控制协议错误回执、任务失败/结果未知、断线处理需符合统一错误处理约定"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "核对新增模型迁移、索引与 schema validation 是否符合规范"}
+{"file": ".trellis/spec/backend/auth-quota-guidelines.md", "reason": "核对 mTLS/注册令牌/Secret Key 加密与轮换的安全边界"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核对审计字段完整性与敏感信息脱敏是否达标"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "面板前端新增节点管理/状态漂移/证书生命周期页面的质量核对"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "面板前端与控制协议/面板 API 的类型一致性核对"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨层（协议/面板后端/节点 Agent/前端）一致性验收"}

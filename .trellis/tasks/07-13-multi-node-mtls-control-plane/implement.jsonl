@@ -1,0 +1,10 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端层入口：Pre-Development Checklist + Quality Check，动工前必读"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "面板/节点/共享控制协议模块的目录与包组织需遵循既有约定"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "新增节点身份/证书/期望状态/审计等模型与迁移，需遵循 GORM 模型与 migrate 注册规范"}
+{"file": ".trellis/spec/backend/auth-quota-guidelines.md", "reason": "mTLS 身份、注册令牌、Secret Key 加密存储与凭据轮换涉及认证与配额边界"}
+{"file": ".trellis/spec/backend/webadmin-guidelines.md", "reason": "面板复用 WebAdmin JSON API 风格与鉴权中间件；控制协议消息信封与之保持一致"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "审计日志与敏感信息脱敏（禁止记录私钥/完整 Secret Key/注册令牌/Session）"}
+{"file": ".trellis/spec/backend/storage-guidelines.md", "reason": "存储扫描/校正作为高风险预定义任务，需复用 reconcile 的预览/应用两段式语义"}
+{"file": ".trellis/spec/backend/presigned-hooks-guidelines.md", "reason": "Webhook 属于面板权威的运行期业务配置之一，期望状态同步需覆盖"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "面板前端 + 面板后端 + 节点 Agent + 共享协议跨层改动，需跨层一致性思考"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "最大化复用现有 net/http、GORM、reconcile、credential store，避免重复造轮子"}
