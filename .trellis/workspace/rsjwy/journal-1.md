@@ -474,3 +474,36 @@ Implemented rotating file logging with admin log viewer and single-bucket storag
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: 归档多节点 mTLS 控制面
+
+**Date**: 2026-07-15
+**Task**: 归档多节点 mTLS 控制面
+**Branch**: `07-13-multi-node-mtls-control-plane`
+
+### Summary
+
+完成面板与节点 mTLS 控制面硬切换实现的归档前质量门禁：gofmt、go vet、go build、go test 全部通过；归档 07-13-multi-node-mtls-control-plane。后续将单独执行完整性与版本升级/回滚专项测试。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1ae6101` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
