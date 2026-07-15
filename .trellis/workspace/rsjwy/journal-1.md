@@ -507,3 +507,38 @@ Implemented rotating file logging with admin log viewer and single-bucket storag
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: 完整性与版本升级回滚专项测试
+
+**Date**: 2026-07-15
+**Task**: 完整性与版本升级回滚专项测试
+**Branch**: `07-13-multi-node-mtls-control-plane`
+
+### Summary
+
+完成多节点硬切换完整性验证：真实演练 5f0be5c 单体升级到当前 node 并回滚，验证 SQLite 备份、业务数据与对象字节保真、无面板数据面可用；修正双镜像独立构建和 Compose healthcheck；稳定 Go 1.21 异步清理测试。默认/Go 1.21 全量测试、race、前端构建均通过。Docker 构建因 WSL 未启用集成未执行，npm audit 主版本升级风险已记录。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3e9d39a` | (see git log) |
+| `66e11fb` | (see git log) |
+| `9e27d54` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
