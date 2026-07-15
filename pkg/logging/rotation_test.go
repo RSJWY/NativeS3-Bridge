@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -19,11 +20,21 @@ func TestLumberjackRotatesAndLimitsBackups(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	backups, err := filepath.Glob(filepath.Join(directory, "app-*.log"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(backups) == 0 || len(backups) > 1 {
-		t.Fatalf("backup count = %d, want 1", len(backups))
+	// lumberjack prunes excess backups in its background mill goroutine. Wait
+	// for that asynchronous cleanup instead of asserting immediately after the
+	// final write, which is flaky on slower filesystems and older Go runtimes.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		backups, err := filepath.Glob(filepath.Join(directory, "app-*.log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(backups) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("backup count = %d, want 1", len(backups))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

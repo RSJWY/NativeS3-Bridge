@@ -204,7 +204,21 @@ func dialTestNode(t *testing.T, gdb *gorm.DB, ca *CA, hub *Hub, ts *TransportSer
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	t.Cleanup(func() { ws.Close(websocket.StatusNormalClosure, "test cleanup") })
+	t.Cleanup(func() {
+		_ = ws.Close(websocket.StatusNormalClosure, "test cleanup")
+		// Closing the client only initiates server-side teardown. Wait until the
+		// serve goroutine has persisted online=false and unregistered the
+		// connection before t.TempDir removes the SQLite directory. Without this
+		// barrier Go 1.21 can intermittently report a non-empty temp directory or
+		// a read-only database during cleanup.
+		deadline := time.Now().Add(3 * time.Second)
+		for hub.IsOnline(node.ID) && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if hub.IsOnline(node.ID) {
+			t.Errorf("node %d remained online during test cleanup", node.ID)
+		}
+	})
 
 	// Complete handshake: node sends hello, panel replies hello_ack.
 	sendEnv(t, ctx, ws, controlproto.TypeHello, "h1", controlproto.HelloPayload{

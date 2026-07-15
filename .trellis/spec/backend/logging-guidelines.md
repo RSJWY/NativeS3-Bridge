@@ -151,8 +151,15 @@ logAuthDenied(w, r, "verify_failed", auth.ErrorCode(err))
 ### 6. Tests Required
 - Assert directory and legacy effective paths, mutual exclusion, explicit zero backups, invalid rotation values, active file writes, ring wrap/filter/concurrency, API 401, default file tail, and ring fallback.
 - Assert exact lumberjack discovery/order, plain and gzip history filters, traversal/absolute/separator/unmatched/symlink rejection, removed history 404, and corrupt gzip 500 without fallback.
+- `lumberjack.Logger` prunes files beyond `MaxBackups` in its background mill
+  goroutine. Rotation-limit tests must poll with a bounded deadline until the
+  expected backup count is visible; an immediate glob after `Write` is flaky.
 
 ### 7. Wrong vs Correct
 - Wrong: `slog.NewTextHandler(file, ...)`, which removes stdout and ring.
 - Wrong: `os.Open(filepath.Join(logDir, r.URL.Query().Get("file")))`, which turns the admin endpoint into an arbitrary file reader.
+- Wrong: asserting `len(backups) == MaxBackups` immediately after a write that
+  triggers rotation, before lumberjack's asynchronous mill has pruned old files.
 - Correct: wrap a stdout/effective-file `io.MultiWriter` handler with `logging.NewRingHandler`; enumerate exact regular backup basenames and open only the matched server-side record.
+- Correct: poll the backup glob with a short bounded deadline and assert the
+  final count after asynchronous pruning completes.

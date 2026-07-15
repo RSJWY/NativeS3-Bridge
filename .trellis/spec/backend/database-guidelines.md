@@ -171,6 +171,10 @@ type RequestStat struct {
 - New SQLite DB and in-memory SQLite DSNs skip file backup.
 - Corrupt SQLite DB fails preflight before migration.
 - Schema validation detects missing expected indexes.
+- Tests that serve requests from a temp-file SQLite database must close client
+  connections and wait for background server goroutines to finish their final DB
+  writes before `t.TempDir()` cleanup. In control-plane tests, wait until the Hub
+  has unregistered the node after closing its WebSocket.
 - Full regression: `go test ./pkg/db`, `go test ./...`, `go vet ./...`, `go build ./...`.
 
 #### 7. Wrong vs Correct
@@ -219,3 +223,7 @@ If `go mod tidy -go=1.21` tries to resolve newer transitive packages that requir
   database backup/snapshot tooling outside the app.
 - Do not trust the installed Go toolchain default when running `go mod tidy`; newer Go versions can rewrite the `go` directive.
 - Do not rely only on the `sqlite3` CLI for migration verification. Some environments do not have it installed; keep a Go/GORM migrator test for table existence.
+- Do not let `t.TempDir()` remove a SQLite directory while a background goroutine
+  can still update the database. This can surface as `attempt to write a readonly
+  database` or `TempDir RemoveAll cleanup: directory not empty`, especially on
+  Go 1.21. Close the connection and wait on an observable shutdown barrier first.
