@@ -542,3 +542,36 @@ Implemented rotating file logging with admin log viewer and single-bucket storag
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: 优化 GitHub Actions 双镜像发布
+
+**Date**: 2026-07-15
+**Task**: 优化 GitHub Actions 双镜像发布
+**Branch**: `07-13-multi-node-mtls-control-plane`
+
+### Summary
+
+将 release workflow 迁移为 panel/node 双程序归档与双 GHCR 镜像发布，增加最小权限、并行质量门禁、缓存与 provenance 契约，更新 README 和发布规范，并完成 actionlint、UI、Go vet/test/race 及 10 个跨平台归档验证。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `63a3cf4` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

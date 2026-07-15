@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 16
+- **Total Sessions**: 17
 - **Last Active**: 2026-07-15
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~544 | Active |
+| `journal-1.md` | ~577 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 17 | 2026-07-15 | 优化 GitHub Actions 双镜像发布 | `63a3cf4` | `07-13-multi-node-mtls-control-plane` |
 | 16 | 2026-07-15 | 完整性与版本升级回滚专项测试 | `3e9d39a`, `66e11fb`, `9e27d54` | `07-13-multi-node-mtls-control-plane` |
 | 15 | 2026-07-15 | 归档多节点 mTLS 控制面 | `1ae6101` | `07-13-multi-node-mtls-control-plane` |
 | 14 | 2026-07-13 | 修复 S3 HEAD 反向代理验签失败 | `b96fbc9` | `main` |
