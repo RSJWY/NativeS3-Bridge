@@ -16,21 +16,26 @@ on:
       - "**"
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build release artifacts
+  prepare:
+    name: Prepare release metadata
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+      docker_tag: ${{ steps.metadata.outputs.docker_tag }}
+      namespace: ${{ steps.metadata.outputs.namespace }}
+      sha: ${{ steps.revision.outputs.sha }}
 
     steps:
       - name: Resolve release metadata
-        id: release
+        id: metadata
         shell: bash
         env:
           INPUT_TAG: ${{ github.event.inputs.tag }}
@@ -41,9 +46,9 @@ jobs:
           tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
           tag="${tag#refs/tags/}"
           source_ref="${INPUT_SOURCE_REF:-${GITHUB_SHA}}"
-          docker_tag="${tag//\//-}"
-          docker_tag="${docker_tag//+/-}"
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="${tag//\//-}"
+          docker_tag="${version//+/-}"
+          namespace="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
 
           if [[ -z "${tag}" ]]; then
             echo "::error::Release tag is required."
@@ -61,14 +66,15 @@ jobs:
           fi
 
           printf 'tag=%s\n' "${tag}" >> "${GITHUB_OUTPUT}"
-          printf 'source_ref=%s\n' "${source_ref}" >> "${GITHUB_OUTPUT}"
+          printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
           printf 'docker_tag=%s\n' "${docker_tag}" >> "${GITHUB_OUTPUT}"
-          printf 'image=%s\n' "${image}" >> "${GITHUB_OUTPUT}"
+          printf 'namespace=%s\n' "${namespace}" >> "${GITHUB_OUTPUT}"
+          printf 'source_ref=%s\n' "${source_ref}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
-          ref: ${{ steps.release.outputs.source_ref }}
+          ref: ${{ steps.metadata.outputs.source_ref }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -80,26 +86,34 @@ jobs:
       - name: Validate release tag target
         shell: bash
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
           RELEASE_SHA: ${{ steps.revision.outputs.sha }}
         run: |
           set -euo pipefail
 
           remote_ref="refs/tags/${RELEASE_TAG}"
-
           if git ls-remote --exit-code --refs origin "${remote_ref}" >/dev/null; then
             git fetch --force origin "${remote_ref}:${remote_ref}"
             existing_sha="$(git rev-list -n 1 "${remote_ref}")"
-
             if [[ "${existing_sha}" != "${RELEASE_SHA}" ]]; then
-              echo "::error::Tag ${RELEASE_TAG} already exists at ${existing_sha}, but this run checked out ${RELEASE_SHA}."
-              echo "::error::Select ${remote_ref} as source_ref to rebuild that tag, or use a new release tag."
+              echo "::error::Tag ${RELEASE_TAG} exists at ${existing_sha}, but this run selected ${RELEASE_SHA}."
               exit 1
             fi
           fi
 
+  quality:
+    name: Quality gate
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fixed revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: "18"
           cache: npm
@@ -108,7 +122,7 @@ jobs:
       - name: Build embedded admin UI
         working-directory: pkg/webadmin/ui
         env:
-          APP_VERSION: ${{ steps.release.outputs.tag }}
+          APP_VERSION: ${{ needs.prepare.outputs.tag }}
         run: |
           npm ci
           npm run build
@@ -119,57 +133,112 @@ jobs:
           go-version: "1.21.x"
           cache: true
 
-      - name: Vet Go packages
-        run: go vet ./...
+      - name: Verify Go packages
+        run: |
+          go vet ./...
+          go test ./...
+          go test -race ./...
 
-      - name: Test Go packages
-        run: go test ./...
+      - name: Verify distribution contracts
+        run: bash scripts/test-distribution-contract.sh
 
-      - name: Build cross-platform binaries
+  artifacts:
+    name: Build release archives
+    needs: [prepare, quality]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fixed revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: pkg/webadmin/ui/package-lock.json
+
+      - name: Build embedded admin UI
+        working-directory: pkg/webadmin/ui
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.tag }}
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.21.x"
+          cache: true
+
+      - name: Build cross-platform archives
         shell: bash
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
 
-          version="${RELEASE_TAG//\//-}"
           mkdir -p dist
+          targets=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64)
 
-          targets=(
-            "linux/amd64"
-            "linux/arm64"
-            "darwin/amd64"
-            "darwin/arm64"
-            "windows/amd64"
-          )
+          for component in panel node; do
+            for target in "${targets[@]}"; do
+              goos="${target%/*}"
+              goarch="${target#*/}"
+              name="natives3-${component}-${RELEASE_VERSION}-${goos}-${goarch}"
+              binary="${component}"
+              if [[ "${goos}" == "windows" ]]; then
+                binary="${binary}.exe"
+              fi
 
-          for target in "${targets[@]}"; do
-            goos="${target%/*}"
-            goarch="${target#*/}"
-            name="natives3bridge-${version}-${goos}-${goarch}"
-            binary="${name}/natives3bridge"
+              mkdir -p "dist/${name}/configs" "dist/${name}/docs"
+              GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
+                go build -trimpath -ldflags "-s -w -X main.version=${RELEASE_TAG}" \
+                -o "dist/${name}/${binary}" "./cmd/${component}"
 
-            if [[ "${goos}" == "windows" ]]; then
-              binary="${binary}.exe"
-            fi
-
-            mkdir -p "dist/${name}/configs"
-            GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
-              go build -trimpath \
-              -ldflags "-s -w" \
-              -o "dist/${binary}" \
-              ./cmd/natives3bridge
-
-            cp README.md "dist/${name}/"
-            cp configs/config.example.yaml "dist/${name}/configs/"
-
-            tar -C dist -czf "dist/${name}.tar.gz" "${name}"
-            rm -rf "dist/${name}"
+              cp README.md "dist/${name}/"
+              cp "configs/${component}.example.yaml" "dist/${name}/configs/"
+              cp docs/multi-node-operations.md "dist/${name}/docs/"
+              tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+              rm -rf "dist/${name}"
+            done
           done
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum * > checksums.txt
+        run: sha256sum -- *.tar.gz > checksums.txt
+
+      - name: Upload release archives
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-artifacts
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  images:
+    name: Publish ${{ matrix.component }} image
+    needs: [prepare, quality]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [panel, node]
+
+    steps:
+      - name: Checkout fixed revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -181,30 +250,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish Docker image
+      - name: Build and publish image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
+          target: ${{ matrix.component }}
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: |
-            APP_VERSION=${{ steps.release.outputs.tag }}
+          build-args: APP_VERSION=${{ needs.prepare.outputs.tag }}
           tags: |
-            ${{ steps.release.outputs.image }}:${{ steps.release.outputs.docker_tag }}
-            ${{ steps.release.outputs.image }}:latest
+            ${{ needs.prepare.outputs.namespace }}/natives3-${{ matrix.component }}:${{ needs.prepare.outputs.docker_tag }}
+            ${{ needs.prepare.outputs.namespace }}/natives3-${{ matrix.component }}:latest
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ steps.revision.outputs.sha }}
-            org.opencontainers.image.version=${{ steps.release.outputs.tag }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.tag }}
+            org.opencontainers.image.title=NativeS3 ${{ matrix.component }}
+          cache-from: type=gha,scope=natives3-${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=natives3-${{ matrix.component }}
+          provenance: mode=min
+          sbom: false
+
+  release:
+    name: Publish GitHub Release
+    needs: [prepare, artifacts, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v8
+        with:
+          name: release-artifacts
+          path: dist
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           fail_on_unmatched_files: true
           generate_release_notes: true
-          tag_name: ${{ steps.release.outputs.tag }}
-          target_commitish: ${{ steps.revision.outputs.sha }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ needs.prepare.outputs.sha }}
           files: |
             dist/*.tar.gz
             dist/checksums.txt

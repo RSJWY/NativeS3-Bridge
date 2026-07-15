@@ -797,75 +797,74 @@ Hook manager 从数据库的 `hook_configs` 表加载启用的 Webhook 配置。
 
 ### docker run
 
-```bash
-mkdir -p data state
-sudo chown -R 10001:10001 data state
+当前部署由 panel（管理面和控制面）与 node（S3 数据面）两个独立容器组成。先分别准备示例配置；生产环境还应按 [多节点运维文档](docs/multi-node-operations.md) 配置 mTLS：
 
-docker run -d --name natives3bridge \
+```bash
+mkdir -p panel-data node-data
+cp configs/panel.example.yaml configs/panel.yaml
+cp configs/node.example.yaml configs/node.yaml
+sudo chown -R 10001:10001 panel-data node-data
+
+docker run -d --name natives3-panel \
+  --restart unless-stopped \
+  -p 9001:9001 \
+  -p 9443:9443 \
+  -v "$(pwd)/configs/panel.yaml:/app/configs/panel.yaml:ro" \
+  -v "$(pwd)/panel-data:/data" \
+  ghcr.io/rsjwy/natives3-panel:latest
+
+docker run -d --name natives3-node \
   --restart unless-stopped \
   -p 9000:9000 \
-  -p 9001:9001 \
-  -v "$(pwd)/configs/config.yaml:/app/configs/config.yaml:ro" \
-  -v "$(pwd)/data:/data" \
-  -v "$(pwd)/state:/state" \
-  ghcr.io/rsjwy/natives3-bridge:latest
+  -v "$(pwd)/configs/node.yaml:/app/configs/node.yaml:ro" \
+  -v "$(pwd)/node-data:/data" \
+  ghcr.io/rsjwy/natives3-node:latest
 ```
 
 ### Docker Compose
 
-仓库提供了 `docker-compose.example.yml`。默认按 SQLite 单容器模式运行：
+仓库提供了 `docker-compose.example.yml`，默认同时启动 panel 与 node：
 
 ```bash
 cp docker-compose.example.yml docker-compose.yml
-cp configs/config.docker.example.yaml configs/config.yaml
-mkdir -p data state
-sudo chown -R 10001:10001 data state
+cp configs/panel.example.yaml configs/panel.yaml
+cp configs/node.example.yaml configs/node.yaml
+mkdir -p panel-data node-data
+sudo chown -R 10001:10001 panel-data node-data
 docker compose up -d
-docker compose logs -f natives3bridge
+docker compose logs -f panel node
 ```
 
-如果要使用当前 checkout 构建镜像，而不是拉取 GHCR `latest`，编辑
-`docker-compose.yml`，注释 `image: ghcr.io/rsjwy/natives3-bridge:latest`，取消
-`build: .` 和 `image: natives3bridge:local` 的注释，然后运行：
+示例 Compose 已为两个服务分别声明 `target: panel` 和 `target: node`。如需使用当前 checkout 构建镜像，保留 `build` 配置并运行：
 
 ```bash
 docker compose up -d --build
 ```
 
-容器内默认配置路径：
+两个容器内的默认配置路径分别为：
 
 ```bash
-/app/configs/config.yaml
-```
-
-容器内建议路径：
-
-```yaml
-storage:
-  data_root: "/data"
-  multipart_tmp: "/state/multipart"
-database:
-  driver: "sqlite"
-  dsn: "/state/natives3.db"
+/app/configs/panel.yaml
+/app/configs/node.yaml
 ```
 
 镜像默认以 UID/GID `10001:10001` 运行。挂载目录不可写时，调整宿主机目录属主或权限。
 
 ### Compose 数据库用法
 
-SQLite 是默认推荐的单机部署方式，只需要 `natives3bridge` 一个容器：
+SQLite 是默认推荐的 panel 元数据存储方式；node 仍作为独立数据面容器运行：
 
 ```yaml
 database:
   driver: "sqlite"
-  dsn: "/state/natives3.db"
+  dsn: "/data/panel.db"
 ```
 
-- 对象字节写入 `./data`。
-- SQLite 数据库、multipart 临时目录和升级备份写入 `./state`。
+- 对象字节写入 `./node-data/objects`，node 本地数据库位于 `./node-data/natives3.db`。
+- panel SQLite 数据库位于 `./panel-data/panel.db`；主密钥与 PKI 也在 panel 数据目录中，必须按多节点运维文档分别备份和保护。
 - 启动迁移前会自动做 SQLite 完整性检查；已有业务表时会生成
-  `./state/natives3.db.pre-upgrade-*.bak`。
-- 升级前仍建议整体备份 `./data` 和 `./state`。
+  同目录的 `.pre-upgrade-*.bak` 备份。
+- 升级前仍建议整体备份 `./panel-data` 和 `./node-data`。
 
 MySQL 适合已有 MySQL 运维体系的部署。先修改 `configs/config.yaml`：
 
@@ -922,17 +921,23 @@ git push origin v0.1.0
 发布流程会执行：
 
 - `npm ci && npm run build` 构建 Web 管理后台。
-- `go vet ./...` 和 `go test ./...`。
-- 交叉编译 Linux、macOS、Windows 的 amd64/arm64 二进制。
-- 上传 `.tar.gz` 包和 `checksums.txt` 到 GitHub Release。
-- 构建并推送多架构 Docker 镜像到 GHCR。
+- Go 1.21 `go vet ./...`、`go test ./...` 和 `go test -race ./...`。
+- 分别交叉编译 panel/node 的 Linux amd64/arm64、macOS amd64/arm64、Windows amd64，共 10 个归档。
+- 每个归档包含对应示例配置与 `docs/multi-node-operations.md`，并上传统一的 `checksums.txt`。
+- 并行构建并推送 panel/node 的 amd64/arm64 多架构镜像到 GHCR。
 
 镜像地址：
 
 ```text
-ghcr.io/rsjwy/natives3-bridge:<tag>
-ghcr.io/rsjwy/natives3-bridge:latest
+ghcr.io/rsjwy/natives3-panel:<tag>
+ghcr.io/rsjwy/natives3-panel:latest
+ghcr.io/rsjwy/natives3-node:<tag>
+ghcr.io/rsjwy/natives3-node:latest
 ```
+
+GitHub Release 中的归档名为 `natives3-panel-<version>-<os>-<arch>.tar.gz` 和 `natives3-node-<version>-<os>-<arch>.tar.gz`。旧 `ghcr.io/rsjwy/natives3-bridge` 包仅作为历史版本保留，新 workflow 不再更新它。
+
+每个多架构 tag 指向 OCI image index。除 amd64/arm64 的可运行 manifest 外，BuildKit 还会为每个平台发布最小 provenance attestation；GHCR 可能把这些子 manifest/attestation digest 显示为 untagged，这是正常的索引结构，并非重复发布的镜像。workflow 显式使用 `provenance: mode=min`、`sbom: false`，避免 Action 默认值变化影响产物。
 
 手动运行 `Release` workflow 时可以输入发布 tag。若 tag 不存在，workflow 会基于当前构建提交创建该 tag；如需指定源码，可填写 `source_ref`。
 

@@ -25,6 +25,19 @@ require_text docker-compose.example.yml 'target: panel'
 require_text docker-compose.example.yml 'target: node'
 require_text docker-compose.example.yml 'test: ["CMD", "/usr/local/bin/panel", "-check-config"'
 require_text docker-compose.example.yml 'test: ["CMD", "/usr/local/bin/node", "-check-config"'
+require_text .github/workflows/release.yml 'component: [panel, node]'
+require_text .github/workflows/release.yml 'target: ${{ matrix.component }}'
+require_text .github/workflows/release.yml '/natives3-${{ matrix.component }}:${{ needs.prepare.outputs.docker_tag }}'
+require_text .github/workflows/release.yml 'cache-from: type=gha,scope=natives3-${{ matrix.component }}'
+require_text .github/workflows/release.yml 'cache-to: type=gha,mode=max,scope=natives3-${{ matrix.component }}'
+require_text .github/workflows/release.yml 'provenance: mode=min'
+require_text .github/workflows/release.yml 'sbom: false'
+require_text .github/workflows/release.yml 'needs: [prepare, artifacts, images]'
+
+if grep -Fq 'cmd/natives3bridge' .github/workflows/release.yml; then
+	printf 'distribution contract failed: release workflow still builds cmd/natives3bridge\n' >&2
+	exit 1
+fi
 
 node_build_stage="$(awk '/^FROM go-base AS node-build$/{in_stage=1} in_stage{print} in_stage && /^FROM / && $0 !~ /AS node-build$/{exit}' Dockerfile)"
 if grep -Eq -- '--from=web|cmd/panel' <<<"$node_build_stage"; then
