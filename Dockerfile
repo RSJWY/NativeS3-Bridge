@@ -17,18 +17,22 @@ RUN npm ci
 COPY pkg/webadmin/ui/ ./
 RUN APP_VERSION="${APP_VERSION}" npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.21-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.21-alpine AS go-base
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-COPY --from=web /src/pkg/webadmin/ui/dist ./pkg/webadmin/ui/dist
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG APP_VERSION=dev
+
+FROM go-base AS panel-build
+COPY --from=web /src/pkg/webadmin/ui/dist ./pkg/webadmin/ui/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-  go build -trimpath -ldflags="-s -w -X main.version=${APP_VERSION}" -o /out/panel ./cmd/panel \
-  && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+  go build -trimpath -ldflags="-s -w -X main.version=${APP_VERSION}" -o /out/panel ./cmd/panel
+
+FROM go-base AS node-build
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
   go build -trimpath -ldflags="-s -w -X main.version=${APP_VERSION}" -o /out/node ./cmd/node
 
 # --- panel image: management UI/REST (9001) + node control-plane listener (9443).
@@ -38,7 +42,7 @@ RUN apk add --no-cache ca-certificates \
   && addgroup -S -g 10001 natives3 \
   && adduser -S -D -H -u 10001 -G natives3 natives3
 WORKDIR /app
-COPY --from=build /out/panel /usr/local/bin/panel
+COPY --from=panel-build /out/panel /usr/local/bin/panel
 COPY configs/panel.example.yaml /app/configs/
 RUN mkdir -p /app/configs /data \
   && chown -R natives3:natives3 /app/configs /data
@@ -55,7 +59,7 @@ RUN apk add --no-cache ca-certificates \
   && addgroup -S -g 10001 natives3 \
   && adduser -S -D -H -u 10001 -G natives3 natives3
 WORKDIR /app
-COPY --from=build /out/node /usr/local/bin/node
+COPY --from=node-build /out/node /usr/local/bin/node
 COPY configs/node.example.yaml /app/configs/
 RUN mkdir -p /app/configs /data \
   && chown -R natives3:natives3 /app/configs /data
