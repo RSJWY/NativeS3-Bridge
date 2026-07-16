@@ -575,3 +575,36 @@ Implemented rotating file logging with admin log viewer and single-bucket storag
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: Panel Node Docker 启动验证
+
+**Date**: 2026-07-16
+**Task**: Panel Node Docker 启动验证
+**Branch**: `07-13-multi-node-mtls-control-plane`
+
+### Summary
+
+真实构建 panel/node Docker targets 并启动双容器；发现首次注册未加载 panel.ca_file，SSL_CERT_FILE workaround 后 mTLS 在线；记录 panel /healthz 回退 SPA；临时资源已清理。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ca3ece5` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
