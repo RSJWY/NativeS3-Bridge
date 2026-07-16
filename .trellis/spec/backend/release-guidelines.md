@@ -74,4 +74,62 @@ jobs:
     strategy:
       matrix:
         component: [panel, node]
+
+## Scenario: Docker First-Registration TLS Smoke
+
+### 1. Scope / Trigger
+
+- Trigger: Docker/Compose smoke tests or changes to node first-boot registration.
+- Goal: verify that a fresh node can validate the panel server certificate before it has a client certificate, then switch to mTLS for the agent WebSocket.
+
+### 2. Signatures
+
+- Node config: `panel.register_url`, `panel.agent_url`, `panel.ca_file`, `panel.cert_file`, and `panel.key_file`.
+- Registration request: `POST panel.register_url` with `{node_id, token, csr}` over server TLS.
+
+### 3. Contracts
+
+- The first-registration HTTP client MUST load the CA certificate from `panel.ca_file`; relying only on the container system trust store is incorrect for a private panel CA.
+- After registration, the node MUST persist the issued certificate and CA, then use the same CA for mTLS WebSocket server verification.
+- A Docker smoke test MUST run once with the normal config (no hidden trust-store workaround) and fail if registration reports `x509: certificate signed by unknown authority`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Valid private CA at `panel.ca_file` | Registration succeeds and panel marks node online |
+| CA omitted/unreadable | Registration fails closed with a certificate verification error; node continues S3 only |
+| Registration succeeds | Client cert/key and CA are persisted under the node data volume |
+| Agent cert invalid/revoked | mTLS connection is rejected and node retries without stopping S3 |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a fresh container registers against a panel signed by the test intermediate CA using only `panel.ca_file`.
+- Base: setting `SSL_CERT_FILE` can diagnose the problem, but is not an acceptable replacement for loading the configured CA in application code.
+- Bad: disabling TLS verification or permanently adding the panel CA through an undocumented image-specific trust-store mutation.
+
+### 6. Tests Required
+
+- Build both Docker targets.
+- Start panel and node with an isolated network and generated private CA.
+- Assert normal-config first registration succeeds without `SSL_CERT_FILE` or `InsecureSkipVerify`.
+- Assert panel node status becomes `online=true` and heartbeat updates.
+- Assert node exposes only S3 port 9000 and panel exposes only admin/control ports 9001/9443.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+client := &http.Client{Timeout: timeout}
+// The private panel CA in panel.ca_file is never loaded.
+```
+
+#### Correct
+
+```go
+pool := x509.NewCertPool()
+pool.AppendCertsFromPEM(os.ReadFile(cfg.CAFile))
+client.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
+```
 ```
