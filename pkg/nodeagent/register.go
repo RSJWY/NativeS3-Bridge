@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -147,7 +148,21 @@ func Register(id Identity, params RegisterParams) error {
 		if timeout <= 0 {
 			timeout = 15 * time.Second
 		}
-		client = &http.Client{Timeout: timeout}
+		caPEM, err := os.ReadFile(id.CAFile)
+		if err != nil {
+			return fmt.Errorf("read panel CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return fmt.Errorf("panel CA file contains no certificates")
+		}
+		client = &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{
+				RootCAs:    pool,
+				MinVersion: tls.VersionTLS12,
+			}},
+		}
 	}
 
 	req, err := http.NewRequest(http.MethodPost, params.RegisterURL, bytes.NewReader(body))
