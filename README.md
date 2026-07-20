@@ -120,7 +120,7 @@ key:    images/cover.jpg
 
 ## 快速开始
 
-> **当前发布状态：** panel/node 拆分代码目前只存在于 `07-13-multi-node-mtls-control-plane` 分支，尚未进入远端 `main`。现有远端 tag 早于本次拆分，`natives3-panel` / `natives3-node` GHCR 包尚未正式发布。请从当前 checkout 本地构建，不要使用尚不存在的 `latest` 镜像。
+> 容器部署可以直接使用 GHCR 已发布的 `natives3-panel` 与 `natives3-node` 镜像；无源码快速安装见 [Docker 部署](#docker-部署)。
 
 ### 1. 环境要求
 
@@ -160,7 +160,7 @@ cp -n configs/node.example.yaml configs/node.yaml
 - `configs/panel.yaml`：管理监听、控制面 TLS、在线中间 CA、主密钥、panel 数据库和管理员认证。
 - `configs/node.yaml`：S3 listener、对象目录、node 本地数据库、panel URL、逻辑节点 ID 和 node mTLS 文件。
 
-示例里的 `/data/...` 是容器内路径。本机直接运行二进制时，应改成当前用户可读写的绝对路径。完整可复制的本地镜像、PKI 和挂载流程见 [Docker 部署](#docker-部署)。
+示例里的 `/data/...` 是容器内路径。本机直接运行二进制时，应改成当前用户可读写的绝对路径。容器镜像、PKI 和挂载流程见 [Docker 部署](#docker-部署)。
 
 ### 4. 按顺序启动
 
@@ -626,197 +626,29 @@ Hook manager 从数据库的 `hook_configs` 表加载启用的 Webhook 配置。
 
 ## Docker 部署
 
-当前 panel/node 镜像尚未正式发布。以下流程使用 `docker-compose.example.yml` 从当前 checkout 构建本地镜像 `natives3-panel:local` 与 `natives3-node:local`，不会拉取 GHCR `latest`。
-
-### 1. 准备配置、主密钥和本地验证 PKI
-
-下面生成的是本地验证用短期自签 CA。生产环境应使用离线 root + 在线 intermediate 的完整流程，并按 [多节点运维文档](docs/multi-node-operations.md) 分离备份。
+panel 与 node 可以分别在不同主机上一键安装，直接拉取 GHCR 的 `latest` 镜像，无需克隆仓库：
 
 ```bash
-cp -n configs/panel.example.yaml configs/panel.yaml
-cp -n configs/node.example.yaml configs/node.yaml
-mkdir -p panel-data/pki panel-data/secrets node-data/pki node-data/objects
+# Panel 主机：HOST 必须是 node 实际连接的域名或 IPv4
+curl -fsSL https://raw.githubusercontent.com/RSJWY/NativeS3-Bridge/main/scripts/install-panel.sh \
+  | sudo bash -s -- --panel-host panel.example.com
 
-# panel 加密 S3 secret 的原始 32 字节主密钥
-openssl rand -out panel-data/secrets/master.key 32
-
-# 本地验证用在线 CA
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-  -out panel-data/pki/intermediate-ca.key
-openssl req -x509 -new -sha256 -days 30 \
-  -key panel-data/pki/intermediate-ca.key \
-  -subj '/CN=NativeS3 Local Intermediate CA' \
-  -addext 'basicConstraints=critical,CA:TRUE' \
-  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
-  -out panel-data/pki/intermediate-ca.crt
-
-# panel 9443 agent listener 服务端证书；SAN=panel 对应 Compose 服务名
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-  -out panel-data/pki/panel-server.key
-openssl req -new \
-  -key panel-data/pki/panel-server.key \
-  -subj '/CN=panel' \
-  -addext 'subjectAltName=DNS:panel,DNS:localhost,IP:127.0.0.1' \
-  -out panel-data/pki/panel-server.csr
-printf '%s\n' \
-  'basicConstraints=CA:FALSE' \
-  'keyUsage=digitalSignature,keyEncipherment' \
-  'extendedKeyUsage=serverAuth' \
-  'subjectAltName=DNS:panel,DNS:localhost,IP:127.0.0.1' \
-  > panel-data/pki/panel-server.ext
-openssl x509 -req -sha256 -days 30 \
-  -in panel-data/pki/panel-server.csr \
-  -CA panel-data/pki/intermediate-ca.crt \
-  -CAkey panel-data/pki/intermediate-ca.key \
-  -CAcreateserial \
-  -extfile panel-data/pki/panel-server.ext \
-  -out panel-data/pki/panel-server.crt
-
-# node 用该 CA 验证 panel 服务端证书
-cp panel-data/pki/intermediate-ca.crt node-data/pki/panel-ca.crt
-
-# 写入可用于首次登录的随机密码和 session secret
-ADMIN_PASSWORD="$(openssl rand -hex 16)"
-SESSION_SECRET="$(openssl rand -hex 32)"
-sed -i "s|^  admin_bootstrap_password:.*|  admin_bootstrap_password: \"$ADMIN_PASSWORD\"|" configs/panel.yaml
-sed -i "s|^  session_secret:.*|  session_secret: \"$SESSION_SECRET\"|" configs/panel.yaml
-printf 'save this bootstrap admin password: %s\n' "$ADMIN_PASSWORD"
-
-# Compose 内部通过服务名 panel 连接控制面
-sed -i 's|https://panel.example.com:9443/register|https://panel:9443/register|' configs/node.yaml
-sed -i 's|wss://panel.example.com:9443/agent|wss://panel:9443/agent|' configs/node.yaml
-
-# 镜像默认 UID/GID 为 10001:10001
-sudo chown -R 10001:10001 panel-data node-data
+# Node 主机：先在 panel 创建逻辑 node 和一次性注册令牌，并复制 panel 公共 CA
+curl -fsSL https://raw.githubusercontent.com/RSJWY/NativeS3-Bridge/main/scripts/install-node.sh \
+  | sudo bash -s -- \
+      --panel-url https://panel.example.com:9443 \
+      --node-id 1 \
+      --registration-token '一次性令牌' \
+      --ca-file /root/panel-ca.crt
 ```
 
-不要删除或丢失终端输出的 bootstrap password。panel 首次启动还会在日志中输出 bcrypt `password_hash`；完成验证后应把 hash 写回 `configs/panel.yaml`，并清空 `admin_bootstrap_password`。
+默认安全边界：panel 管理端口只映射到 `127.0.0.1:9001`，控制面发布 `9443`；node 只发布 S3 端口 `9000`。两端各自使用独立 SQLite 和宿主机持久化目录。
 
-### 2. 构建并只启动 panel
-
-```bash
-docker compose -f docker-compose.example.yml build panel node
-docker compose -f docker-compose.example.yml up -d panel
-docker compose -f docker-compose.example.yml ps panel
-docker compose -f docker-compose.example.yml logs panel
-```
-
-此时不要启动 node。panel 必须先可登录，并创建逻辑节点和一次性注册令牌。
-
-### 3. 创建逻辑节点和注册令牌
-
-保持在上一步的同一 shell 中，使用 `ADMIN_PASSWORD` 登录并创建节点；如果换了 shell，请先把保存的密码重新赋给该变量。示例假设新节点 ID 为 `1`，以实际响应为准：
-
-```bash
-curl -c /tmp/natives3-panel.cookie \
-  -H 'Content-Type: application/json' \
-  -X POST http://127.0.0.1:9001/api/admin/login \
-  -d "{\"password\":\"$ADMIN_PASSWORD\"}"
-
-curl -b /tmp/natives3-panel.cookie \
-  -H 'Content-Type: application/json' \
-  -X POST http://127.0.0.1:9001/api/admin/nodes \
-  -d '{"display_name":"node-1"}'
-
-curl -b /tmp/natives3-panel.cookie \
-  -X POST http://127.0.0.1:9001/api/admin/nodes/1/tokens
-```
-
-最后一个响应中的 `token` 只显示一次且默认 10 分钟有效。把实际 `node_id` 和 `token` 写入 `configs/node.yaml`：
-
-```yaml
-panel:
-  node_id: 1
-  register_url: "https://panel:9443/register"
-  agent_url: "wss://panel:9443/agent"
-  registration_token: "把一次性令牌粘贴到这里"
-  cert_file: "/data/pki/node.crt"
-  key_file: "/data/pki/node.key"
-  ca_file: "/data/pki/panel-ca.crt"
-```
-
-### 4. 启动 node 并检查注册
-
-```bash
-docker compose -f docker-compose.example.yml up -d node
-docker compose -f docker-compose.example.yml ps panel node
-docker compose -f docker-compose.example.yml logs node
-```
-
-注册成功后，`node-data/pki/` 中应出现 node 私钥和客户端证书，并可通过以下请求确认节点 `online: true`：
-
-```bash
-curl -b /tmp/natives3-panel.cookie http://127.0.0.1:9001/api/admin/nodes
-```
-
-随后清空宿主机 `configs/node.yaml` 中的 `registration_token`；已经签发的证书会用于后续重启。
-
-两个容器内的配置路径分别为 `/app/configs/panel.yaml` 和 `/app/configs/node.yaml`。宿主机 `panel-data` 挂载为 panel 的 `/data`，`node-data` 挂载为 node 的 `/data`。
-
-### Compose 数据库用法
-
-SQLite 是默认配置，panel 与 node 各有自己的数据库：
-
-```yaml
-database:
-  driver: "sqlite"
-  dsn: "/data/panel.db"
-```
-
-- 对象字节写入 `./node-data/objects`，node 本地数据库位于 `./node-data/natives3.db`。
-- panel SQLite 数据库位于 `./panel-data/panel.db`。
-- `./panel-data/secrets/master.key` 必须与 panel 数据库分开备份；`panel-data/pki`、`node-data/pki` 和对象目录也属于恢复集合。
-- 启动迁移前会自动做 SQLite 完整性检查；已有业务表时会生成
-  同目录的 `.pre-upgrade-*.bak` 备份。
-- 升级前仍建议整体备份 `./panel-data` 和 `./node-data`。
-
-MySQL profile 只提供一个可选数据库容器，不会自动改写应用配置。若 panel 使用 MySQL，先修改 `configs/panel.yaml`：
-
-```yaml
-database:
-  driver: "mysql"
-  dsn: "natives3:change-me-mysql-password@tcp(mysql:3306)/natives3panel?charset=utf8mb4&parseTime=True&loc=Local"
-```
-
-然后启动 MySQL profile：
-
-```bash
-docker compose -f docker-compose.example.yml --profile mysql up -d mysql panel
-```
-
-- DSN 里的 `mysql` 是 compose 文件中的服务名。
-- `change-me-mysql-password` 必须和 `docker-compose.example.yml` 中
-  `MYSQL_PASSWORD` 一致。
-- 应用不会在启动时复制 MySQL 表；生产升级前用 MySQL 原生一致备份、
-  托管快照或物理备份。
-
-PostgreSQL 用法类似。先修改 `configs/panel.yaml`：
-
-```yaml
-database:
-  driver: "postgres"
-  dsn: "host=postgres user=natives3 password=change-me-postgres-password dbname=natives3panel port=5432 sslmode=disable"
-```
-
-然后启动 PostgreSQL profile：
-
-```bash
-docker compose -f docker-compose.example.yml --profile postgres up -d postgres panel
-```
-
-- DSN 里的 `postgres` 是 compose 文件中的服务名。
-- `change-me-postgres-password` 必须和 `docker-compose.example.yml` 中
-  `POSTGRES_PASSWORD` 一致。
-- 应用不会在启动时复制 PostgreSQL 表；生产升级前用 PostgreSQL 原生一致
-  备份、托管快照、物理备份或 PITR。
-
-这些 profile 默认只替换 panel 数据库。node 仍使用 `configs/node.yaml` 中的独立 DSN；如需让 node 使用远端数据库，必须单独修改 node 配置。无论数据库驱动为何，示例 node 的 `storage.data_root` 都是 `/data/objects`，对象文件不进入关系数据库。
+完整的一键参数、生成文件、panel 到 node 的注册交接、升级/卸载、手动 Compose 部署、外部数据库与备份说明见 [Panel/Node Docker 独立部署文档](docs/docker-deployment.md)。仓库可审阅模板为 [`docker-compose.panel.yml`](docker-compose.panel.yml) 和 [`docker-compose.node.yml`](docker-compose.node.yml)。生产 PKI、恢复演练和证书运维见 [多节点运维文档](docs/multi-node-operations.md)。
 
 ## 发布流程
 
-> **尚未正式发布：** 当前远端 tag 都早于 panel/node 拆分，拆分分支也尚未合入远端 `main`。因此下面描述的是仓库中 release workflow 的目标产物合同，不代表 GHCR 包或 Release 归档现在已经存在。正式发布前请继续使用当前 checkout 本地构建。
-
-代码进入发布分支并创建新的正式 tag 后，GitHub Actions release workflow 计划执行：
+创建正式 tag 后，GitHub Actions release workflow 会执行：
 
 - `npm ci && npm run build` 构建 Web 管理后台。
 - Go 1.21 `go vet ./...`、`go test ./...` 和 `go test -race ./...`。
@@ -824,14 +656,14 @@ docker compose -f docker-compose.example.yml --profile postgres up -d postgres p
 - 每个归档包含对应示例配置与 `docs/multi-node-operations.md`，并上传统一的 `checksums.txt`。
 - 并行构建并推送 panel/node 的 amd64/arm64 多架构镜像到 GHCR。
 
-正式发布后的目标镜像地址为：
+镜像地址为：
 
 ```text
 ghcr.io/rsjwy/natives3-panel:<tag>
 ghcr.io/rsjwy/natives3-node:<tag>
 ```
 
-正式发布后，GitHub Release 归档名为 `natives3-panel-<version>-<os>-<arch>.tar.gz` 和 `natives3-node-<version>-<os>-<arch>.tar.gz`。在对应 tag、Release 和 GHCR package 页面均可访问前，不要把这些地址用于部署。
+GitHub Release 归档名为 `natives3-panel-<version>-<os>-<arch>.tar.gz` 和 `natives3-node-<version>-<os>-<arch>.tar.gz`。快速部署默认使用 `latest`；需要可重复部署和可控回滚时应固定正式版本 tag。
 
 每个多架构 tag 指向 OCI image index。除 amd64/arm64 的可运行 manifest 外，BuildKit 还会为每个平台发布最小 provenance attestation；GHCR 可能把这些子 manifest/attestation digest 显示为 untagged，这是正常的索引结构，并非重复发布的镜像。workflow 显式使用 `provenance: mode=min`、`sbom: false`，避免 Action 默认值变化影响产物。
 

@@ -608,3 +608,36 @@ Implemented rotating file logging with admin log viewer and single-bucket storag
 ### Next Steps
 
 - None - task complete
+
+
+## Session 19: 拆分 Panel 与 Node Docker 部署
+
+**Date**: 2026-07-20
+**Task**: 拆分 Panel 与 Node Docker 部署
+**Branch**: `07-13-multi-node-mtls-control-plane`
+
+### Summary
+
+拆分 Panel/Node Compose，新增无需克隆仓库的独立安装脚本与手动部署文档，精简 README，并改用 GHCR 镜像。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d116fb0` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
