@@ -10,6 +10,10 @@ node_id=""
 registration_token=""
 ca_file=""
 tag="latest"
+db_driver="sqlite"
+db_dsn=""
+db_driver_set=false
+db_dsn_set=false
 force=false
 no_start=false
 
@@ -30,11 +34,16 @@ Required:
 Options:
   --install-dir PATH           Installation directory (default: /opt/natives3-node)
   --tag TAG                    GHCR image tag (default: latest)
+  --db-driver DRIVER           Database driver: sqlite, mysql, or postgres (default: sqlite)
+  --db-dsn DSN                 Database DSN. Default: /data/natives3.db (sqlite). For
+                               mysql/postgres pass the full connection string. The
+                               value is written into node.yaml and never echoed.
   --force                      Replace an existing installation directory
   --no-start                   Generate and validate files without pulling or starting
   -h, --help                   Show this help
 
 Missing required values are prompted for only when attached to a terminal.
+Database options are also prompted; sqlite defaults to /data/natives3.db.
 USAGE
 }
 
@@ -62,6 +71,25 @@ validate_install_dir() {
   esac
 }
 
+validate_db_driver() {
+  case "$1" in
+    sqlite|mysql|postgres) ;;
+    *) die "invalid --db-driver: $1 (expected sqlite, mysql, or postgres)" ;;
+  esac
+}
+
+validate_db_dsn() {
+  local driver="$1" dsn="$2"
+  [[ -n "$dsn" ]] || die "--db-dsn may not be empty"
+  [[ "$dsn" != *$'\n'* && "$dsn" != *$'\r'* ]] || die "--db-dsn may not contain newlines"
+  if [[ "$driver" == "sqlite" ]]; then
+    case "$dsn" in
+      :memory:|/*|file:*) ;;
+      *) die "--db-dsn for sqlite must be an absolute path, a 'file:' URI, or ':memory:' (got: $dsn)" ;;
+    esac
+  fi
+}
+
 is_ipv4() {
   local value="$1" part
   local -a parts
@@ -75,7 +103,6 @@ is_ipv4() {
 
 is_dns_name() {
   local value="$1" label
-  local -a labels
   [[ ${#value} -le 253 && "$value" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
   [[ "$value" != .* && "$value" != *. && "$value" != *..* ]] || return 1
   IFS='.' read -r -a labels <<<"$value"
@@ -123,6 +150,18 @@ while (($# > 0)); do
       tag="$2"
       shift 2
       ;;
+    --db-driver)
+      (($# >= 2)) || die "--db-driver requires a value"
+      db_driver="$2"
+      db_driver_set=true
+      shift 2
+      ;;
+    --db-dsn)
+      (($# >= 2)) || die "--db-dsn requires a value"
+      db_dsn="$2"
+      db_dsn_set=true
+      shift 2
+      ;;
     --force)
       force=true
       shift
@@ -147,6 +186,19 @@ if [[ -t 0 ]]; then
   [[ -n "$registration_token" ]] || read -r -s -p "Single-use registration token: " registration_token
   [[ -n "$registration_token" ]] && printf '\n'
   [[ -n "$ca_file" ]] || read -r -p "Path to the public panel CA certificate: " ca_file
+  if [[ "$db_driver_set" != true ]]; then
+    read -r -p "Database driver [sqlite/mysql/postgres] (default sqlite): " db_driver
+    db_driver="${db_driver:-sqlite}"
+  fi
+  if [[ "$db_dsn_set" != true ]]; then
+    if [[ "$db_driver" == "sqlite" ]]; then
+      read -r -p "Database DSN (default /data/natives3.db): " db_dsn
+      db_dsn="${db_dsn:-/data/natives3.db}"
+    else
+      read -r -s -p "Database DSN for $db_driver (input hidden, press Enter when done): " db_dsn
+      printf '\n'
+    fi
+  fi
 fi
 
 [[ -n "$panel_url" ]] || die "--panel-url is required in non-interactive mode"
@@ -175,6 +227,16 @@ fi
 
 validate_install_dir "$install_dir"
 validate_tag "$tag"
+# 非交互或交互未输入时的兜底：sqlite 给默认路径，非 sqlite 必须显式提供
+if [[ "$db_driver" != "sqlite" && -z "$db_dsn" ]]; then
+  die "--db-dsn is required for $db_driver"
+fi
+if [[ "$db_driver" == "sqlite" && -z "$db_dsn" ]]; then
+  db_dsn="/data/natives3.db"
+fi
+validate_db_driver "$db_driver"
+validate_db_dsn "$db_driver" "$db_dsn"
+quoted_db_dsn="$(yaml_quote "$db_dsn")"
 [[ "$(id -u)" -eq 0 ]] || die "run this installer as root (for example with sudo)"
 require_command openssl
 require_command docker
@@ -212,8 +274,8 @@ storage:
   metadata_suffix: ".s3meta"
 
 database:
-  driver: "sqlite"
-  dsn: "/data/natives3.db"
+  driver: "$db_driver"
+  dsn: $quoted_db_dsn
 
 region: "us-east-1"
 log_level: "info"
@@ -262,9 +324,18 @@ fi
 
 cat <<EOF
 NativeS3 node files were created in $install_dir.
+Database driver:      $db_driver
 Panel registration URL: $register_url
 S3 endpoint:           http://$(hostname):9000
 EOF
+if [[ "$db_driver" != "sqlite" ]]; then
+  cat <<EOF
+
+Note: node is configured for $db_driver. Ensure the container can reach the
+database host (use a reachable host/IP, not localhost, unless using host
+networking). The DSN is in $install_dir/node.yaml.
+EOF
+fi
 if [[ "$no_start" == true ]]; then
   printf '\nFiles were generated but the image was not pulled and the service was not started.\n'
 else
