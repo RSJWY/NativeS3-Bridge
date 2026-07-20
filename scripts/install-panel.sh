@@ -27,10 +27,12 @@ Required:
 Options:
   --install-dir PATH      Installation directory (default: /opt/natives3-panel)
   --tag TAG               GHCR image tag (default: latest)
-  --db-driver DRIVER      Database driver: sqlite, mysql, or postgres (default: sqlite)
+  --db-driver DRIVER      Database driver: sqlite, mysql (also MariaDB), or postgres (default: sqlite)
   --db-dsn DSN            Database DSN. Default: /data/panel.db (sqlite). For
-                          mysql/postgres pass the full connection string. The
-                          value is written into panel.yaml and never echoed.
+                          mysql/postgres pass the full connection string, or in
+                          an interactive terminal leave it unset to be prompted
+                          for host/port/user/password/dbname. Written into
+                          panel.yaml and never echoed.
   --force                 Replace an existing installation directory
   --no-start              Generate and validate files without pulling or starting
   -h, --help              Show this help
@@ -113,6 +115,83 @@ yaml_quote() {
   printf "'%s'" "$value"
 }
 
+url_encode() {
+  # 百分号编码：把 mysql/postgres DSN 里的 user/password 编码成安全字符。
+  # 仅按字节处理，假设凭据为 ASCII（DSN 凭据的常规情况）。
+  local s="$1" i c out=""
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:$i:1}"
+    case "$c" in
+      [A-Za-z0-9.~-]) out+="$c" ;;
+      *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+validate_db_host() {
+  is_ipv4 "$1" || is_dns_name "$1" || die "database host must be a valid IPv4 or DNS name: $1"
+}
+
+validate_db_port() {
+  [[ "$1" =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)) || die "invalid database port: $1"
+}
+
+validate_db_name() {
+  [[ "$1" =~ ^[A-Za-z0-9_]+$ ]] || die "database name may only contain letters, digits, and underscores: $1"
+}
+
+validate_pg_sslmode() {
+  case "$1" in
+    disable|require|prefer|verify-ca|verify-full) ;;
+    *) die "invalid sslmode: $1 (expected disable/require/prefer/verify-ca/verify-full)" ;;
+  esac
+}
+
+# prompt_external_dsn 交互式逐项收集外部数据库连接信息并拼出 DSN，直接写入全局 db_dsn。
+# 仅在交互终端、db_driver 非 sqlite 且未通过 --db-dsn 显式提供时调用。
+prompt_external_dsn() {
+  local driver="$1" default_dbname="$2"
+  local host port user pass dbname sslmode
+  case "$driver" in
+    mysql)
+      read -r -p "Database host (default 127.0.0.1): " host
+      host="${host:-127.0.0.1}"
+      read -r -p "Database port (default 3306): " port
+      port="${port:-3306}"
+      read -r -p "Database name (default $default_dbname): " dbname
+      dbname="${dbname:-$default_dbname}"
+      read -r -p "Database user: " user
+      [[ -n "$user" ]] || die "database user is required"
+      read -r -s -p "Database password (input hidden): " pass
+      printf '\n'
+      validate_db_host "$host"
+      validate_db_port "$port"
+      validate_db_name "$dbname"
+      db_dsn="$(url_encode "$user"):$(url_encode "$pass")@tcp($host:$port)/$dbname?parseTime=true&charset=utf8mb4"
+      ;;
+    postgres)
+      read -r -p "Database host (default 127.0.0.1): " host
+      host="${host:-127.0.0.1}"
+      read -r -p "Database port (default 5432): " port
+      port="${port:-5432}"
+      read -r -p "Database name (default $default_dbname): " dbname
+      dbname="${dbname:-$default_dbname}"
+      read -r -p "Database user: " user
+      [[ -n "$user" ]] || die "database user is required"
+      read -r -s -p "Database password (input hidden): " pass
+      printf '\n'
+      read -r -p "SSL mode [disable/require/verify-ca/verify-full] (default disable): " sslmode
+      sslmode="${sslmode:-disable}"
+      validate_db_host "$host"
+      validate_db_port "$port"
+      validate_db_name "$dbname"
+      validate_pg_sslmode "$sslmode"
+      db_dsn="postgres://$(url_encode "$user"):$(url_encode "$pass")@$host:$port/$dbname?sslmode=$sslmode"
+      ;;
+  esac
+}
+
 while (($# > 0)); do
   case "$1" in
     --panel-host)
@@ -177,8 +256,7 @@ if [[ -t 0 && "$db_dsn_set" != true ]]; then
     read -r -p "Database DSN (default /data/panel.db): " db_dsn
     db_dsn="${db_dsn:-/data/panel.db}"
   else
-    read -r -s -p "Database DSN for $db_driver (input hidden, press Enter when done): " db_dsn
-    printf '\n'
+    prompt_external_dsn "$db_driver" "panel"
   fi
 fi
 

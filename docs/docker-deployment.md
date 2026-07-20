@@ -150,8 +150,8 @@ sudo docker compose -f /opt/natives3-node/docker-compose.yml \
 | `--panel-host HOST` | 必填；node 连接 9443 时使用的 DNS 名或 IPv4，写入证书 SAN。 |
 | `--install-dir PATH` | 安装目录，默认 `/opt/natives3-panel`；必须是安全的绝对路径。 |
 | `--tag TAG` | 镜像 tag，默认 `latest`；生产环境可固定到发布版本。 |
-| `--db-driver DRIVER` | 数据库驱动 `sqlite`/`mysql`/`postgres`，默认 `sqlite`。 |
-| `--db-dsn DSN` | 数据库 DSN。sqlite 默认 `/data/panel.db`；mysql/postgres 传完整连接串，写入 `panel.yaml` 且不被脚本回显。 |
+| `--db-driver DRIVER` | 数据库驱动 `sqlite`/`mysql`/`postgres`，默认 `sqlite`；`mysql` 同时兼容 MariaDB。 |
+| `--db-dsn DSN` | 数据库 DSN。sqlite 默认 `/data/panel.db`；mysql/postgres 传完整连接串。交互终端下未指定时改为逐项询问 host/port/user/password/dbname（postgres 还问 sslmode），密码静默不回显。写入 `panel.yaml` 且不被脚本回显。 |
 | `--force` | 删除并重建已存在的安装目录。会破坏该目录内的数据，使用前必须备份。 |
 | `--no-start` | 只生成文件并执行 `docker compose config`，不拉取镜像、不启动容器。 |
 
@@ -165,24 +165,31 @@ sudo docker compose -f /opt/natives3-node/docker-compose.yml \
 | `--ca-file PATH` | 必填；可读取的 PEM panel 公共 CA 文件。 |
 | `--install-dir PATH` | 安装目录，默认 `/opt/natives3-node`。 |
 | `--tag TAG` | 镜像 tag，默认 `latest`。 |
-| `--db-driver DRIVER` | 数据库驱动 `sqlite`/`mysql`/`postgres`，默认 `sqlite`。 |
-| `--db-dsn DSN` | 数据库 DSN。sqlite 默认 `/data/natives3.db`；mysql/postgres 传完整连接串，写入 `node.yaml` 且不被脚本回显。 |
+| `--db-driver DRIVER` | 数据库驱动 `sqlite`/`mysql`/`postgres`，默认 `sqlite`；`mysql` 同时兼容 MariaDB。 |
+| `--db-dsn DSN` | 数据库 DSN。sqlite 默认 `/data/natives3.db`；mysql/postgres 传完整连接串。交互终端下未指定时改为逐项询问 host/port/user/password/dbname（postgres 还问 sslmode），密码静默不回显。写入 `node.yaml` 且不被脚本回显。 |
 | `--force` | 删除并重建已存在的安装目录。不会自动迁移旧对象或数据库。 |
 | `--no-start` | 只生成和校验文件，不拉取镜像、不启动容器。 |
 
-缺少必填参数时，脚本只在交互终端中提示输入；通过 `curl | bash` 或 CI 非交互执行时会明确报错。脚本默认拒绝覆盖已存在目录。交互终端下，未通过命令行指定的数据库选项也会被询问：sqlite 直接回车用默认路径，`mysql`/`postgres` 会静默读取 DSN（含密码不回显）；非交互模式下未指定则回退到 sqlite 默认路径，但 `mysql`/`postgres` 必须显式提供 `--db-dsn`，否则报错。
+缺少必填参数时，脚本只在交互终端中提示输入；通过 `curl | bash` 或 CI 非交互执行时会明确报错。脚本默认拒绝覆盖已存在目录。交互终端下，未通过命令行指定的数据库选项也会被询问：sqlite 直接回车用默认路径，`mysql`/`postgres` 改为逐项询问 host/port/user/password/dbname（postgres 额外询问 sslmode），密码静默不回显，脚本自动拼出 DSN；非交互模式下未指定则回退到 sqlite 默认路径，但 `mysql`/`postgres` 必须显式提供 `--db-dsn`，否则报错。
 
-### 使用外部 MySQL/PostgreSQL
+### 使用外部 MySQL/MariaDB/PostgreSQL
 
-默认使用容器内 SQLite 文件。如需指向外部数据库，在安装脚本中指定驱动与连接串：
+默认使用容器内 SQLite 文件。`mysql` 驱动同时兼容 MariaDB。如需指向外部数据库，推荐用交互式安装，逐项输入连接信息，脚本自动拼出 DSN（密码静默不回显）：
+
+```bash
+sudo ./scripts/install-panel.sh --panel-host panel.example.com
+# 选 mysql 或 postgres 后，依次输入 host、port、dbname、user、password（postgres 还问 sslmode）
+```
+
+非交互场景（CI、`curl | bash`）或想直接传完整连接串时，用 `--db-driver`/`--db-dsn`：
 
 ```bash
 # panel -> PostgreSQL
 sudo ./scripts/install-panel.sh --panel-host panel.example.com \
   --db-driver postgres \
-  --db-dsn "host=10.0.0.5 user=panel password=secret dbname=panel sslmode=disable"
+  --db-dsn "postgres://panel:secret@10.0.0.5:5432/panel?sslmode=disable"
 
-# node -> MySQL
+# node -> MySQL/MariaDB
 sudo ./scripts/install-node.sh --panel-url https://panel.example.com:9443 \
   --node-id 1 --registration-token TOKEN --ca-file ./panel-ca.crt \
   --db-driver mysql \

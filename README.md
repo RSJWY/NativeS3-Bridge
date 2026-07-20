@@ -650,12 +650,12 @@ curl -fsSL https://raw.githubusercontent.com/RSJWY/NativeS3-Bridge/main/scripts/
 
 ### 方式二：交互式安装
 
-先下载脚本审阅，再在终端直接运行；未通过命令行给出的参数会逐项提示输入（注册令牌、数据库 DSN 等含密内容静默读取、不回显）。需要配置外部数据库时优先用这种方式。
+先下载脚本审阅，再在终端直接运行；未通过命令行给出的参数会逐项提示输入（注册令牌、数据库密码等含密内容静默读取、不回显）。需要配置外部数据库时优先用这种方式：选 `mysql`/`postgres` 后逐项输入 host、port、库名、用户、密码（postgres 还问 sslmode），脚本自动拼出 DSN，不用手写连接串。`mysql` 驱动同时兼容 MariaDB。
 
 ```bash
 curl -fsSL -o install-panel.sh https://raw.githubusercontent.com/RSJWY/NativeS3-Bridge/main/scripts/install-panel.sh
 sudo bash install-panel.sh
-# 数据库驱动直接回车走 sqlite 默认；输入 mysql/postgres 后静默粘贴 DSN
+# 数据库驱动直接回车走 sqlite 默认；输入 mysql/postgres 后逐项填写连接信息
 ```
 
 Node 同理：下载 `install-node.sh` 后执行 `sudo bash install-node.sh`，按提示填入 panel URL、node ID、注册令牌、CA 文件路径与数据库选项。
