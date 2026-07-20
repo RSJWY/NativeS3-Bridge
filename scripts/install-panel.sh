@@ -7,6 +7,10 @@ readonly image_repository="ghcr.io/rsjwy/natives3-panel"
 install_dir="$default_install_dir"
 panel_host=""
 tag="latest"
+db_driver="sqlite"
+db_dsn=""
+db_driver_set=false
+db_dsn_set=false
 force=false
 no_start=false
 
@@ -23,12 +27,18 @@ Required:
 Options:
   --install-dir PATH      Installation directory (default: /opt/natives3-panel)
   --tag TAG               GHCR image tag (default: latest)
+  --db-driver DRIVER      Database driver: sqlite, mysql, or postgres (default: sqlite)
+  --db-dsn DSN            Database DSN. Default: /data/panel.db (sqlite). For
+                          mysql/postgres pass the full connection string. The
+                          value is written into panel.yaml and never echoed.
   --force                 Replace an existing installation directory
   --no-start              Generate and validate files without pulling or starting
   -h, --help              Show this help
 
-When attached to a terminal, a missing --panel-host is prompted for. In a
-non-interactive pipeline it is an error.
+When attached to a terminal, a missing --panel-host and any unset database
+options are prompted for; sqlite defaults to /data/panel.db. In a
+non-interactive pipeline --panel-host is required and database options fall
+back to sqlite + /data/panel.db unless overridden.
 USAGE
 }
 
@@ -77,6 +87,32 @@ validate_install_dir() {
   esac
 }
 
+validate_db_driver() {
+  case "$1" in
+    sqlite|mysql|postgres) ;;
+    *) die "invalid --db-driver: $1 (expected sqlite, mysql, or postgres)" ;;
+  esac
+}
+
+validate_db_dsn() {
+  local driver="$1" dsn="$2"
+  [[ -n "$dsn" ]] || die "--db-dsn may not be empty"
+  [[ "$dsn" != *$'\n'* && "$dsn" != *$'\r'* ]] || die "--db-dsn may not contain newlines"
+  if [[ "$driver" == "sqlite" ]]; then
+    case "$dsn" in
+      :memory:|/*|file:*) ;;
+      *) die "--db-dsn for sqlite must be an absolute path, a 'file:' URI, or ':memory:' (got: $dsn)" ;;
+    esac
+  fi
+}
+
+yaml_quote() {
+  local value="$1"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "values may not contain newlines"
+  value=${value//\'/\'\'}
+  printf "'%s'" "$value"
+}
+
 while (($# > 0)); do
   case "$1" in
     --panel-host)
@@ -92,6 +128,18 @@ while (($# > 0)); do
     --tag)
       (($# >= 2)) || die "--tag requires a value"
       tag="$2"
+      shift 2
+      ;;
+    --db-driver)
+      (($# >= 2)) || die "--db-driver requires a value"
+      db_driver="$2"
+      db_driver_set=true
+      shift 2
+      ;;
+    --db-dsn)
+      (($# >= 2)) || die "--db-dsn requires a value"
+      db_dsn="$2"
+      db_dsn_set=true
       shift 2
       ;;
     --force)
@@ -120,8 +168,33 @@ if [[ -z "$panel_host" ]]; then
   fi
 fi
 
+if [[ -t 0 && "$db_driver_set" != true ]]; then
+  read -r -p "Database driver [sqlite/mysql/postgres] (default sqlite): " db_driver
+  db_driver="${db_driver:-sqlite}"
+fi
+if [[ -t 0 && "$db_dsn_set" != true ]]; then
+  if [[ "$db_driver" == "sqlite" ]]; then
+    read -r -p "Database DSN (default /data/panel.db): " db_dsn
+    db_dsn="${db_dsn:-/data/panel.db}"
+  else
+    read -r -s -p "Database DSN for $db_driver (input hidden, press Enter when done): " db_dsn
+    printf '\n'
+  fi
+fi
+
+# 非交互或交互未输入时的兜底：sqlite 给默认路径，非 sqlite 必须显式提供
+if [[ "$db_driver" != "sqlite" && -z "$db_dsn" ]]; then
+  die "--db-dsn is required for $db_driver"
+fi
+if [[ "$db_driver" == "sqlite" && -z "$db_dsn" ]]; then
+  db_dsn="/data/panel.db"
+fi
+
 validate_install_dir "$install_dir"
 validate_tag "$tag"
+validate_db_driver "$db_driver"
+validate_db_dsn "$db_driver" "$db_dsn"
+quoted_db_dsn="$(yaml_quote "$db_dsn")"
 if is_ipv4 "$panel_host"; then
   san="IP:$panel_host"
 elif is_dns_name "$panel_host"; then
@@ -198,8 +271,8 @@ pki:
 master_key_file: "/data/secrets/master.key"
 
 database:
-  driver: "sqlite"
-  dsn: "/data/panel.db"
+  driver: "$db_driver"
+  dsn: $quoted_db_dsn
 
 region: "us-east-1"
 log_level: "info"
@@ -262,6 +335,7 @@ fi
 
 cat <<EOF
 NativeS3 panel files were created in $install_dir.
+Database driver:             $db_driver
 
 Bootstrap admin password (save it now): $admin_password
 Admin UI (local host only): http://127.0.0.1:9001/
@@ -271,6 +345,14 @@ Public CA to copy to nodes:  $install_dir/panel-ca.crt
 After first login, follow the deployment guide to replace the bootstrap password
 with its logged bcrypt hash and clear admin_bootstrap_password.
 EOF
+if [[ "$db_driver" != "sqlite" ]]; then
+  cat <<EOF
+
+Note: panel is configured for $db_driver. Ensure the container can reach the
+database host (use a reachable host/IP, not localhost, unless using host
+networking). The DSN is in $install_dir/panel.yaml.
+EOF
+fi
 if [[ "$no_start" == true ]]; then
   printf '\nFiles were generated but the image was not pulled and the service was not started.\n'
 fi
