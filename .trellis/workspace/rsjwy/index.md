@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 18
-- **Last Active**: 2026-07-16
+- **Total Sessions**: 19
+- **Last Active**: 2026-07-20
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~610 | Active |
+| `journal-1.md` | ~643 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 19 | 2026-07-20 | 拆分 Panel 与 Node Docker 部署 | `d116fb0` | `07-13-multi-node-mtls-control-plane` |
 | 18 | 2026-07-16 | Panel Node Docker 启动验证 | `ca3ece5` | `07-13-multi-node-mtls-control-plane` |
 | 17 | 2026-07-15 | 优化 GitHub Actions 双镜像发布 | `63a3cf4` | `07-13-multi-node-mtls-control-plane` |
 | 16 | 2026-07-15 | 完整性与版本升级回滚专项测试 | `3e9d39a`, `66e11fb`, `9e27d54` | `07-13-multi-node-mtls-control-plane` |
