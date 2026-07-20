@@ -1,0 +1,20 @@
+# NativeS3 Panel 独立部署模板。
+# 将本文件、panel.yaml 和准备好的 data/ 目录放到 Panel 主机。
+services:
+  panel:
+    image: ghcr.io/rsjwy/natives3-panel:${NATIVES3_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      # 管理界面默认仅本机访问；如需远程访问，请放在可信 HTTPS 反向代理后。
+      - "127.0.0.1:9001:9001"
+      # Node 首次注册和 mTLS 控制面监听端口。
+      - "9443:9443"
+    volumes:
+      - ./panel.yaml:/app/configs/panel.yaml:ro
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/panel", "-check-config", "-config", "/app/configs/panel.yaml"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

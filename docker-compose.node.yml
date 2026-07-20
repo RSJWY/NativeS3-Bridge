@@ -1,0 +1,18 @@
+# NativeS3 Node 独立部署模板。
+# 将本文件、node.yaml 和准备好的 data/ 目录放到 Node 主机。
+services:
+  node:
+    image: ghcr.io/rsjwy/natives3-node:${NATIVES3_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      # 仅开放 S3 数据面；Node 不提供管理端口。
+      - "9000:9000"
+    volumes:
+      - ./node.yaml:/app/configs/node.yaml:ro
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/node", "-check-config", "-config", "/app/configs/node.yaml"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
