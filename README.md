@@ -626,10 +626,14 @@ Hook manager 从数据库的 `hook_configs` 表加载启用的 Webhook 配置。
 
 ## Docker 部署
 
-panel 与 node 可以分别在不同主机上一键安装，直接拉取 GHCR 的 `latest` 镜像，无需克隆仓库：
+panel 与 node 分别在不同主机上安装，直接拉取 GHCR 的 `latest` 镜像，无需克隆仓库。两种方式任选其一。
+
+### 方式一：一键安装（命令行传参）
+
+通过 `curl | bash` 直接运行，必填参数在命令行给出，未指定的数据库等选项回退默认（SQLite + 默认路径）。适合 CI 或参数已就绪的场景。
 
 ```bash
-# Panel 主机：HOST 必须是 node 实际连接的域名或 IPv4
+# Panel 主机：--panel-host 必须是 node 实际连接的域名或 IPv4
 curl -fsSL https://raw.githubusercontent.com/RSJWY/NativeS3-Bridge/main/scripts/install-panel.sh \
   | sudo bash -s -- --panel-host panel.example.com
 
@@ -642,7 +646,23 @@ curl -fsSL https://raw.githubusercontent.com/RSJWY/NativeS3-Bridge/main/scripts/
       --ca-file /root/panel-ca.crt
 ```
 
-默认安全边界：panel 管理端口只映射到 `127.0.0.1:9001`，控制面发布 `9443`；node 只发布 S3 端口 `9000`。两端各自使用独立 SQLite 和宿主机持久化目录。
+> `curl | bash` 是非交互管道，不会提示输入。需要外部 MySQL/PostgreSQL 时用 `--db-driver`/`--db-dsn` 显式指定，否则使用默认 SQLite。
+
+### 方式二：交互式安装
+
+先下载脚本审阅，再在终端直接运行；未通过命令行给出的参数会逐项提示输入（注册令牌、数据库 DSN 等含密内容静默读取、不回显）。需要配置外部数据库时优先用这种方式。
+
+```bash
+curl -fsSL -o install-panel.sh https://raw.githubusercontent.com/RSJWY/NativeS3-Bridge/main/scripts/install-panel.sh
+sudo bash install-panel.sh
+# 数据库驱动直接回车走 sqlite 默认；输入 mysql/postgres 后静默粘贴 DSN
+```
+
+Node 同理：下载 `install-node.sh` 后执行 `sudo bash install-node.sh`，按提示填入 panel URL、node ID、注册令牌、CA 文件路径与数据库选项。
+
+### 默认安全边界
+
+panel 管理端口只映射到 `127.0.0.1:9001`，控制面发布 `9443`；node 只发布 S3 端口 `9000`。两端各自使用独立 SQLite 和宿主机持久化目录。
 
 完整的一键参数、生成文件、panel 到 node 的注册交接、升级/卸载、手动 Compose 部署、外部数据库与备份说明见 [Panel/Node Docker 独立部署文档](docs/docker-deployment.md)。仓库可审阅模板为 [`docker-compose.panel.yml`](docker-compose.panel.yml) 和 [`docker-compose.node.yml`](docker-compose.node.yml)。生产 PKI、恢复演练和证书运维见 [多节点运维文档](docs/multi-node-operations.md)。
 
