@@ -302,13 +302,29 @@ func TestAuthSettingsExposeOnlyNonSensitiveFields(t *testing.T) {
 		t.Fatalf("settings status = %d, want 200", rr.Code)
 	}
 	body := rr.Body.String()
-	for _, want := range []string{`"totp_required":true`, `"captcha_enabled":true`, `"captcha_site_key":"site"`} {
+	for _, want := range []string{`"totp_required":true`, `"captcha_enabled":true`, `"captcha_site_key":"site"`, `"service_mode":"standalone"`} {
 		if !bytes.Contains([]byte(body), []byte(want)) {
 			t.Fatalf("settings body missing %q: %s", want, body)
 		}
 	}
 	if bytes.Contains([]byte(body), []byte("secret")) {
 		t.Fatalf("settings leaked captcha secret: %s", body)
+	}
+}
+
+func TestAuthSettingsExposePanelServiceMode(t *testing.T) {
+	auth := NewAuthForServiceMode(config.WebAdminConfig{
+		PasswordHash:  mustPasswordHash(t),
+		SessionSecret: "test-session-secret",
+	}, ServiceModePanel)
+
+	rr := httptest.NewRecorder()
+	auth.AuthSettings(rr, httptest.NewRequest(http.MethodGet, "/api/admin/auth-settings", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("settings status = %d, want 200", rr.Code)
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"service_mode":"panel"`)) {
+		t.Fatalf("settings body missing panel service mode: %s", rr.Body.String())
 	}
 }
 

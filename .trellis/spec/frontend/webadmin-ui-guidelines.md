@@ -167,3 +167,59 @@ adminApi.logs({ file: selectedFileID, limit, level, q }) // ID came from respons
 - Do not add Pinia for this UI unless the scope grows beyond login state and server-fetched page data; the current convention is a lightweight composable.
 - Do not import full alternative chart packages. ECharts is frozen, and dashboard charts should use the API payloads rather than placeholder data.
 - Do not create page-specific loading/empty table styles when `.state-row` and `.table-scroll` already cover the pattern; divergent one-offs make the admin pages feel inconsistent.
+
+## Scenario: Runtime-Selected Standalone And Panel UI
+
+### 1. Scope / Trigger
+
+- Trigger: adding a second backend that embeds the same Vue bundle but exposes a different admin API surface.
+- Goal: select routes and navigation before protected pages mount, so an incompatible page cannot fire a burst of expected 404 requests.
+
+### 2. Signatures
+
+- `AuthSettings.service_mode: 'standalone' | 'panel'`.
+- Runtime owner: `runtimeState`, `setServiceMode`, `serviceHomePath`, and `routeMatchesService` in `src/state/runtime.ts`.
+- Panel routes: `/nodes` and `/nodes/:id`; standalone routes remain `/dashboard`, `/credentials`, `/buckets`, and `/logs`.
+
+### 3. Contracts
+
+- Login records `service_mode` before redirecting.
+- On a protected-page refresh, `App.vue` fetches auth settings and gates `<router-view>` until runtime mode is ready.
+- Route redirects and sidebar navigation use the shared runtime helpers; components do not implement private mode checks.
+- Panel pages call only typed `/api/admin/nodes*` methods through the shared `apiFetch` client.
+- One-time registration tokens and credential secrets remain component-local and are cleared when their result modal closes.
+
+### 4. Validation & Error Matrix
+
+- Auth settings unavailable -> protected page remains gated and shows a retry/login choice; neither mode's data page mounts.
+- Panel user opens a standalone route -> redirect to `/nodes` before the standalone component mounts.
+- Standalone user opens a Panel route -> redirect to `/dashboard` before the Panel component mounts.
+- Protected API `401` -> clear login state and redirect to `/login`, unchanged across modes.
+
+### 5. Good/Base/Bad Cases
+
+- Good: Panel login reaches `/nodes`, creates a node, and signs a token with no standalone API request in the network log.
+- Good: standalone login reaches `/dashboard` and loads all three dashboard endpoints with no `/api/admin/nodes` request.
+- Base: an older backend omitting `service_mode` is normalized by runtime code to standalone behavior.
+- Bad: probe mode by calling `/api/admin/nodes` and interpreting a 404 or transient error as standalone.
+
+### 6. Tests Required
+
+- `npm run build` for typed mode values, routes, and API methods.
+- Panel browser smoke: login -> `/nodes` -> create node -> node detail -> issue token; reject any standalone API request or API status >= 400.
+- Standalone browser smoke: login -> `/dashboard`; reject any `/api/admin/nodes` request or dashboard API status >= 400.
+- Narrow viewport check for node tables, detail actions, and one-time secret modals.
+
+### 7. Wrong vs Correct
+
+Wrong:
+
+```vue
+<router-view /> <!-- Dashboard mounts before the backend mode is known -->
+```
+
+Correct:
+
+```vue
+<router-view v-if="runtimeState.ready" />
+```

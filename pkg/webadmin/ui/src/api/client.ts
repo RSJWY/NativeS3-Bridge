@@ -98,6 +98,54 @@ export interface AuthSettings {
   captcha_enabled: boolean
   captcha_provider: string
   captcha_site_key: string
+  service_mode: 'standalone' | 'panel'
+}
+
+export interface PanelNode {
+  id: number
+  display_name: string
+  status: 'active' | 'disabled' | 'retired'
+  online: boolean
+  applied_version: number
+  desired_version: number
+  sync_state: 'synced' | 'waiting' | 'failed' | 'drift' | ''
+  last_heartbeat?: string
+  created_at: string
+}
+
+export interface PanelRegistrationToken {
+  token: string
+  expires_at: string
+}
+
+export interface PanelCredential {
+  id: number
+  node_id: number
+  access_key: string
+  name: string
+  bucket: string
+  status: 'enabled' | 'disabled'
+  quota_bytes: number
+  secret_key?: string
+}
+
+export interface PanelPublishResult {
+  version: number
+  content_hash: string
+  pushed: boolean
+  push_error?: string
+}
+
+export interface PanelCertificate {
+  ID: number
+  NodeID: number
+  Fingerprint: string
+  Serial: string
+  NotBefore: string
+  NotAfter: string
+  Revoked: boolean
+  RevokedAt?: string
+  CreatedAt: string
 }
 
 export interface LoginInput {
@@ -223,5 +271,53 @@ export const adminApi = {
     if (params.q) query.set('q', params.q)
     if (params.file) query.set('file', params.file)
     return apiFetch<LogsResponse>(`/api/admin/logs?${query.toString()}`)
+  },
+  listNodes() {
+    return apiFetch<PanelNode[]>('/api/admin/nodes')
+  },
+  createNode(displayName: string) {
+    return apiFetch<PanelNode>('/api/admin/nodes', {
+      method: 'POST',
+      body: JSON.stringify({ display_name: displayName })
+    })
+  },
+  getNode(id: number) {
+    return apiFetch<PanelNode>(`/api/admin/nodes/${id}`)
+  },
+  updateNode(id: number, input: { display_name?: string; status?: 'active' | 'disabled' }) {
+    return apiFetch<PanelNode>(`/api/admin/nodes/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input)
+    })
+  },
+  retireNode(id: number) {
+    return apiFetch<PanelNode>(`/api/admin/nodes/${id}`, { method: 'DELETE' })
+  },
+  issueNodeToken(id: number) {
+    return apiFetch<PanelRegistrationToken>(`/api/admin/nodes/${id}/tokens`, { method: 'POST' })
+  },
+  listNodeCredentials(id: number) {
+    return apiFetch<PanelCredential[]>(`/api/admin/nodes/${id}/credentials`)
+  },
+  createNodeCredential(id: number, input: { name: string; bucket: string; quota_bytes: number }) {
+    return apiFetch<PanelCredential>(`/api/admin/nodes/${id}/credentials`, {
+      method: 'POST',
+      body: JSON.stringify(input)
+    })
+  },
+  rotateNodeCredential(id: number, accessKey: string) {
+    return apiFetch<PanelCredential>(`/api/admin/nodes/${id}/credentials/${encodeURIComponent(accessKey)}/rotate`, { method: 'POST' })
+  },
+  publishNodeDesiredState(id: number) {
+    return apiFetch<PanelPublishResult>(`/api/admin/nodes/${id}/desired-state`, { method: 'POST' })
+  },
+  pushNodeDesiredState(id: number) {
+    return apiFetch<{ pushed: boolean }>(`/api/admin/nodes/${id}/desired-state/push`, { method: 'POST' })
+  },
+  listNodeCertificates(id: number) {
+    return apiFetch<PanelCertificate[]>(`/api/admin/nodes/${id}/certs`)
+  },
+  revokeNodeCertificates(id: number) {
+    return apiFetch<{ revoked: number }>(`/api/admin/nodes/${id}/certs/revoke`, { method: 'POST' })
   }
 }

@@ -45,7 +45,7 @@ type AdminServerDeps struct {
 func NewAdminServer(deps AdminServerDeps) (*AdminServer, error) {
 	webCfg := deps.Config.WebAdmin
 	effectiveTLS := deps.Config.EffectiveAdminTLS()
-	authenticator := webadmin.NewAuth(webCfg, effectiveTLS.Enabled)
+	authenticator := webadmin.NewAuthForServiceMode(webCfg, webadmin.ServiceModePanel, effectiveTLS.Enabled)
 
 	mux := http.NewServeMux()
 	adminAPI := NewAdminAPI(deps.DB, deps.Hub, deps.Creds, deps.Desired, deps.Tasks, deps.Transport, deps.Migration, deps.Audit)

@@ -15,6 +15,7 @@
 
 - `func BootstrapPasswordHash(cfg *config.WebAdminConfig) error`
 - `func NewAuth(cfg config.WebAdminConfig, secureCookie ...bool) *Auth`
+- `func NewAuthForServiceMode(cfg config.WebAdminConfig, serviceMode ServiceMode, secureCookie ...bool) *Auth`
 - `func (a *Auth) Login(w http.ResponseWriter, r *http.Request)`
 - `func (a *Auth) Logout(w http.ResponseWriter, r *http.Request)`
 - `func (a *Auth) Middleware(next http.Handler) http.Handler`
@@ -292,3 +293,55 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 - Wrong: accept `file=/var/log/app.log` or silently show ring entries when a selected history file disappears.
 - Correct: accept only `apply`, rescan configured storage, and derive mutations server-side.
 - Correct: accept only an ID from the fresh server allowlist and return an explicit 4xx/5xx if that selected file cannot be read.
+
+## Scenario: Shared SPA Service Modes
+
+### 1. Scope / Trigger
+
+- Trigger: serving `pkg/webadmin/ui` from a backend whose admin API is not the standalone `/dashboard`, `/credentials`, `/buckets`, and `/logs` surface.
+- Goal: prevent a shared embedded SPA from mounting pages whose API routes do not exist on the current service.
+
+### 2. Signatures
+
+- Standalone auth: `NewAuth(cfg, secureCookie...)`.
+- Explicit mode auth: `NewAuthForServiceMode(cfg, ServiceModePanel, secureCookie...)`.
+- Public discovery endpoint: `GET /api/admin/auth-settings`.
+
+### 3. Contracts
+
+- `auth-settings` always includes `service_mode`, exactly `standalone` or `panel`.
+- `NewAuth` defaults to `standalone` for backward compatibility.
+- Panel admin servers construct auth with `ServiceModePanel`; mode is never inferred from request failures.
+- The field is additive and non-sensitive; password hashes, captcha secrets, session keys, and one-time tokens remain excluded.
+
+### 4. Validation & Error Matrix
+
+- Unknown internal `ServiceMode` passed to the explicit constructor -> normalize to `standalone`.
+- Missing/invalid session on mode-specific protected API -> JSON `401`, unchanged from the common auth contract.
+- API route belonging to the other mode -> JSON `404`; the matching frontend must never generate that request during normal navigation.
+
+### 5. Good/Base/Bad Cases
+
+- Good: Panel `auth-settings` returns `panel`, followed by `/api/admin/nodes*` requests only.
+- Base: older clients ignore the additive field without breaking login.
+- Bad: embed the standalone SPA in Panel and treat repeated `/dashboard`, `/buckets`, or `/logs` 404 responses as a proxy problem.
+
+### 6. Tests Required
+
+- Unit test the default `standalone` and explicit `panel` response values.
+- Panel admin-server test authenticates, asserts `/api/admin/nodes` succeeds, and asserts a standalone-only route is not registered.
+- Browser smoke records network responses after login and fails if the UI requests an API from the other service mode.
+
+### 7. Wrong vs Correct
+
+Wrong:
+
+```go
+authenticator := webadmin.NewAuth(webCfg, tlsEnabled) // Panel silently reports standalone
+```
+
+Correct:
+
+```go
+authenticator := webadmin.NewAuthForServiceMode(webCfg, webadmin.ServiceModePanel, tlsEnabled)
+```

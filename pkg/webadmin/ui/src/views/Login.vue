@@ -34,6 +34,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { adminApi, type AuthSettings } from '../api/client'
 import ProjectMeta from '../components/ProjectMeta.vue'
 import { markLoggedIn } from '../state/auth'
+import { routeMatchesService, serviceHomePath, setServiceMode } from '../state/runtime'
 
 const password = ref('')
 const totpCode = ref('')
@@ -47,7 +48,8 @@ const settings = ref<AuthSettings>({
   totp_required: false,
   captcha_enabled: false,
   captcha_provider: '',
-  captcha_site_key: ''
+  captcha_site_key: '',
+  service_mode: 'standalone'
 })
 const router = useRouter()
 const route = useRoute()
@@ -55,6 +57,7 @@ const route = useRoute()
 onMounted(async () => {
   try {
     settings.value = await adminApi.authSettings()
+    setServiceMode(settings.value.service_mode)
     await nextTick()
     await renderCaptchaIfNeeded()
   } catch (err) {
@@ -90,9 +93,9 @@ async function submit() {
 
 function normalizeRedirect(value: unknown): string {
   if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//') || value === '/login') {
-    return '/dashboard'
+    return serviceHomePath()
   }
-  return value
+  return routeMatchesService(value) ? value : serviceHomePath()
 }
 
 async function renderCaptchaIfNeeded() {

@@ -23,6 +23,13 @@ import (
 
 const sessionCookieName = "natives3_admin_session"
 
+type ServiceMode string
+
+const (
+	ServiceModeStandalone ServiceMode = "standalone"
+	ServiceModePanel      ServiceMode = "panel"
+)
+
 type Auth struct {
 	passwordHash    []byte
 	sessionKey      []byte
@@ -36,6 +43,7 @@ type Auth struct {
 	captchaVerifier CaptchaVerifier
 	captchaProvider string
 	captchaSiteKey  string
+	serviceMode     ServiceMode
 	limiter         *loginLimiter
 	now             func() time.Time
 	sessionsMu      sync.Mutex
@@ -70,6 +78,17 @@ func BootstrapPasswordHash(cfg *config.WebAdminConfig) error {
 }
 
 func NewAuth(cfg config.WebAdminConfig, secureCookie ...bool) *Auth {
+	return newAuth(cfg, ServiceModeStandalone, secureCookie...)
+}
+
+func NewAuthForServiceMode(cfg config.WebAdminConfig, serviceMode ServiceMode, secureCookie ...bool) *Auth {
+	if serviceMode != ServiceModePanel {
+		serviceMode = ServiceModeStandalone
+	}
+	return newAuth(cfg, serviceMode, secureCookie...)
+}
+
+func newAuth(cfg config.WebAdminConfig, serviceMode ServiceMode, secureCookie ...bool) *Auth {
 	ttl := time.Duration(cfg.SessionTTLMinutes) * time.Minute
 	if ttl <= 0 {
 		ttl = 720 * time.Minute
@@ -98,6 +117,7 @@ func NewAuth(cfg config.WebAdminConfig, secureCookie ...bool) *Auth {
 		captchaEnabled:  cfg.Captcha.Enabled,
 		captchaProvider: cfg.Captcha.Provider,
 		captchaSiteKey:  cfg.Captcha.SiteKey,
+		serviceMode:     serviceMode,
 		now:             time.Now,
 		activeSessions:  make(map[string]int64),
 	}
@@ -170,6 +190,7 @@ func (a *Auth) AuthSettings(w http.ResponseWriter, r *http.Request) {
 		"captcha_enabled":  a.captchaEnabled,
 		"captcha_provider": a.captchaProvider,
 		"captcha_site_key": a.captchaSiteKey,
+		"service_mode":     a.serviceMode,
 	})
 }
 
