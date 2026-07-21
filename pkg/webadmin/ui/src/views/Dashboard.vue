@@ -67,6 +67,7 @@ import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { adminApi, type DashboardSummary, type RequestTrendItem, type UsageRankingItem } from '../api/client'
+import { chartAxis, CHART_COLORS, chartText, chartTooltip } from '../utils/chartTheme'
 import { formatBytes, formatQuota, usagePercent } from '../utils/format'
 
 echarts.use([PieChart, BarChart, LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
@@ -138,14 +139,17 @@ function renderUsageChart() {
   const used = summary.value?.total_used_bytes ?? 0
   const remaining = Math.max(total - used, 0)
   usageChart.setOption({
-    tooltip: { formatter: ({ name, value }: { name: string; value: number }) => `${name}: ${formatBytes(value)}` },
-    legend: { bottom: 0 },
+    color: CHART_COLORS,
+    textStyle: chartText,
+    tooltip: { ...chartTooltip, formatter: ({ name, value }: { name: string; value: number }) => `${name}: ${formatBytes(value)}` },
+    legend: { bottom: 0, icon: 'circle', itemWidth: 8, itemHeight: 8, textStyle: { color: '#57534e', fontSize: 12 } },
     series: [
       {
         type: 'pie',
-        radius: ['50%', '72%'],
+        radius: ['52%', '74%'],
         center: ['50%', '44%'],
-        label: { formatter: '{b}' },
+        label: { show: false },
+        itemStyle: { borderColor: '#ffffff', borderWidth: 2 },
         data: getUsageChartData(total, used, remaining)
       }
     ]
@@ -166,11 +170,29 @@ function renderRankingChart() {
   if (!rankingChartEl.value) return
   rankingChart ||= echarts.init(rankingChartEl.value)
   rankingChart.setOption({
-    tooltip: { formatter: ({ name, value }: { name: string; value: number }) => `${name}: ${formatBytes(value)}` },
+    textStyle: chartText,
+    tooltip: { ...chartTooltip, formatter: ({ name, value }: { name: string; value: number }) => `${name}: ${formatBytes(value)}` },
     grid: { left: 56, right: 24, top: 20, bottom: 72 },
-    xAxis: { type: 'category', data: ranking.value.map((item) => item.name || item.access_key), axisLabel: { rotate: 30 } },
-    yAxis: { type: 'value', axisLabel: { formatter: (value: number) => formatBytes(value) } },
-    series: [{ type: 'bar', data: ranking.value.map((item) => item.used_bytes), itemStyle: { color: '#57534e' } }]
+    xAxis: {
+      type: 'category',
+      data: ranking.value.map((item) => item.name || item.access_key),
+      axisLine: chartAxis.axisLine,
+      axisTick: chartAxis.axisTick,
+      axisLabel: { ...chartAxis.axisLabel, rotate: 30 }
+    },
+    yAxis: {
+      type: 'value',
+      axisLabel: { ...chartAxis.axisLabel, formatter: (value: number) => formatBytes(value) },
+      splitLine: chartAxis.splitLine
+    },
+    series: [
+      {
+        type: 'bar',
+        data: ranking.value.map((item) => item.used_bytes),
+        barMaxWidth: 32,
+        itemStyle: { color: '#0f766e', borderRadius: [4, 4, 0, 0] }
+      }
+    ]
   })
 }
 
@@ -178,17 +200,39 @@ function renderTrendChart() {
   if (!trendChartEl.value) return
   trendChart ||= echarts.init(trendChartEl.value)
   trendChart.setOption({
-    tooltip: { trigger: 'axis' },
-    legend: { top: 0 },
+    color: CHART_COLORS,
+    textStyle: chartText,
+    tooltip: { ...chartTooltip, trigger: 'axis' },
+    legend: { top: 0, icon: 'circle', itemWidth: 8, itemHeight: 8, textStyle: { color: '#57534e', fontSize: 12 } },
     grid: { left: 48, right: 24, top: 42, bottom: 36 },
-    xAxis: { type: 'category', data: trend.value.map((item) => item.day.slice(5)) },
-    yAxis: { type: 'value' },
+    xAxis: {
+      type: 'category',
+      boundaryGap: false,
+      data: trend.value.map((item) => item.day.slice(5)),
+      axisLine: chartAxis.axisLine,
+      axisTick: chartAxis.axisTick,
+      axisLabel: chartAxis.axisLabel
+    },
+    yAxis: { type: 'value', axisLabel: chartAxis.axisLabel, splitLine: chartAxis.splitLine },
     series: [
-      { name: 'PUT', type: 'line', data: trend.value.map((item) => item.put_count), smooth: false },
-      { name: 'GET', type: 'line', data: trend.value.map((item) => item.get_count), smooth: false },
-      { name: 'DELETE', type: 'line', data: trend.value.map((item) => item.delete_count), smooth: false }
+      trendSeries('PUT', trend.value.map((item) => item.put_count)),
+      trendSeries('GET', trend.value.map((item) => item.get_count)),
+      trendSeries('DELETE', trend.value.map((item) => item.delete_count))
     ]
   })
+}
+
+function trendSeries(name: string, data: number[]) {
+  return {
+    name,
+    type: 'line' as const,
+    data,
+    smooth: true,
+    symbol: 'circle',
+    symbolSize: 5,
+    showSymbol: false,
+    lineStyle: { width: 2 }
+  }
 }
 
 function resizeCharts() {
