@@ -674,3 +674,36 @@ Implemented rotating file logging with admin log viewer and single-bucket storag
 ### Next Steps
 
 - None - task complete
+
+
+## Session 21: Reliable node registration and health
+
+**Date**: 2026-07-21
+**Task**: Reliable node registration and health
+**Branch**: `main`
+
+### Summary
+
+Added idempotent transactional node registration replay, classified retryable registration failures with jittered backoff, enforced active-node certificate checks, required the panel CA path, and replaced Node config-only healthchecks with a live S3 listener probe. Full Go tests, vet, builds, distribution contract, and release integrity validation passed.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `cf783fe` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

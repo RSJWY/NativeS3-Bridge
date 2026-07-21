@@ -1,0 +1,30 @@
+{
+  "id": "panel-node-control-plane-hardening",
+  "name": "panel-node-control-plane-hardening",
+  "title": "修复 Panel Node 完整控制面链路",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "rsjwy",
+  "assignee": "rsjwy",
+  "createdAt": "2026-07-21",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-21-panel-node-e2e-release-gate",
+    "07-21-panel-authoritative-config-crud",
+    "07-21-node-registration-health"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
