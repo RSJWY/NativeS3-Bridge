@@ -641,3 +641,36 @@ Implemented rotating file logging with admin log viewer and single-bucket storag
 ### Next Steps
 
 - None - task complete
+
+
+## Session 20: 修复 Panel 管理界面 API 契约错配
+
+**Date**: 2026-07-21
+**Task**: 修复 Panel 管理界面 API 契约错配
+**Branch**: `main`
+
+### Summary
+
+为共享管理 SPA 增加显式 panel/standalone 运行模式，新增 Panel 节点管理界面与服务级/浏览器回归验证，消除部署后旧 WebAdmin API 的 404。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1bd0d22` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
