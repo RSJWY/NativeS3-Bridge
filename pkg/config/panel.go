@@ -35,7 +35,6 @@ type PanelConfig struct {
 
 	Database DatabaseConfig `yaml:"database"`
 	WebAdmin WebAdminConfig `yaml:"webadmin"`
-	Region   string         `yaml:"region"`
 	LogLevel string         `yaml:"log_level"`
 	Log      LogConfig      `yaml:"log"`
 
@@ -85,9 +84,6 @@ func (c *PanelConfig) applyDefaults() {
 	}
 	if c.Agent.Addr == "" {
 		c.Agent.Addr = "0.0.0.0:9443"
-	}
-	if c.Region == "" {
-		c.Region = "us-east-1"
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"

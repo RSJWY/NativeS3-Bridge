@@ -317,7 +317,6 @@ database:
   driver: "$db_driver"
   dsn: $quoted_db_dsn
 
-region: "us-east-1"
 log_level: "info"
 heartbeat_interval: 15s
 offline_multiplier: 3

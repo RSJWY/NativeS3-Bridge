@@ -62,7 +62,6 @@ database:
 webadmin:
   admin_bootstrap_password: "release-integrity-password"
   session_secret: "release-integrity-session-secret-32b"
-region: us-east-1
 log_level: info
 EOF
 
