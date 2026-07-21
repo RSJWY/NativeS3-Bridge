@@ -1,6 +1,7 @@
 # --- Go ---
 # Binaries
 /natives3bridge
+/panel
 natives3bridge.exe
 /bin/
 *.exe
@@ -46,3 +47,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# --- Tooling ---
+.claude/worktrees/
