@@ -8,15 +8,19 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
@@ -34,6 +38,7 @@ import (
 func main() {
 	cfgPath := flag.String("config", "configs/node.yaml", "node config file path")
 	checkConfig := flag.Bool("check-config", false, "load and validate node config, then exit")
+	health := flag.Bool("health", false, "probe the configured S3 listener, then exit")
 	flag.Parse()
 
 	cfg, err := config.LoadNode(*cfgPath)
@@ -50,6 +55,14 @@ func main() {
 	db.SetLogLevel(cfg.LogLevel)
 	if *checkConfig {
 		slog.Info("node config check passed")
+		return
+	}
+	if *health {
+		if err := probeS3Listener(cfg); err != nil {
+			slog.Error("node health probe failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("node health probe passed")
 		return
 	}
 
@@ -124,6 +137,37 @@ func main() {
 	<-agentDone
 }
 
+func probeS3Listener(cfg *config.NodeConfig) error {
+	host, port, err := net.SplitHostPort(cfg.Server.S3Addr)
+	if err != nil {
+		return fmt.Errorf("parse server.s3_addr: %w", err)
+	}
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::", "[::]":
+		host = "::1"
+	}
+	scheme := "http"
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if cfg.Server.TLS.Enabled {
+		scheme = "https"
+		// This is a loopback-only reachability probe. The serving certificate may
+		// be issued for the public S3 hostname rather than the normalized bind IP.
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec
+	}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: transport}
+	resp, err := client.Get(scheme + "://" + net.JoinHostPort(host, port) + "/")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 100 || resp.StatusCode > 599 {
+		return fmt.Errorf("invalid HTTP status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // startAgent registers the node on first boot (if a token is configured and no
 // certificate exists yet) and runs the control-plane client loop in the
 // background. It returns a channel closed when the agent loop exits. Agent
@@ -147,11 +191,15 @@ func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, inval
 				slog.Warn("node is not registered and no registration token/url configured; serving S3 from local DB only")
 				return
 			}
-			if err := nodeagent.Register(identity, nodeagent.RegisterParams{
+			slog.Info("node registration starting; transient failures will be retried")
+			if err := nodeagent.RegisterWithRetry(ctx, identity, nodeagent.RegisterParams{
 				RegisterURL: cfg.Panel.RegisterURL,
 				NodeID:      cfg.Panel.NodeID,
 				Token:       cfg.Panel.Token,
-			}); err != nil {
+			}, nodeagent.RegisterRetryOptions{}); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				slog.Error("node registration failed; continuing to serve S3 from local DB", "error", err)
 				return
 			}

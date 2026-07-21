@@ -169,7 +169,7 @@ func IsCertValid(db *gorm.DB, fingerprint string, now time.Time) (nodeID uint, o
 		}
 		return 0, false, err
 	}
-	if node.Status == NodeStatusRetired {
+	if node.Status != NodeStatusActive {
 		return 0, false, nil
 	}
 	return cert.NodeID, true, nil

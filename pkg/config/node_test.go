@@ -78,7 +78,12 @@ panel: {node_id: 1, cert_file: c, key_file: k}
 		"missing node_id": `
 storage: {data_root: /data}
 database: {driver: sqlite, dsn: ./x.db}
-panel: {agent_url: "wss://p/agent", cert_file: c, key_file: k}
+panel: {agent_url: "wss://p/agent", cert_file: c, key_file: k, ca_file: ca}
+`,
+		"missing ca_file": `
+storage: {data_root: /data}
+database: {driver: sqlite, dsn: ./x.db}
+panel: {node_id: 1, agent_url: "wss://p/agent", cert_file: c, key_file: k}
 `,
 	}
 	for name, body := range cases {

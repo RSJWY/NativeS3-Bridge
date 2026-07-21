@@ -178,6 +178,36 @@ func TestRetiredNodeCertRejected(t *testing.T) {
 	}
 }
 
+func TestDisabledNodeCertCanResumeAfterReactivation(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := gdb.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	now := time.Now().UTC()
+	signed, err := ca.SignNodeCSR(newNodeCSR(t), node.ID, 0, now)
+	if err != nil {
+		t.Fatalf("sign csr: %v", err)
+	}
+	cert := NodeCert{NodeID: node.ID, Fingerprint: signed.Fingerprint, Serial: signed.Serial, NotBefore: signed.NotBefore, NotAfter: signed.NotAfter}
+	if err := gdb.Create(&cert).Error; err != nil {
+		t.Fatalf("store cert: %v", err)
+	}
+	if err := gdb.Model(&node).Update("status", NodeStatusDisabled).Error; err != nil {
+		t.Fatalf("disable node: %v", err)
+	}
+	if _, ok, _ := IsCertValid(gdb, signed.Fingerprint, now); ok {
+		t.Fatal("disabled node cert must be rejected")
+	}
+	if err := gdb.Model(&node).Update("status", NodeStatusActive).Error; err != nil {
+		t.Fatalf("reactivate node: %v", err)
+	}
+	if _, ok, err := IsCertValid(gdb, signed.Fingerprint, now); err != nil || !ok {
+		t.Fatalf("reactivated node cert should be accepted: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestSignRejectsBadCSR(t *testing.T) {
 	ca := newTestIntermediateCA(t)
 	if _, err := ca.SignNodeCSR([]byte("not a csr"), 1, 0, time.Now()); err == nil {

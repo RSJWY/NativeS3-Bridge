@@ -160,6 +160,9 @@ func (c *NodeConfig) Validate() error {
 	if strings.TrimSpace(c.Panel.CertFile) == "" || strings.TrimSpace(c.Panel.KeyFile) == "" {
 		return fmt.Errorf("panel.cert_file and panel.key_file are required")
 	}
+	if strings.TrimSpace(c.Panel.CAFile) == "" {
+		return fmt.Errorf("panel.ca_file is required")
+	}
 	if c.Panel.NodeID <= 0 {
 		return fmt.Errorf("panel.node_id is required and must be positive")
 	}

@@ -2,6 +2,7 @@ package nodeagent
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,7 +11,9 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	mathrand "math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -116,17 +119,39 @@ type RegisterParams struct {
 	HTTPClient *http.Client
 }
 
+// RegistrationError classifies a failed registration attempt for retry policy.
+// Error messages never include the registration token or CSR.
+type RegistrationError struct {
+	StatusCode int
+	Retryable  bool
+	Err        error
+}
+
+func (e *RegistrationError) Error() string { return e.Err.Error() }
+func (e *RegistrationError) Unwrap() error { return e.Err }
+
+// RegisterRetryOptions controls exponential backoff between transient failures.
+type RegisterRetryOptions struct {
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+}
+
 // Register performs first-boot registration: it ensures a local private key,
 // builds a CSR, submits {node_id, token, csr} to the panel over server TLS, and
 // persists the issued client certificate and the panel CA to disk. The private
 // key never leaves the node. It is safe to skip when Identity.HasCertificate().
 func Register(id Identity, params RegisterParams) error {
+	return RegisterContext(context.Background(), id, params)
+}
+
+// RegisterContext performs one registration attempt and honors cancellation.
+func RegisterContext(ctx context.Context, id Identity, params RegisterParams) error {
 	if params.RegisterURL == "" || params.NodeID <= 0 || params.Token == "" {
-		return fmt.Errorf("register url, node id and token are required")
+		return permanentRegistrationError(0, fmt.Errorf("register url, node id and token are required"))
 	}
 	key, err := id.ensureKey()
 	if err != nil {
-		return err
+		return permanentRegistrationError(0, err)
 	}
 	csrPEM, err := buildCSR(key, params.NodeID)
 	if err != nil {
@@ -150,11 +175,11 @@ func Register(id Identity, params RegisterParams) error {
 		}
 		caPEM, err := os.ReadFile(id.CAFile)
 		if err != nil {
-			return fmt.Errorf("read panel CA: %w", err)
+			return permanentRegistrationError(0, fmt.Errorf("read panel CA: %w", err))
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {
-			return fmt.Errorf("panel CA file contains no certificates")
+			return permanentRegistrationError(0, fmt.Errorf("panel CA file contains no certificates"))
 		}
 		client = &http.Client{
 			Timeout: timeout,
@@ -165,7 +190,7 @@ func Register(id Identity, params RegisterParams) error {
 		}
 	}
 
-	req, err := http.NewRequest(http.MethodPost, params.RegisterURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, params.RegisterURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build register request: %w", err)
 	}
@@ -173,7 +198,10 @@ func Register(id Identity, params RegisterParams) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("submit registration: %w", err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return transientRegistrationError(fmt.Errorf("submit registration: %w", err))
 	}
 	defer resp.Body.Close()
 
@@ -182,10 +210,12 @@ func Register(id Identity, params RegisterParams) error {
 			Error string `json:"error"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&errBody)
+		message := fmt.Sprintf("registration rejected with status %d", resp.StatusCode)
 		if errBody.Error != "" {
-			return fmt.Errorf("registration rejected (%d): %s", resp.StatusCode, errBody.Error)
+			message = fmt.Sprintf("registration rejected (%d): %s", resp.StatusCode, errBody.Error)
 		}
-		return fmt.Errorf("registration rejected with status %d", resp.StatusCode)
+		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		return &RegistrationError{StatusCode: resp.StatusCode, Retryable: retryable, Err: fmt.Errorf("%s", message)}
 	}
 
 	var issued registerResponse
@@ -205,6 +235,51 @@ func Register(id Identity, params RegisterParams) error {
 		}
 	}
 	return nil
+}
+
+// RegisterWithRetry retries transient network/TLS, 429, and 5xx failures until
+// registration succeeds, a permanent rejection occurs, or ctx is cancelled.
+func RegisterWithRetry(ctx context.Context, id Identity, params RegisterParams, opts RegisterRetryOptions) error {
+	delay := opts.InitialBackoff
+	if delay <= 0 {
+		delay = time.Second
+	}
+	maxDelay := opts.MaxBackoff
+	if maxDelay <= 0 {
+		maxDelay = 30 * time.Second
+	}
+	for {
+		err := RegisterContext(ctx, id, params)
+		if err == nil {
+			return nil
+		}
+		var registrationErr *RegistrationError
+		if !errors.As(err, &registrationErr) || !registrationErr.Retryable {
+			return err
+		}
+		jittered := time.Duration(float64(delay) * (0.8 + mathrand.Float64()*0.4))
+		timer := time.NewTimer(jittered)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if delay < maxDelay {
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+		}
+	}
+}
+
+func permanentRegistrationError(status int, err error) error {
+	return &RegistrationError{StatusCode: status, Retryable: false, Err: err}
+}
+
+func transientRegistrationError(err error) error {
+	return &RegistrationError{Retryable: true, Err: err}
 }
 
 func persistPEM(path string, data []byte, perm os.FileMode) error {

@@ -235,14 +235,33 @@ func TestRegisterEndpointIssuesCert(t *testing.T) {
 	if certCount != 1 {
 		t.Fatalf("expected 1 persisted cert, got %d", certCount)
 	}
-	// Second use of the same token must be rejected.
+	// A response-loss retry with the same token and private key must replay the
+	// exact issued response without inserting another certificate row.
 	rr2 := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(mustJSON(t, registerRequest{
 		NodeID: int64(node.ID), Token: token, CSRPEM: string(csrPEM),
 	})))
 	rw2 := httptest.NewRecorder()
 	ts.handleRegister(rw2, rr2)
-	if rw2.Code == http.StatusOK {
-		t.Fatal("reused token must be rejected")
+	if rw2.Code != http.StatusOK || rw2.Body.String() != rw.Body.String() {
+		t.Fatalf("same-key replay status/body = %d %q, want 200 %q", rw2.Code, rw2.Body.String(), rw.Body.String())
+	}
+	gdb.Model(&NodeCert{}).Where("node_id = ?", node.ID).Count(&certCount)
+	if certCount != 1 {
+		t.Fatalf("same-key replay inserted certificates: got %d", certCount)
+	}
+
+	otherKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	otherCSRDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: "node-request"},
+	}, otherKey)
+	otherCSRPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: otherCSRDER})
+	rr3 := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(mustJSON(t, registerRequest{
+		NodeID: int64(node.ID), Token: token, CSRPEM: string(otherCSRPEM),
+	})))
+	rw3 := httptest.NewRecorder()
+	ts.handleRegister(rw3, rr3)
+	if rw3.Code != http.StatusUnauthorized {
+		t.Fatalf("changed-key replay status = %d, want 401", rw3.Code)
 	}
 }
 

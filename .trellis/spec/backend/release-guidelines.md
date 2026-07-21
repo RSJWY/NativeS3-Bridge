@@ -133,6 +133,90 @@ pool.AppendCertsFromPEM(os.ReadFile(cfg.CAFile))
 client.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
 ```
 
+## Scenario: Recoverable Node Registration And Data-Plane Health
+
+### 1. Scope / Trigger
+
+- Trigger: changes to Panel registration persistence/handlers, Node first-boot
+  registration, node lifecycle certificate checks, or Node container healthchecks.
+
+### 2. Signatures
+
+- `POST /register` with `{node_id, token, csr_pem}` and
+  `{cert_pem, ca_cert_pem, not_after}` response.
+- `node -health -config <node.yaml>` probes `server.s3_addr`.
+- Registration token replay columns: `public_key_fingerprint`,
+  `issued_cert_pem`, `issued_ca_pem`, and `issued_not_after`.
+
+### 3. Contracts
+
+- Registration identity is `(token hash, node ID, PKIX public-key SHA-256)`.
+- Token consumption, replay material, and the single `NodeCert` insert commit in
+  one database transaction. Same-token/same-key retries return the stored
+  response; changed-key retries receive the same coarse denial as invalid tokens.
+- Node retries transport/TLS failures, HTTP 429, and HTTP 5xx with cancellable,
+  jittered exponential backoff. Other HTTP 4xx responses stop the current token.
+- Only `active` nodes may register or authenticate an agent connection.
+  `disabled` preserves unrevoked certificates so reactivation can reconnect;
+  `retired` remains rejected.
+- `panel.ca_file` is required by Node config validation.
+- Docker health runs `node -health`, normalizes wildcard binds to loopback, and
+  accepts any syntactically valid HTTP response from the S3 listener, including
+  the expected unauthenticated S3 `403`. Panel reachability is not part of Node
+  container health.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Network/TLS error, 429, or 5xx | Retry in the same process with the same on-disk private key |
+| 400/401/403 or other non-429 4xx | Stop retrying and return a token-free error |
+| Used token, same node and public key | Return the stored certificate response; do not insert a second cert |
+| Used token, different public key | Return coarse HTTP 401 |
+| Node disabled or retired | Registration and mTLS certificate validation fail |
+| Disabled node becomes active | Existing unrevoked, unexpired certificate is valid again |
+| S3 listener responds 403 | `node -health` exits successfully |
+| S3 port is closed | `node -health` exits non-zero |
+
+### 5. Good/Base/Bad Cases
+
+- Good: Panel commits issuance but the response is lost; the Node retries using
+  its persisted private key and receives the exact original response.
+- Base: Panel is temporarily unavailable while the Node S3 listener remains
+  healthy and continues serving its last applied configuration.
+- Bad: regenerating the Node key on every attempt, consuming the token before
+  certificate persistence, retrying a permanent 401 forever, or using
+  `-check-config` as a runtime healthcheck.
+
+### 6. Tests Required
+
+- Panel regression: same-key replay returns byte-equivalent JSON and exactly one
+  certificate row; changed-key replay returns 401.
+- Node regression: 5xx recovery reaches success in one retry loop; 401 performs
+  exactly one attempt; cancellation stops backoff.
+- Lifecycle regression: disabled rejects a valid cert and active accepts it again.
+- Health regression: wildcard bind probes loopback; HTTP 403 passes; closed port fails.
+- Release validation: `go test ./...`, `go vet ./...`, panel/node builds,
+  `scripts/test-distribution-contract.sh`, and release integrity smoke.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+if err := Register(identity, params); err != nil {
+    return // a transient first-boot outage now requires a container restart
+}
+```
+
+#### Correct
+
+```go
+if err := RegisterWithRetry(ctx, identity, params, RegisterRetryOptions{}); err != nil {
+    // only cancellation or a permanent rejection reaches this branch
+}
+```
+
 ## Scenario: No-Clone Docker Deployment
 
 ### 1. Scope / Trigger

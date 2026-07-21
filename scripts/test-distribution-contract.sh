@@ -40,7 +40,7 @@ require_absent docker-compose.panel.yml 'build:'
 
 require_text docker-compose.node.yml 'ghcr.io/rsjwy/natives3-node:${NATIVES3_TAG:-latest}'
 require_text docker-compose.node.yml '9000:9000'
-require_text docker-compose.node.yml 'test: ["CMD", "/usr/local/bin/node", "-check-config"'
+require_text docker-compose.node.yml 'test: ["CMD", "/usr/local/bin/node", "-health"'
 require_absent docker-compose.node.yml '9001:9001'
 require_absent docker-compose.node.yml '9443:9443'
 require_absent docker-compose.node.yml 'build:'

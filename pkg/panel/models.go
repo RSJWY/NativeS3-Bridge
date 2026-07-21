@@ -55,14 +55,19 @@ type NodeCert struct {
 
 // RegistrationToken is a single-use, short-lived token that authorizes a node's
 // first registration. Only the hash is stored (never the plaintext). UsedAt is
-// set the moment the token is consumed, after which it is invalid.
+// set atomically with replay material so the same node public key can recover a
+// lost response while a different key remains denied.
 type RegistrationToken struct {
-	ID        uint   `gorm:"primaryKey"`
-	NodeID    uint   `gorm:"index;not null"`
-	TokenHash string `gorm:"uniqueIndex;size:64;not null"`
-	ExpiresAt time.Time
-	UsedAt    *time.Time
-	CreatedAt time.Time
+	ID                   uint   `gorm:"primaryKey"`
+	NodeID               uint   `gorm:"index;not null"`
+	TokenHash            string `gorm:"uniqueIndex;size:64;not null"`
+	PublicKeyFingerprint string `gorm:"size:64"`
+	IssuedCertPEM        string `gorm:"type:text"`
+	IssuedCAPEM          string `gorm:"column:issued_ca_pem;type:text"`
+	IssuedNotAfter       *time.Time
+	ExpiresAt            time.Time
+	UsedAt               *time.Time
+	CreatedAt            time.Time
 }
 
 // DesiredConfig holds the single latest desired state for a node. Version is

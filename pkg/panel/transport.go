@@ -121,51 +121,27 @@ func (s *TransportServer) handleRegister(w http.ResponseWriter, r *http.Request)
 	nodeID := uint(req.NodeID)
 	now := nowUTC()
 
-	// Consume the token first: this both authenticates the request and burns the
-	// token so a leaked token cannot be reused even if signing later fails.
-	if err := ConsumeRegistrationToken(s.deps.DB, nodeID, req.Token, now); err != nil {
-		// Coarse 401 regardless of the specific reason (invalid/expired/used) so
-		// the endpoint does not become a token oracle.
+	outcome, err := s.issueOrReplayRegistration(nodeID, req.Token, []byte(req.CSRPEM), now)
+	if err != nil {
+		if errors.Is(err, errRegistrationCSR) {
+			writeTransportError(w, http.StatusBadRequest, "invalid CSR")
+			return
+		}
+		if !errors.Is(err, errRegistrationDenied) {
+			slog.Error("registration transaction failed", "node", nodeID, "error", err)
+			writeTransportError(w, http.StatusInternalServerError, "registration failed")
+			return
+		}
 		s.audit("node_register", nodeID, "", "denied")
 		writeTransportError(w, http.StatusUnauthorized, "registration denied")
 		return
 	}
-
-	// Confirm the node exists and is not retired before issuing a cert.
-	var node Node
-	if err := s.deps.DB.Where("id = ?", nodeID).First(&node).Error; err != nil {
-		writeTransportError(w, http.StatusUnauthorized, "registration denied")
-		return
+	result := "issued"
+	if outcome.replayed {
+		result = "replayed"
 	}
-	if node.Status == NodeStatusRetired {
-		writeTransportError(w, http.StatusForbidden, "node is retired")
-		return
-	}
-
-	signed, err := s.deps.CA.SignNodeCSR([]byte(req.CSRPEM), nodeID, s.deps.ClientCTTL, now)
-	if err != nil {
-		writeTransportError(w, http.StatusBadRequest, "invalid CSR")
-		return
-	}
-	cert := NodeCert{
-		NodeID:      nodeID,
-		Fingerprint: signed.Fingerprint,
-		Serial:      signed.Serial,
-		NotBefore:   signed.NotBefore,
-		NotAfter:    signed.NotAfter,
-	}
-	if err := s.deps.DB.Create(&cert).Error; err != nil {
-		writeTransportError(w, http.StatusInternalServerError, "persist certificate failed")
-		return
-	}
-
-	caPEM := s.deps.CA.CertificatePEM()
-	s.audit("node_register", nodeID, signed.Fingerprint, "issued")
-	writeTransportJSON(w, http.StatusOK, registerResponse{
-		CertPEM:   string(signed.CertPEM),
-		CACertPEM: string(caPEM),
-		NotAfter:  signed.NotAfter.Format(time.RFC3339),
-	})
+	s.audit("node_register", nodeID, outcome.fingerprint, result)
+	writeTransportJSON(w, http.StatusOK, outcome.response)
 }
 
 // handleAgent upgrades an mTLS-authenticated request to a WebSocket and runs the
