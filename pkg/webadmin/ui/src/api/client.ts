@@ -109,6 +109,9 @@ export interface PanelNode {
   applied_version: number
   desired_version: number
   sync_state: 'synced' | 'waiting' | 'failed' | 'drift' | ''
+  last_error?: string
+  draft_dirty: boolean
+  publish_required: boolean
   last_heartbeat?: string
   created_at: string
 }
@@ -126,7 +129,50 @@ export interface PanelCredential {
   bucket: string
   status: 'enabled' | 'disabled'
   quota_bytes: number
-  secret_key?: string
+}
+
+export interface PanelCreatedCredential extends PanelCredential {
+  secret_key: string
+}
+
+export interface PanelBucket {
+  name: string
+  acl: BucketACL
+  created_at: string
+}
+
+export type PanelWebhookEvent = 'ObjectCreated' | 'ObjectDeleted'
+
+export interface PanelWebhook {
+  id: number
+  node_id: number
+  url: string
+  events: PanelWebhookEvent[]
+  enabled: boolean
+  created_at: string
+}
+
+export interface PanelRateLimitValues {
+  anonymous_rps: number
+  anonymous_burst: number
+  trust_forwarded: boolean
+}
+
+export interface PanelRateLimit {
+  configured: boolean
+  values?: PanelRateLimitValues
+  effective: PanelRateLimitValues
+}
+
+export interface PanelImportSummary {
+  node_id: number
+  credential_count: number
+  bucket_count: number
+  webhook_count: number
+  access_keys: string[]
+  bucket_names: string[]
+  content_hash: string
+  rate_limit_configured: boolean
 }
 
 export interface PanelPublishResult {
@@ -158,6 +204,18 @@ interface RequestOptions extends RequestInit {
   skipAuthRedirect?: boolean
 }
 
+export class ApiError extends Error {
+  readonly status: number
+  readonly payload: unknown
+
+  constructor(status: number, message: string, payload: unknown) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.payload = payload
+  }
+}
+
 export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (options.body && !headers.has('Content-Type')) {
@@ -173,13 +231,13 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
   if (response.status === 401 && !options.skipAuthRedirect) {
     markLoggedOut()
     await router.replace({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } })
-    throw new Error('unauthorized')
+    throw new ApiError(response.status, 'unauthorized', null)
   }
 
   const payload = await readPayload(response)
   if (!response.ok) {
     const message = isErrorPayload(payload) ? payload.error : `请求失败：${response.status}`
-    throw new Error(message)
+    throw new ApiError(response.status, message, payload)
   }
   return payload as T
 }
@@ -300,13 +358,87 @@ export const adminApi = {
     return apiFetch<PanelCredential[]>(`/api/admin/nodes/${id}/credentials`)
   },
   createNodeCredential(id: number, input: { name: string; bucket: string; quota_bytes: number }) {
-    return apiFetch<PanelCredential>(`/api/admin/nodes/${id}/credentials`, {
+    return apiFetch<PanelCreatedCredential>(`/api/admin/nodes/${id}/credentials`, {
       method: 'POST',
       body: JSON.stringify(input)
     })
   },
   rotateNodeCredential(id: number, accessKey: string) {
-    return apiFetch<PanelCredential>(`/api/admin/nodes/${id}/credentials/${encodeURIComponent(accessKey)}/rotate`, { method: 'POST' })
+    return apiFetch<PanelCreatedCredential>(`/api/admin/nodes/${id}/credentials/${encodeURIComponent(accessKey)}/rotate`, { method: 'POST' })
+  },
+  updateNodeCredential(id: number, accessKey: string, input: { name?: string; bucket?: string; status?: 'enabled' | 'disabled'; quota_bytes?: number }) {
+    return apiFetch<PanelCredential>(`/api/admin/nodes/${id}/credentials/${encodeURIComponent(accessKey)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input)
+    })
+  },
+  deleteNodeCredential(id: number, accessKey: string) {
+    return apiFetch<{ deleted: boolean }>(`/api/admin/nodes/${id}/credentials/${encodeURIComponent(accessKey)}`, { method: 'DELETE' })
+  },
+  listNodeBuckets(id: number) {
+    return apiFetch<PanelBucket[]>(`/api/admin/nodes/${id}/buckets`)
+  },
+  createNodeBucket(id: number, input: { name: string; acl?: BucketACL }) {
+    return apiFetch<PanelBucket>(`/api/admin/nodes/${id}/buckets`, {
+      method: 'POST',
+      body: JSON.stringify(input)
+    })
+  },
+  updateNodeBucketACL(id: number, name: string, acl: BucketACL) {
+    return apiFetch<PanelBucket>(`/api/admin/nodes/${id}/buckets/${encodeURIComponent(name)}/acl`, {
+      method: 'PUT',
+      body: JSON.stringify({ acl })
+    })
+  },
+  deleteNodeBucket(id: number, name: string) {
+    return apiFetch<{ deleted: boolean }>(`/api/admin/nodes/${id}/buckets/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  },
+  listNodeWebhooks(id: number) {
+    return apiFetch<PanelWebhook[]>(`/api/admin/nodes/${id}/webhooks`)
+  },
+  createNodeWebhook(id: number, input: { url: string; events: PanelWebhookEvent[]; enabled: boolean }) {
+    return apiFetch<PanelWebhook>(`/api/admin/nodes/${id}/webhooks`, {
+      method: 'POST',
+      body: JSON.stringify(input)
+    })
+  },
+  updateNodeWebhook(id: number, webhookID: number, input: { url?: string; events?: PanelWebhookEvent[]; enabled?: boolean }) {
+    return apiFetch<PanelWebhook>(`/api/admin/nodes/${id}/webhooks/${webhookID}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input)
+    })
+  },
+  deleteNodeWebhook(id: number, webhookID: number) {
+    return apiFetch<{ deleted: boolean }>(`/api/admin/nodes/${id}/webhooks/${webhookID}`, { method: 'DELETE' })
+  },
+  getNodeRateLimit(id: number) {
+    return apiFetch<PanelRateLimit>(`/api/admin/nodes/${id}/rate-limit`)
+  },
+  updateNodeRateLimit(id: number, input: PanelRateLimitValues) {
+    return apiFetch<PanelRateLimit>(`/api/admin/nodes/${id}/rate-limit`, {
+      method: 'PUT',
+      body: JSON.stringify(input)
+    })
+  },
+  resetNodeRateLimit(id: number) {
+    return apiFetch<PanelRateLimit>(`/api/admin/nodes/${id}/rate-limit`, { method: 'DELETE' })
+  },
+  async getNodeImport(id: number): Promise<PanelImportSummary | null> {
+    try {
+      return await apiFetch<PanelImportSummary>(`/api/admin/nodes/${id}/import`)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+  },
+  requestNodeImport(id: number) {
+    return apiFetch<PanelImportSummary>(`/api/admin/nodes/${id}/import`, { method: 'POST' })
+  },
+  confirmNodeImport(id: number) {
+    return apiFetch<{ version: number; content_hash: string }>(`/api/admin/nodes/${id}/import/confirm`, { method: 'POST' })
+  },
+  abortNodeImport(id: number) {
+    return apiFetch<{ aborted: boolean }>(`/api/admin/nodes/${id}/import/abort`, { method: 'POST' })
   },
   publishNodeDesiredState(id: number) {
     return apiFetch<PanelPublishResult>(`/api/admin/nodes/${id}/desired-state`, { method: 'POST' })
