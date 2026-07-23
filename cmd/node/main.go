@@ -96,6 +96,12 @@ func main() {
 	}
 	multipartStore.SetMaxPendingBytes(cfg.Storage.MultipartMaxPendingBytes)
 	bucketStore := storage.NewBucketStore(gdb, cfg.Storage.DataRoot, storage.DefaultBucketACLCacheTTL)
+	managedRateLimit, _, err := nodeagent.LoadManagedRateLimit(gdb)
+	if err != nil {
+		slog.Error("load managed rate limit", "error", err)
+		os.Exit(1)
+	}
+	rateLimitController := server.NewRateLimitController(managedRateLimit)
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -109,19 +115,13 @@ func main() {
 	hookManager.Start()
 	defer hookManager.Stop()
 	quotaManager := quota.NewManager(gdb)
-	boundCredentialChecker := func(bucket string) (bool, error) {
-		var count int64
-		err := gdb.Model(&db.Credential{}).Where("bucket = ?", bucket).Count(&count).Error
-		return count > 0, err
-	}
-
 	// Reuse the monolith's ServerConfig shape for the S3 listener; the node has
 	// no admin listener so AdminAddr is left empty.
 	s3ServerCfg := config.ServerConfig{S3Addr: cfg.Server.S3Addr, TLS: cfg.Server.TLS}
-	s3Server := server.NewWithQuotaManager(s3ServerCfg, config.RateLimitConfig{}, backend, multipartStore, bucketStore, authenticator, quotaManager, boundCredentialChecker, hookManager)
+	s3Server := server.NewManagedWithQuotaManager(s3ServerCfg, backend, multipartStore, bucketStore, authenticator, quotaManager, hookManager, rateLimitController)
 
 	// Control-plane agent: registration (first boot) + mTLS client loop.
-	agentDone := startAgent(ctx, cfg, gdb, credentialStore, logRing)
+	agentDone := startAgent(ctx, cfg, gdb, credentialStore, bucketStore, hookManager, rateLimitController, logRing)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- s3Server.Run(ctx) }()
@@ -172,7 +172,7 @@ func probeS3Listener(cfg *config.NodeConfig) error {
 // certificate exists yet) and runs the control-plane client loop in the
 // background. It returns a channel closed when the agent loop exits. Agent
 // failures never stop the S3 data plane (safety net A).
-func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, invalidator nodeagent.CredentialInvalidator, logRing *loggingpkg.Ring) <-chan struct{} {
+func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, invalidator nodeagent.CredentialInvalidator, bucketInvalidator nodeagent.BucketInvalidator, hookReplacer nodeagent.WebhookReplacer, rateLimitUpdater nodeagent.RateLimitUpdater, logRing *loggingpkg.Ring) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -206,7 +206,13 @@ func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, inval
 			slog.Info("node registration succeeded")
 		}
 
-		executor := nodeagent.NewExecutor(gdb, invalidator)
+		executor := nodeagent.NewManagedExecutor(gdb, nodeagent.ExecutorRuntime{
+			CredentialInvalidator: invalidator,
+			BucketInvalidator:     bucketInvalidator,
+			WebhookReplacer:       hookReplacer,
+			RateLimitUpdater:      rateLimitUpdater,
+			DataRoot:              cfg.Storage.DataRoot,
+		})
 		runner := nodeagent.NewLocalTaskRunner(gdb, logRing, cfg.Storage.DataRoot, cfg.Storage.MetadataSuffix, invalidator)
 		client := nodeagent.NewClient(nodeagent.ClientConfig{
 			AgentURL:          cfg.Panel.AgentURL,

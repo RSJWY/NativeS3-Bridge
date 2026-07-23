@@ -88,6 +88,11 @@ type RateLimitConfig struct {
 	TrustForwarded bool    `yaml:"trust_forwarded"`
 }
 
+const (
+	DefaultAnonymousRPS   = 10.0
+	DefaultAnonymousBurst = 20
+)
+
 type StorageConfig struct {
 	DataRoot                 string        `yaml:"data_root"`
 	MultipartTmp             string        `yaml:"multipart_tmp"`
@@ -235,10 +240,10 @@ func (c *Config) applyDefaults() {
 	}
 	c.WebAdmin.Ops.PublicHealthz = true
 	if c.RateLimit.AnonymousRPS <= 0 {
-		c.RateLimit.AnonymousRPS = 10
+		c.RateLimit.AnonymousRPS = DefaultAnonymousRPS
 	}
 	if c.RateLimit.AnonymousBurst <= 0 {
-		c.RateLimit.AnonymousBurst = 20
+		c.RateLimit.AnonymousBurst = DefaultAnonymousBurst
 	}
 }
 

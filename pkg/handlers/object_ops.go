@@ -21,6 +21,14 @@ func IsCopyRequest(r *http.Request) bool {
 	return r.Header.Get("x-amz-copy-source") != ""
 }
 
+// CopySourceBucket decodes the source bucket using the same parser as Copy.
+// Managed routing uses it to enforce that retained, undeclared bucket data
+// cannot be read indirectly through server-side copy.
+func CopySourceBucket(r *http.Request) (string, error) {
+	bucket, _, err := parseCopySource(r.Header.Get("x-amz-copy-source"))
+	return bucket, err
+}
+
 // Copy implements PUT Object - Copy (server-side copy). The source is given by
 // the x-amz-copy-source header; metadata is copied from the source unless
 // x-amz-metadata-directive is REPLACE.

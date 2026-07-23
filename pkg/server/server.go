@@ -40,6 +40,17 @@ func NewWithQuotaManager(cfg config.ServerConfig, rateLimit config.RateLimitConf
 	}
 }
 
+func NewManagedWithQuotaManager(cfg config.ServerConfig, backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, manager handlers.QuotaManager, emitter handlers.EventEmitter, rateLimit *RateLimitController) *Server {
+	return &Server{
+		httpServer: &http.Server{
+			Addr:              cfg.S3Addr,
+			Handler:           NewManagedRouterWithQuotaManager(backend, multipartStore, bucketStore, authenticator, manager, emitter, rateLimit),
+			ReadHeaderTimeout: 10 * time.Second,
+		},
+		tls: cfg.TLS,
+	}
+}
+
 func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {

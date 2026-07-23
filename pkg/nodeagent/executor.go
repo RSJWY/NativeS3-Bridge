@@ -1,78 +1,228 @@
 package nodeagent
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/controlproto"
 	dbpkg "github.com/RSJWY/NativeS3-Bridge/pkg/db"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/managedconfig"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 )
 
-// CredentialInvalidator lets the executor evict cached credentials whose secret
-// or status changed as part of applying a desired state. The auth credential
-// cache implements this; a nil invalidator is tolerated (no cache to flush).
 type CredentialInvalidator interface {
 	Invalidate(accessKey string)
 }
 
-// Executor applies panel-authoritative desired state to the node-local database
-// and reads the current local state back for drift detection. Applying is
-// transactional and idempotent: a failed apply rolls back and leaves the node's
-// existing, already-serving configuration untouched (design §3, safety net for
-// "apply failure must not break a node's usable config").
+type BucketInvalidator interface {
+	Invalidate(name string)
+}
+
+type WebhookReplacer interface {
+	ReplaceConfigs(configs []dbpkg.HookConfig)
+}
+
+type RateLimitUpdater interface {
+	Update(config.RateLimitConfig)
+}
+
+type ExecutorRuntime struct {
+	CredentialInvalidator CredentialInvalidator
+	BucketInvalidator     BucketInvalidator
+	WebhookReplacer       WebhookReplacer
+	RateLimitUpdater      RateLimitUpdater
+	DataRoot              string
+}
+
+// Executor applies a full authoritative snapshot to the node database and its
+// live runtime views.
 type Executor struct {
-	db          *gorm.DB
-	invalidator CredentialInvalidator
+	db      *gorm.DB
+	runtime ExecutorRuntime
 }
 
-// NewExecutor builds an executor over the node-local DB. invalidator may be nil.
+// NewExecutor preserves the standalone test/legacy constructor. Managed node
+// wiring uses NewManagedExecutor so bucket/runtime behavior is explicit.
 func NewExecutor(gdb *gorm.DB, invalidator CredentialInvalidator) *Executor {
-	return &Executor{db: gdb, invalidator: invalidator}
+	return &Executor{db: gdb, runtime: ExecutorRuntime{CredentialInvalidator: invalidator}}
 }
 
-// Apply reconciles the node-local DB to match the desired state within a single
-// transaction. On success it returns the content hash of the state that is now
-// persisted (recomputed from the DB, so it reflects exactly what was applied).
-// On any error the transaction rolls back and the DB is unchanged.
-func (e *Executor) Apply(state controlproto.DesiredState) (string, error) {
-	// Collect access keys whose cache entries must be flushed after commit.
-	var flushed []string
+func NewManagedExecutor(gdb *gorm.DB, runtime ExecutorRuntime) *Executor {
+	return &Executor{db: gdb, runtime: runtime}
+}
 
-	err := e.db.Transaction(func(tx *gorm.DB) error {
-		if err := applyBuckets(tx, state.Buckets); err != nil {
+// Apply is retained for direct unit callers. The control-plane client uses
+// ApplyDesiredState so the version/hash are committed with the business rows.
+func (e *Executor) Apply(state controlproto.DesiredState) (string, error) {
+	return e.ApplyDesiredState(controlproto.DesiredStatePayload{
+		ContentHash: state.ContentHash(), Content: state,
+	})
+}
+
+func (e *Executor) ApplyDesiredState(payload controlproto.DesiredStatePayload) (string, error) {
+	if payload.Version < 0 {
+		return "", fmt.Errorf("desired version must be non-negative")
+	}
+	computedHash := payload.Content.ContentHash()
+	if payload.ContentHash == "" || payload.ContentHash != computedHash {
+		return "", fmt.Errorf("desired content hash mismatch")
+	}
+	if err := managedconfig.ValidateDesiredState(payload.Content); err != nil {
+		return "", fmt.Errorf("validate desired state: %w", err)
+	}
+	if err := e.rejectVersionRegression(payload.Version); err != nil {
+		return "", err
+	}
+
+	createdDirs, err := e.prepareBucketDirectories(payload.Content.Buckets)
+	if err != nil {
+		cleanupBucketDirectories(createdDirs)
+		return "", err
+	}
+
+	hookConfigs := desiredHookConfigs(payload.Content.Webhooks)
+	effectiveRateLimit := config.RateLimitConfig{
+		AnonymousRPS: config.DefaultAnonymousRPS, AnonymousBurst: config.DefaultAnonymousBurst,
+	}
+	if payload.Content.RateLimit != nil {
+		effectiveRateLimit = config.RateLimitConfig{
+			AnonymousRPS:   payload.Content.RateLimit.AnonymousRPS,
+			AnonymousBurst: payload.Content.RateLimit.AnonymousBurst,
+			TrustForwarded: payload.Content.RateLimit.TrustForwarded,
+		}
+	}
+
+	var credentialKeys []string
+	var bucketNames []string
+	appliedHash := ""
+	err = e.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		bucketNames, err = applyBuckets(tx, payload.Content.Buckets)
+		if err != nil {
 			return fmt.Errorf("apply buckets: %w", err)
 		}
-		keys, err := applyCredentials(tx, state.Credentials)
+		credentialKeys, err = applyCredentials(tx, payload.Content.Credentials)
 		if err != nil {
 			return fmt.Errorf("apply credentials: %w", err)
 		}
-		flushed = keys
-		if err := applyWebhooks(tx, state.Webhooks); err != nil {
+		if err := applyWebhooks(tx, hookConfigs); err != nil {
 			return fmt.Errorf("apply webhooks: %w", err)
+		}
+		if err := applyManagedRateLimit(tx, payload.Content.RateLimit); err != nil {
+			return fmt.Errorf("apply rate limit: %w", err)
+		}
+		appliedState, err := localState(tx)
+		if err != nil {
+			return fmt.Errorf("read back applied state: %w", err)
+		}
+		appliedHash = appliedState.ContentHash()
+		if appliedHash != computedHash {
+			return fmt.Errorf("applied desired state hash mismatch")
+		}
+		if err := saveMetaTx(tx, payload.Version, appliedHash); err != nil {
+			return fmt.Errorf("save applied metadata: %w", err)
 		}
 		return nil
 	})
 	if err != nil {
+		cleanupBucketDirectories(createdDirs)
 		return "", err
 	}
 
-	// Cache invalidation happens only after a successful commit so a rolled-back
-	// apply never disturbs the serving credential cache.
-	if e.invalidator != nil {
-		for _, key := range flushed {
-			e.invalidator.Invalidate(key)
+	if e.runtime.CredentialInvalidator != nil {
+		for _, accessKey := range uniqueStrings(credentialKeys) {
+			e.runtime.CredentialInvalidator.Invalidate(accessKey)
 		}
 	}
-
-	return e.LocalContentHash()
+	if e.runtime.BucketInvalidator != nil {
+		for _, name := range uniqueStrings(bucketNames) {
+			e.runtime.BucketInvalidator.Invalidate(name)
+		}
+	}
+	if e.runtime.WebhookReplacer != nil {
+		e.runtime.WebhookReplacer.ReplaceConfigs(hookConfigs)
+	}
+	if e.runtime.RateLimitUpdater != nil {
+		e.runtime.RateLimitUpdater.Update(effectiveRateLimit)
+	}
+	return appliedHash, nil
 }
 
-// LocalContentHash reads the current node-local business config and returns the
-// content hash computed with the SAME canonical algorithm the panel uses. The
-// node reports this in hello so the panel can detect drift (local DB edited out
-// of band) by comparing hashes at equal versions.
+func (e *Executor) rejectVersionRegression(version int64) error {
+	var meta AgentMeta
+	if err := e.db.First(&meta).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return fmt.Errorf("load applied metadata: %w", err)
+	}
+	if version < meta.AppliedVersion {
+		return fmt.Errorf("desired version regression: current=%d received=%d", meta.AppliedVersion, version)
+	}
+	return nil
+}
+
+func cleanupBucketDirectories(paths []string) {
+	for i := len(paths) - 1; i >= 0; i-- {
+		// Remove only empty directories created by this apply attempt. If another
+		// process has populated one in the meantime, preserve those bytes.
+		_ = os.Remove(paths[i])
+	}
+}
+
+func (e *Executor) prepareBucketDirectories(desired []controlproto.DesiredBucket) ([]string, error) {
+	if e.runtime.DataRoot == "" {
+		return nil, nil
+	}
+	var existing []dbpkg.Bucket
+	if err := e.db.Find(&existing).Error; err != nil {
+		return nil, fmt.Errorf("load managed buckets: %w", err)
+	}
+	existingNames := make(map[string]struct{}, len(existing))
+	for _, bucket := range existing {
+		existingNames[bucket.Name] = struct{}{}
+	}
+
+	created := make([]string, 0)
+	for _, bucket := range desired {
+		path, err := storage.ResolveBucketPath(e.runtime.DataRoot, bucket.Name)
+		if err != nil {
+			return created, fmt.Errorf("prepare bucket %q: %w", bucket.Name, err)
+		}
+		info, statErr := os.Stat(path)
+		if errors.Is(statErr, os.ErrNotExist) {
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				return created, fmt.Errorf("create bucket directory %q: %w", bucket.Name, err)
+			}
+			created = append(created, path)
+			continue
+		}
+		if statErr != nil {
+			return created, fmt.Errorf("inspect bucket directory %q: %w", bucket.Name, statErr)
+		}
+		if !info.IsDir() {
+			return created, fmt.Errorf("bucket path %q is not a directory", bucket.Name)
+		}
+		if _, alreadyManaged := existingNames[bucket.Name]; alreadyManaged {
+			continue
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return created, fmt.Errorf("inspect retained bucket %q: %w", bucket.Name, err)
+		}
+		if len(entries) > 0 {
+			return created, fmt.Errorf("retained data prevents declaring bucket %q", bucket.Name)
+		}
+	}
+	return created, nil
+}
+
 func (e *Executor) LocalContentHash() (string, error) {
 	state, err := e.LocalState()
 	if err != nil {
@@ -81,53 +231,59 @@ func (e *Executor) LocalContentHash() (string, error) {
 	return state.ContentHash(), nil
 }
 
-// LocalState materializes the node-local business config as a controlproto
-// DesiredState so it can be hashed/compared against the panel's desired state.
 func (e *Executor) LocalState() (controlproto.DesiredState, error) {
-	var state controlproto.DesiredState
+	return localState(e.db)
+}
 
-	var creds []dbpkg.Credential
-	if err := e.db.Order("access_key ASC").Find(&creds).Error; err != nil {
+func localState(db *gorm.DB) (controlproto.DesiredState, error) {
+	state := controlproto.DesiredState{
+		Credentials: []controlproto.DesiredCredential{},
+		Buckets:     []controlproto.DesiredBucket{},
+		Webhooks:    []controlproto.DesiredWebhook{},
+	}
+
+	var credentials []dbpkg.Credential
+	if err := db.Order("access_key ASC").Find(&credentials).Error; err != nil {
 		return state, err
 	}
-	for _, c := range creds {
+	for _, credential := range credentials {
 		state.Credentials = append(state.Credentials, controlproto.DesiredCredential{
-			AccessKey:  c.AccessKey,
-			SecretKey:  c.SecretKey,
-			Name:       c.Name,
-			Bucket:     c.Bucket,
-			Status:     c.Status,
-			QuotaBytes: c.QuotaBytes,
+			AccessKey: credential.AccessKey, SecretKey: credential.SecretKey, Name: credential.Name,
+			Bucket: credential.Bucket, Status: credential.Status, QuotaBytes: credential.QuotaBytes,
 		})
 	}
 
 	var buckets []dbpkg.Bucket
-	if err := e.db.Order("name ASC").Find(&buckets).Error; err != nil {
+	if err := db.Order("name ASC").Find(&buckets).Error; err != nil {
 		return state, err
 	}
-	for _, b := range buckets {
-		state.Buckets = append(state.Buckets, controlproto.DesiredBucket{Name: b.Name, ACL: b.ACL})
+	for _, bucket := range buckets {
+		state.Buckets = append(state.Buckets, controlproto.DesiredBucket{Name: bucket.Name, ACL: bucket.ACL})
 	}
 
 	var hooks []dbpkg.HookConfig
-	if err := e.db.Order("url ASC").Find(&hooks).Error; err != nil {
+	if err := db.Order("url ASC, events ASC, id ASC").Find(&hooks).Error; err != nil {
 		return state, err
 	}
-	for _, h := range hooks {
-		state.Webhooks = append(state.Webhooks, controlproto.DesiredWebhook{URL: h.URL, Events: h.Events, Enabled: h.Enabled})
+	for _, hook := range hooks {
+		state.Webhooks = append(state.Webhooks, controlproto.DesiredWebhook{URL: hook.URL, Events: hook.Events, Enabled: hook.Enabled})
 	}
 
+	var rateLimit ManagedRateLimit
+	if err := db.First(&rateLimit).Error; err == nil {
+		state.RateLimit = &controlproto.DesiredRateLimit{
+			AnonymousRPS: rateLimit.AnonymousRPS, AnonymousBurst: rateLimit.AnonymousBurst, TrustForwarded: rateLimit.TrustForwarded,
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return state, err
+	}
 	return state, nil
 }
 
-// applyCredentials upserts desired credentials and deletes any node-local
-// credential not present in the desired set. It returns the access keys that
-// were touched (created/updated/deleted) so their caches can be flushed.
-// UsedBytes is observed state owned by the node and is never overwritten here.
 func applyCredentials(tx *gorm.DB, desired []controlproto.DesiredCredential) ([]string, error) {
 	wanted := make(map[string]controlproto.DesiredCredential, len(desired))
-	for _, d := range desired {
-		wanted[d.AccessKey] = d
+	for _, credential := range desired {
+		wanted[credential.AccessKey] = credential
 	}
 
 	var existing []dbpkg.Credential
@@ -135,125 +291,157 @@ func applyCredentials(tx *gorm.DB, desired []controlproto.DesiredCredential) ([]
 		return nil, err
 	}
 	existingByKey := make(map[string]dbpkg.Credential, len(existing))
-	for _, c := range existing {
-		existingByKey[c.AccessKey] = c
+	for _, credential := range existing {
+		existingByKey[credential.AccessKey] = credential
 	}
 
-	touched := make([]string, 0, len(desired))
-
-	// Delete credentials the panel no longer declares.
-	for _, c := range existing {
-		if _, ok := wanted[c.AccessKey]; !ok {
-			if err := tx.Where("access_key = ?", c.AccessKey).Delete(&dbpkg.Credential{}).Error; err != nil {
+	touched := make([]string, 0, len(existing)+len(desired))
+	for _, credential := range existing {
+		if _, ok := wanted[credential.AccessKey]; !ok {
+			if err := tx.Where("access_key = ?", credential.AccessKey).Delete(&dbpkg.Credential{}).Error; err != nil {
 				return nil, err
 			}
-			touched = append(touched, c.AccessKey)
+			touched = append(touched, credential.AccessKey)
 		}
 	}
 
-	// Upsert desired credentials, preserving node-owned UsedBytes.
-	for _, d := range desired {
-		status := d.Status
-		if status == "" {
-			status = "enabled"
-		}
-		if prior, ok := existingByKey[d.AccessKey]; ok {
-			updates := map[string]any{
-				"secret_key":  d.SecretKey,
-				"name":        d.Name,
-				"bucket":      d.Bucket,
-				"status":      status,
-				"quota_bytes": d.QuotaBytes,
-			}
-			if err := tx.Model(&dbpkg.Credential{}).Where("access_key = ?", d.AccessKey).Updates(updates).Error; err != nil {
-				return nil, err
-			}
-			if credentialChanged(prior, d, status) {
-				touched = append(touched, d.AccessKey)
+	for _, desiredCredential := range desired {
+		status := managedconfig.NormalizeCredentialStatus(desiredCredential.Status)
+		if prior, ok := existingByKey[desiredCredential.AccessKey]; ok {
+			if credentialChanged(prior, desiredCredential, status) {
+				if err := tx.Model(&dbpkg.Credential{}).Where("access_key = ?", desiredCredential.AccessKey).Updates(map[string]any{
+					"secret_key": desiredCredential.SecretKey, "name": desiredCredential.Name, "bucket": desiredCredential.Bucket,
+					"status": status, "quota_bytes": desiredCredential.QuotaBytes,
+				}).Error; err != nil {
+					return nil, err
+				}
+				touched = append(touched, desiredCredential.AccessKey)
 			}
 			continue
 		}
-		cred := dbpkg.Credential{
-			AccessKey:  d.AccessKey,
-			SecretKey:  d.SecretKey,
-			Name:       d.Name,
-			Bucket:     d.Bucket,
-			Status:     status,
-			QuotaBytes: d.QuotaBytes,
+		credential := dbpkg.Credential{
+			AccessKey: desiredCredential.AccessKey, SecretKey: desiredCredential.SecretKey, Name: desiredCredential.Name,
+			Bucket: desiredCredential.Bucket, Status: status, QuotaBytes: desiredCredential.QuotaBytes,
 		}
-		if err := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "access_key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"secret_key", "name", "bucket", "status", "quota_bytes"}),
-		}).Create(&cred).Error; err != nil {
+		if err := tx.Create(&credential).Error; err != nil {
 			return nil, err
 		}
-		touched = append(touched, d.AccessKey)
+		touched = append(touched, desiredCredential.AccessKey)
 	}
-
 	return touched, nil
 }
 
-func credentialChanged(prior dbpkg.Credential, d controlproto.DesiredCredential, status string) bool {
-	return prior.SecretKey != d.SecretKey ||
-		prior.Name != d.Name ||
-		prior.Bucket != d.Bucket ||
-		prior.Status != status ||
-		prior.QuotaBytes != d.QuotaBytes
+func credentialChanged(prior dbpkg.Credential, desired controlproto.DesiredCredential, status string) bool {
+	return prior.SecretKey != desired.SecretKey || prior.Name != desired.Name || prior.Bucket != desired.Bucket ||
+		prior.Status != status || prior.QuotaBytes != desired.QuotaBytes
 }
 
-// applyBuckets upserts desired buckets (name + ACL) and removes node-local
-// bucket rows the panel no longer declares. It only reconciles the bucket
-// metadata rows; it does not create or delete on-disk object directories, which
-// are node-owned observed state (objects are never migrated by the control
-// plane, design §8.3).
-func applyBuckets(tx *gorm.DB, desired []controlproto.DesiredBucket) error {
+func applyBuckets(tx *gorm.DB, desired []controlproto.DesiredBucket) ([]string, error) {
 	wanted := make(map[string]controlproto.DesiredBucket, len(desired))
-	for _, d := range desired {
-		wanted[d.Name] = d
+	for _, bucket := range desired {
+		wanted[bucket.Name] = bucket
 	}
-
 	var existing []dbpkg.Bucket
 	if err := tx.Find(&existing).Error; err != nil {
+		return nil, err
+	}
+	existingByName := make(map[string]dbpkg.Bucket, len(existing))
+	for _, bucket := range existing {
+		existingByName[bucket.Name] = bucket
+	}
+	touched := make([]string, 0, len(existing)+len(desired))
+	for _, bucket := range existing {
+		if _, ok := wanted[bucket.Name]; !ok {
+			if err := tx.Where("name = ?", bucket.Name).Delete(&dbpkg.Bucket{}).Error; err != nil {
+				return nil, err
+			}
+			touched = append(touched, bucket.Name)
+		}
+	}
+	for _, desiredBucket := range desired {
+		if prior, ok := existingByName[desiredBucket.Name]; ok {
+			if prior.ACL != desiredBucket.ACL {
+				if err := tx.Model(&dbpkg.Bucket{}).Where("name = ?", desiredBucket.Name).Update("acl", desiredBucket.ACL).Error; err != nil {
+					return nil, err
+				}
+				touched = append(touched, desiredBucket.Name)
+			}
+			continue
+		}
+		if err := tx.Create(&dbpkg.Bucket{Name: desiredBucket.Name, ACL: desiredBucket.ACL}).Error; err != nil {
+			return nil, err
+		}
+		touched = append(touched, desiredBucket.Name)
+	}
+	return touched, nil
+}
+
+func desiredHookConfigs(desired []controlproto.DesiredWebhook) []dbpkg.HookConfig {
+	configs := make([]dbpkg.HookConfig, 0, len(desired))
+	for _, webhook := range desired {
+		configs = append(configs, dbpkg.HookConfig{URL: webhook.URL, Events: webhook.Events, Enabled: webhook.Enabled})
+	}
+	return configs
+}
+
+func applyWebhooks(tx *gorm.DB, desired []dbpkg.HookConfig) error {
+	if err := tx.Where("1 = 1").Delete(&dbpkg.HookConfig{}).Error; err != nil {
 		return err
 	}
-	for _, b := range existing {
-		if _, ok := wanted[b.Name]; !ok {
-			if err := tx.Where("name = ?", b.Name).Delete(&dbpkg.Bucket{}).Error; err != nil {
+	for _, hook := range desired {
+		row := hook
+		row.Enabled = true
+		if err := tx.Create(&row).Error; err != nil {
+			return err
+		}
+		if !hook.Enabled {
+			if err := tx.Model(&dbpkg.HookConfig{}).Where("id = ?", row.ID).Update("enabled", false).Error; err != nil {
 				return err
 			}
 		}
 	}
-
-	for _, d := range desired {
-		acl := d.ACL
-		if acl == "" {
-			acl = "private"
-		}
-		bucket := dbpkg.Bucket{Name: d.Name, ACL: acl}
-		if err := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "name"}},
-			DoUpdates: clause.AssignmentColumns([]string{"acl"}),
-		}).Create(&bucket).Error; err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
-// applyWebhooks replaces the node-local hook config set with the desired set.
-// Hook configs have no natural unique key beyond URL+events in this schema, so
-// the reconciliation is a full replace within the transaction.
-func applyWebhooks(tx *gorm.DB, desired []controlproto.DesiredWebhook) error {
-	// Clear existing hook rows, then insert the desired set. Done inside the
-	// caller's transaction so a failure rolls back to the prior config.
-	if err := tx.Where("1 = 1").Delete(&dbpkg.HookConfig{}).Error; err != nil {
+func applyManagedRateLimit(tx *gorm.DB, desired *controlproto.DesiredRateLimit) error {
+	if desired == nil {
+		return tx.Where("1 = 1").Delete(&ManagedRateLimit{}).Error
+	}
+	row := ManagedRateLimit{
+		ID: 1, AnonymousRPS: desired.AnonymousRPS, AnonymousBurst: desired.AnonymousBurst,
+		TrustForwarded: desired.TrustForwarded, UpdatedAt: time.Now().UTC(),
+	}
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"anonymous_rps": desired.AnonymousRPS, "anonymous_burst": desired.AnonymousBurst,
+			"trust_forwarded": desired.TrustForwarded, "updated_at": row.UpdatedAt,
+		}),
+	}).Create(&row).Error
+}
+
+func saveMetaTx(tx *gorm.DB, appliedVersion int64, contentHash string) error {
+	var meta AgentMeta
+	if err := tx.First(&meta).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return tx.Create(&AgentMeta{AppliedVersion: appliedVersion, ContentHash: contentHash, UpdatedAt: time.Now().UTC()}).Error
+		}
 		return err
 	}
-	for _, d := range desired {
-		hook := dbpkg.HookConfig{URL: d.URL, Events: d.Events, Enabled: d.Enabled}
-		if err := tx.Create(&hook).Error; err != nil {
-			return err
+	return tx.Model(&AgentMeta{}).Where("id = ?", meta.ID).Updates(map[string]any{
+		"applied_version": appliedVersion, "content_hash": contentHash, "updated_at": time.Now().UTC(),
+	}).Error
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
 		}
+		seen[value] = struct{}{}
+		result = append(result, value)
 	}
-	return nil
+	return result
 }

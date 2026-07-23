@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -662,6 +663,159 @@ func TestRouterAnonymousRateLimitAndQuotaSkip(t *testing.T) {
 	router.ServeHTTP(secondRR, second)
 	if secondRR.Code != http.StatusServiceUnavailable {
 		t.Fatalf("second status = %d, want 503; body=%s", secondRR.Code, secondRR.Body.String())
+	}
+}
+
+func TestManagedRouterUsesDeclarationsAndRejectsDirectBucketMutation(t *testing.T) {
+	gdb := newServerTestDB(t)
+	credential := dbpkg.Credential{AccessKey: "managed", SecretKey: "secret", Status: "enabled"}
+	if err := gdb.Create(&credential).Error; err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := t.TempDir()
+	backend, err := storage.NewFileBackend(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, dataRoot, storage.DefaultBucketACLCacheTTL)
+	if err := bucketStore.Create("managed-bucket"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.PutObject("managed-bucket", "visible.txt", strings.NewReader("visible"), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	retainedDir := filepath.Join(dataRoot, "retained-bucket")
+	if err := os.MkdirAll(retainedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	retainedObject := filepath.Join(retainedDir, "hidden.txt")
+	if err := os.WriteFile(retainedObject, []byte("hidden"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	authenticator := fixedAuthenticator{id: &auth.Identity{CredentialID: credential.ID, AccessKey: credential.AccessKey}}
+	router := NewManagedRouterWithQuotaManager(backend, nil, bucketStore, authenticator, quota.NewManager(gdb), nil, NewRateLimitController(config.RateLimitConfig{}))
+
+	list := headerSignedRequest(http.MethodGet, "/")
+	listRR := httptest.NewRecorder()
+	router.ServeHTTP(listRR, list)
+	if listRR.Code != http.StatusOK || !strings.Contains(listRR.Body.String(), "managed-bucket") || strings.Contains(listRR.Body.String(), "retained-bucket") {
+		t.Fatalf("managed list = %d %s", listRR.Code, listRR.Body.String())
+	}
+
+	visible := headerSignedRequest(http.MethodGet, "/managed-bucket/visible.txt")
+	visibleRR := httptest.NewRecorder()
+	router.ServeHTTP(visibleRR, visible)
+	if visibleRR.Code != http.StatusOK || visibleRR.Body.String() != "visible" {
+		t.Fatalf("managed object = %d %q", visibleRR.Code, visibleRR.Body.String())
+	}
+
+	hidden := headerSignedRequest(http.MethodGet, "/retained-bucket/hidden.txt")
+	hiddenRR := httptest.NewRecorder()
+	router.ServeHTTP(hiddenRR, hidden)
+	if hiddenRR.Code != http.StatusNotFound || !strings.Contains(hiddenRR.Body.String(), "NoSuchBucket") {
+		t.Fatalf("retained object = %d %s", hiddenRR.Code, hiddenRR.Body.String())
+	}
+
+	copyRequest := headerSignedRequest(http.MethodPut, "/managed-bucket/copied.txt")
+	copyRequest.Header.Set("x-amz-copy-source", "/retained-bucket/hidden.txt")
+	copyRR := httptest.NewRecorder()
+	router.ServeHTTP(copyRR, copyRequest)
+	if copyRR.Code != http.StatusNotFound || !strings.Contains(copyRR.Body.String(), "NoSuchBucket") {
+		t.Fatalf("retained copy source = %d %s", copyRR.Code, copyRR.Body.String())
+	}
+	if _, err := backend.HeadObject("managed-bucket", "copied.txt"); !errors.Is(err, storage.ErrNoSuchKey) {
+		t.Fatalf("copy from retained source created destination: %v", err)
+	}
+
+	create := headerSignedRequest(http.MethodPut, "/direct-bucket")
+	createRR := httptest.NewRecorder()
+	router.ServeHTTP(createRR, create)
+	if createRR.Code != http.StatusForbidden || !strings.Contains(createRR.Body.String(), "AccessDenied") {
+		t.Fatalf("direct create = %d %s", createRR.Code, createRR.Body.String())
+	}
+	deleteRequest := headerSignedRequest(http.MethodDelete, "/managed-bucket")
+	deleteRR := httptest.NewRecorder()
+	router.ServeHTTP(deleteRR, deleteRequest)
+	if deleteRR.Code != http.StatusForbidden || !strings.Contains(deleteRR.Body.String(), "AccessDenied") {
+		t.Fatalf("direct delete = %d %s", deleteRR.Code, deleteRR.Body.String())
+	}
+	if data, err := os.ReadFile(retainedObject); err != nil || string(data) != "hidden" {
+		t.Fatalf("retained bytes = %q err=%v", data, err)
+	}
+}
+
+func TestManagedRouterRejectsCopySourceOutsideCredentialBucketScope(t *testing.T) {
+	gdb := newServerTestDB(t)
+	credential := dbpkg.Credential{AccessKey: "scoped", SecretKey: "secret", Bucket: "destination-bucket", Status: "enabled"}
+	if err := gdb.Create(&credential).Error; err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := t.TempDir()
+	backend, err := storage.NewFileBackend(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, dataRoot, storage.DefaultBucketACLCacheTTL)
+	for _, name := range []string{"destination-bucket", "source-bucket"} {
+		if err := bucketStore.Create(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := backend.PutObject("source-bucket", "source.txt", strings.NewReader("source"), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.PutObject("destination-bucket", "same-scope.txt", strings.NewReader("same"), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	authenticator := fixedAuthenticator{id: &auth.Identity{
+		CredentialID: credential.ID, AccessKey: credential.AccessKey, Bucket: credential.Bucket,
+	}}
+	router := NewManagedRouterWithQuotaManager(backend, nil, bucketStore, authenticator, quota.NewManager(gdb), nil, NewRateLimitController(config.RateLimitConfig{}))
+
+	crossScope := headerSignedRequest(http.MethodPut, "/destination-bucket/copied.txt")
+	crossScope.Header.Set("x-amz-copy-source", "/source-bucket/source.txt")
+	crossScopeRR := httptest.NewRecorder()
+	router.ServeHTTP(crossScopeRR, crossScope)
+	if crossScopeRR.Code != http.StatusForbidden || !strings.Contains(crossScopeRR.Body.String(), auth.CodeAccessDenied) {
+		t.Fatalf("cross-scope copy = %d %s", crossScopeRR.Code, crossScopeRR.Body.String())
+	}
+	if _, err := backend.HeadObject("destination-bucket", "copied.txt"); !errors.Is(err, storage.ErrNoSuchKey) {
+		t.Fatalf("cross-scope copy created destination: %v", err)
+	}
+
+	sameScope := headerSignedRequest(http.MethodPut, "/destination-bucket/copied.txt")
+	sameScope.Header.Set("x-amz-copy-source", "/destination-bucket/same-scope.txt")
+	sameScopeRR := httptest.NewRecorder()
+	router.ServeHTTP(sameScopeRR, sameScope)
+	if sameScopeRR.Code != http.StatusOK {
+		t.Fatalf("same-scope copy = %d %s", sameScopeRR.Code, sameScopeRR.Body.String())
+	}
+}
+
+func TestRateLimitControllerUpdateReplacesLimiterSet(t *testing.T) {
+	controller := NewRateLimitController(config.RateLimitConfig{AnonymousRPS: 1, AnonymousBurst: 1})
+	handler := controller.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/public-bucket/key.txt", nil)
+		req.RemoteAddr = "192.0.2.20:1234"
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if got := request(); got != http.StatusNoContent {
+		t.Fatalf("first status = %d", got)
+	}
+	if got := request(); got != http.StatusServiceUnavailable {
+		t.Fatalf("limited status = %d", got)
+	}
+	controller.Update(config.RateLimitConfig{AnonymousRPS: 100, AnonymousBurst: 2, TrustForwarded: true})
+	if got := request(); got != http.StatusNoContent {
+		t.Fatalf("status after update = %d", got)
+	}
+	if cfg := controller.Config(); cfg.AnonymousRPS != 100 || cfg.AnonymousBurst != 2 || !cfg.TrustForwarded {
+		t.Fatalf("controller config = %+v", cfg)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
 	"gorm.io/gorm"
 )
 
@@ -43,7 +44,17 @@ type AppliedTask struct {
 	CreatedAt  time.Time
 }
 
-var stateModels = []any{&AgentMeta{}, &AppliedTask{}}
+// ManagedRateLimit is the last successfully applied anonymous rate-limit
+// policy. Absence of the singleton row means the built-in defaults are active.
+type ManagedRateLimit struct {
+	ID             uint    `gorm:"primaryKey"`
+	AnonymousRPS   float64 `gorm:"not null"`
+	AnonymousBurst int     `gorm:"not null"`
+	TrustForwarded bool    `gorm:"not null;default:false"`
+	UpdatedAt      time.Time
+}
+
+var stateModels = []any{&AgentMeta{}, &AppliedTask{}, &ManagedRateLimit{}}
 
 var stateExpectedTables = []struct {
 	name  string
@@ -51,6 +62,22 @@ var stateExpectedTables = []struct {
 }{
 	{name: "agent_meta", model: &AgentMeta{}},
 	{name: "applied_tasks", model: &AppliedTask{}},
+	{name: "managed_rate_limits", model: &ManagedRateLimit{}},
+}
+
+func LoadManagedRateLimit(gdb *gorm.DB) (config.RateLimitConfig, bool, error) {
+	var row ManagedRateLimit
+	if err := gdb.First(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return config.RateLimitConfig{
+				AnonymousRPS: config.DefaultAnonymousRPS, AnonymousBurst: config.DefaultAnonymousBurst,
+			}, false, nil
+		}
+		return config.RateLimitConfig{}, false, err
+	}
+	return config.RateLimitConfig{
+		AnonymousRPS: row.AnonymousRPS, AnonymousBurst: row.AnonymousBurst, TrustForwarded: row.TrustForwarded,
+	}, true, nil
 }
 
 var stateExpectedIndexes = []struct {

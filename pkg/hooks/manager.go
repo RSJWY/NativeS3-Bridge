@@ -82,8 +82,19 @@ func (m *Manager) Reload() error {
 	if err := m.db.Where("enabled = ?", true).Find(&configs).Error; err != nil {
 		return err
 	}
+	m.ReplaceConfigs(configs)
+	return nil
+}
+
+// ReplaceConfigs atomically swaps the prepared runtime hook set. The executor
+// calls it only after its database transaction commits, so this operation is
+// deliberately infallible and performs no database access.
+func (m *Manager) ReplaceConfigs(configs []db.HookConfig) {
 	hooks := make([]Hook, 0, len(configs))
 	for _, cfg := range configs {
+		if !cfg.Enabled {
+			continue
+		}
 		events := parseEvents(cfg.Events)
 		if cfg.URL == "" || len(events) == 0 {
 			continue
@@ -93,7 +104,6 @@ func (m *Manager) Reload() error {
 	m.mu.Lock()
 	m.hooks = hooks
 	m.mu.Unlock()
-	return nil
 }
 
 func (m *Manager) Stop() {

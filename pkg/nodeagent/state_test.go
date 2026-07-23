@@ -63,10 +63,34 @@ func TestMigrateStateIsAdditive(t *testing.T) {
 	if !gdb.Migrator().HasTable(&AppliedTask{}) {
 		t.Fatal("applied_tasks table missing after MigrateState")
 	}
+	if !gdb.Migrator().HasTable(&ManagedRateLimit{}) {
+		t.Fatal("managed_rate_limits table missing after MigrateState")
+	}
 
 	// MigrateState is idempotent.
 	if err := MigrateState(gdb); err != nil {
 		t.Fatalf("second MigrateState: %v", err)
+	}
+}
+
+func TestLoadManagedRateLimitDefaultsAndPersistedPolicy(t *testing.T) {
+	gdb := openNodeTestDB(t)
+	if err := db.Migrate(gdb); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateState(gdb); err != nil {
+		t.Fatal(err)
+	}
+	cfg, configured, err := LoadManagedRateLimit(gdb)
+	if err != nil || configured || cfg.AnonymousRPS != 10 || cfg.AnonymousBurst != 20 || cfg.TrustForwarded {
+		t.Fatalf("default config = %+v configured=%v err=%v", cfg, configured, err)
+	}
+	if err := gdb.Create(&ManagedRateLimit{ID: 1, AnonymousRPS: 2, AnonymousBurst: 3, TrustForwarded: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	cfg, configured, err = LoadManagedRateLimit(gdb)
+	if err != nil || !configured || cfg.AnonymousRPS != 2 || cfg.AnonymousBurst != 3 || !cfg.TrustForwarded {
+		t.Fatalf("persisted config = %+v configured=%v err=%v", cfg, configured, err)
 	}
 }
 

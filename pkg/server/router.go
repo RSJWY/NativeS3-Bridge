@@ -30,23 +30,32 @@ type Router struct {
 	multipartHandler *handlers.MultipartHandler
 	bucketStore      *storage.BucketStore
 	chain            []Middleware
+	managed          bool
 }
 
 func NewRouter(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, commit handlers.UsageCommitter, emitter handlers.EventEmitter, rateLimit config.RateLimitConfig) http.Handler {
-	return newRouter(backend, multipartStore, bucketStore, authenticator, handlers.NewObjectHandlerWithHooks(backend, commit, emitter), handlers.NewMultipartHandlerWithHooks(multipartStore, commit, emitter), handlers.NewBucketHandler(backend, bucketStore), rateLimit, Quota)
+	return newRouter(backend, multipartStore, bucketStore, authenticator, handlers.NewObjectHandlerWithHooks(backend, commit, emitter), handlers.NewMultipartHandlerWithHooks(multipartStore, commit, emitter), handlers.NewBucketHandler(backend, bucketStore), AnonRateLimit(rateLimit), Quota, false)
 }
 
 func NewRouterWithQuotaManager(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, manager handlers.QuotaManager, boundCredentialChecker func(string) (bool, error), emitter handlers.EventEmitter, rateLimit config.RateLimitConfig) http.Handler {
-	return newRouter(backend, multipartStore, bucketStore, authenticator, handlers.NewObjectHandlerWithQuotaManager(backend, manager, emitter), handlers.NewMultipartHandlerWithQuotaManager(multipartStore, manager, emitter), handlers.NewBucketHandlerWithCredentialChecker(backend, bucketStore, boundCredentialChecker), rateLimit, QuotaWithReservations)
+	return newRouter(backend, multipartStore, bucketStore, authenticator, handlers.NewObjectHandlerWithQuotaManager(backend, manager, emitter), handlers.NewMultipartHandlerWithQuotaManager(multipartStore, manager, emitter), handlers.NewBucketHandlerWithCredentialChecker(backend, bucketStore, boundCredentialChecker), AnonRateLimit(rateLimit), QuotaWithReservations, false)
 }
 
-func newRouter(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, objectHandler *handlers.ObjectHandler, multipartHandler *handlers.MultipartHandler, bucketHandler *handlers.BucketHandler, rateLimit config.RateLimitConfig, quotaMiddleware Middleware) http.Handler {
+func NewManagedRouterWithQuotaManager(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, manager handlers.QuotaManager, emitter handlers.EventEmitter, rateLimit *RateLimitController) http.Handler {
+	return newRouter(backend, multipartStore, bucketStore, authenticator,
+		handlers.NewObjectHandlerWithQuotaManager(backend, manager, emitter),
+		handlers.NewMultipartHandlerWithQuotaManager(multipartStore, manager, emitter),
+		handlers.NewManagedBucketHandler(backend, bucketStore), rateLimit.Middleware(), QuotaWithReservations, true)
+}
+
+func newRouter(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, objectHandler *handlers.ObjectHandler, multipartHandler *handlers.MultipartHandler, bucketHandler *handlers.BucketHandler, rateLimitMiddleware Middleware, quotaMiddleware Middleware, managed bool) http.Handler {
 	r := &Router{
 		objectHandler:    objectHandler,
 		bucketHandler:    bucketHandler,
 		multipartHandler: multipartHandler,
 		bucketStore:      bucketStore,
-		chain:            []Middleware{Recover, Logging, AnonRateLimit(rateLimit), Auth(authenticator, bucketStore.GetACL), quotaMiddleware},
+		chain:            []Middleware{Recover, Logging, rateLimitMiddleware, Auth(authenticator, bucketStore.GetACL), quotaMiddleware},
+		managed:          managed,
 	}
 	var h http.Handler = http.HandlerFunc(r.dispatch)
 	for i := len(r.chain) - 1; i >= 0; i-- {
@@ -56,21 +65,11 @@ func newRouter(backend storage.Backend, multipartStore *storage.MultipartStore, 
 }
 
 func AnonRateLimit(cfg config.RateLimitConfig) Middleware {
-	limiter := newIPRateLimiter(cfg.AnonymousRPS, cfg.AnonymousBurst)
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			bucket, key := parseS3Path(r.URL.Path)
-			if hasCredentials(r) || !isAnonymousObjectRead(r, bucket, key) {
-				next.ServeHTTP(w, r)
-				return
-			}
-			if !limiter.allow(clientIP(r, cfg.TrustForwarded)) {
-				handlers.WriteS3Error(w, "SlowDown", http.StatusServiceUnavailable, r.URL.Path)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
+	return NewRateLimitController(cfg).Middleware()
+}
+
+func writeSlowDown(w http.ResponseWriter, r *http.Request) {
+	handlers.WriteS3Error(w, "SlowDown", http.StatusServiceUnavailable, r.URL.Path)
 }
 
 func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
@@ -82,6 +81,17 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 		}
 		handlers.WriteS3Error(w, "MethodNotAllowed", http.StatusMethodNotAllowed, req.URL.Path)
 		return
+	}
+	if r.managed && !(key == "" && (req.Method == http.MethodPut || req.Method == http.MethodDelete)) {
+		_, exists, err := r.bucketStore.GetACL(bucket)
+		if err != nil {
+			handlers.WriteS3Error(w, "InternalError", http.StatusInternalServerError, req.URL.Path)
+			return
+		}
+		if !exists {
+			handlers.WriteS3Error(w, "NoSuchBucket", http.StatusNotFound, req.URL.Path)
+			return
+		}
 	}
 
 	if key == "" {
@@ -163,6 +173,26 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case http.MethodPut:
 		if handlers.IsCopyRequest(req) {
+			if r.managed {
+				sourceBucket, err := handlers.CopySourceBucket(req)
+				if err != nil {
+					handlers.WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, req.URL.Path)
+					return
+				}
+				_, exists, err := r.bucketStore.GetACL(sourceBucket)
+				if err != nil {
+					handlers.WriteS3Error(w, "InternalError", http.StatusInternalServerError, req.URL.Path)
+					return
+				}
+				if !exists {
+					handlers.WriteS3Error(w, "NoSuchBucket", http.StatusNotFound, req.URL.Path)
+					return
+				}
+				if identity, ok := auth.IdentityFromContext(req.Context()); ok && identity != nil && identity.Bucket != "" && identity.Bucket != sourceBucket {
+					handlers.WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, req.URL.Path)
+					return
+				}
+			}
 			r.objectHandler.Copy(w, req, bucket, key)
 			return
 		}
@@ -179,7 +209,7 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) shouldEnsureBucketMetadata(req *http.Request, bucket, key string) bool {
-	if r.bucketStore == nil || bucket == "" || key == "" {
+	if r.managed || r.bucketStore == nil || bucket == "" || key == "" {
 		return false
 	}
 	if req.Method == http.MethodPut && !hasQuery(req, "tagging") && req.URL.Query().Get("uploadId") == "" {

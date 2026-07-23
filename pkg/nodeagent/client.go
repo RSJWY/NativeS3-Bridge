@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -174,6 +175,7 @@ func (c *Client) handshake(ctx context.Context, ws *websocket.Conn) error {
 		AgentVersion:    AgentVersion,
 		AppliedVersion:  meta.AppliedVersion,
 		ContentHash:     localHash,
+		Capabilities:    []string{controlproto.CapabilityAuthoritativeConfigV1},
 	}
 	if err := c.sendMessage(ctx, ws, controlproto.TypeHello, "", hello); err != nil {
 		return fmt.Errorf("send hello: %w", err)
@@ -245,41 +247,37 @@ func (c *Client) handleDesiredState(ctx context.Context, ws *websocket.Conn, env
 		return
 	}
 
-	appliedHash, err := c.executor.Apply(payload.Content)
+	appliedHash, err := c.executor.ApplyDesiredState(payload)
 	if err != nil {
 		slog.Error("apply desired_state failed", "version", payload.Version, "error", err)
 		_ = c.sendMessage(ctx, ws, controlproto.TypeAck, env.ID, controlproto.AckPayload{
 			Version: payload.Version,
 			State:   controlproto.SyncStateFailed,
-			Error:   err.Error(),
+			Error:   safeApplyError(err),
 		})
 		return
 	}
 
-	state := controlproto.SyncStateSynced
-	// If the panel included a content hash, verify our applied state matches it.
-	// A mismatch indicates the panel and node disagree on the schema/content and
-	// is surfaced as drift rather than a clean sync.
-	if payload.ContentHash != "" && payload.ContentHash != appliedHash {
-		state = controlproto.SyncStateDrift
-	}
-
-	if err := SaveMeta(c.db, payload.Version, appliedHash); err != nil {
-		slog.Error("persist applied version failed", "error", err)
-		_ = c.sendMessage(ctx, ws, controlproto.TypeAck, env.ID, controlproto.AckPayload{
-			Version: payload.Version,
-			State:   controlproto.SyncStateFailed,
-			Error:   fmt.Sprintf("persist applied version: %v", err),
-		})
-		return
-	}
-
-	slog.Info("applied desired_state", "version", payload.Version, "state", state)
+	slog.Info("applied desired_state", "version", payload.Version, "state", controlproto.SyncStateSynced)
 	_ = c.sendMessage(ctx, ws, controlproto.TypeAck, env.ID, controlproto.AckPayload{
 		Version:     payload.Version,
-		State:       state,
+		State:       controlproto.SyncStateSynced,
 		ContentHash: appliedHash,
 	})
+}
+
+func safeApplyError(err error) string {
+	message := err.Error()
+	for _, safeFragment := range []string{
+		"desired content hash mismatch",
+		"validate desired state:",
+		"retained data prevents declaring bucket",
+	} {
+		if strings.Contains(message, safeFragment) {
+			return message
+		}
+	}
+	return "desired state apply failed"
 }
 
 // handleImportRequest replies with a read-only snapshot of the node's current

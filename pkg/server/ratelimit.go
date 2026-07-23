@@ -5,10 +5,67 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
 	"golang.org/x/time/rate"
 )
+
+type rateLimitRuntime struct {
+	config  config.RateLimitConfig
+	limiter *ipRateLimiter
+}
+
+// RateLimitController is the managed node's hot-swappable anonymous rate-limit
+// policy. Each update replaces both the policy and its per-IP limiter set as one
+// atomic snapshot.
+type RateLimitController struct {
+	current atomic.Value // rateLimitRuntime
+}
+
+func NewRateLimitController(cfg config.RateLimitConfig) *RateLimitController {
+	controller := &RateLimitController{}
+	controller.Update(cfg)
+	return controller
+}
+
+func normalizeRateLimitConfig(cfg config.RateLimitConfig) config.RateLimitConfig {
+	if cfg.AnonymousRPS <= 0 {
+		cfg.AnonymousRPS = config.DefaultAnonymousRPS
+	}
+	if cfg.AnonymousBurst <= 0 {
+		cfg.AnonymousBurst = config.DefaultAnonymousBurst
+	}
+	return cfg
+}
+
+func (c *RateLimitController) Update(cfg config.RateLimitConfig) {
+	cfg = normalizeRateLimitConfig(cfg)
+	c.current.Store(rateLimitRuntime{config: cfg, limiter: newIPRateLimiter(cfg.AnonymousRPS, cfg.AnonymousBurst)})
+}
+
+func (c *RateLimitController) Config() config.RateLimitConfig {
+	return c.current.Load().(rateLimitRuntime).config
+}
+
+func (c *RateLimitController) Middleware() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			bucket, key := parseS3Path(r.URL.Path)
+			if hasCredentials(r) || !isAnonymousObjectRead(r, bucket, key) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			runtime := c.current.Load().(rateLimitRuntime)
+			if !runtime.limiter.allow(clientIP(r, runtime.config.TrustForwarded)) {
+				writeSlowDown(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
 
 type ipRateLimiter struct {
 	mu         sync.Mutex

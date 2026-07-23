@@ -35,6 +35,31 @@ func TestManagerReloadFiltersDisabledHooks(t *testing.T) {
 	}
 }
 
+func TestManagerReplaceConfigsSwapsRuntimeHooks(t *testing.T) {
+	m := NewManager(nil, Config{})
+	m.ReplaceConfigs([]db.HookConfig{
+		{URL: "https://enabled.example.test", Events: "ObjectCreated", Enabled: true},
+		{URL: "https://disabled.example.test", Events: "ObjectDeleted", Enabled: false},
+	})
+	m.mu.RLock()
+	hooks := append([]Hook(nil), m.hooks...)
+	m.mu.RUnlock()
+	if len(hooks) != 1 {
+		t.Fatalf("hooks = %d", len(hooks))
+	}
+	webhook, ok := hooks[0].(*WebhookHook)
+	if !ok || webhook.URL != "https://enabled.example.test" || !webhook.Match(ObjectCreated) {
+		t.Fatalf("runtime hook = %#v", hooks[0])
+	}
+	m.ReplaceConfigs(nil)
+	m.mu.RLock()
+	remaining := len(m.hooks)
+	m.mu.RUnlock()
+	if remaining != 0 {
+		t.Fatalf("remaining hooks = %d", remaining)
+	}
+}
+
 func TestManagerRetriesDelivery(t *testing.T) {
 	gdb := testDB(t)
 	m := NewManager(gdb, Config{MaxRetry: 3})
