@@ -223,3 +223,100 @@ Correct:
 ```vue
 <router-view v-if="runtimeState.ready" />
 ```
+
+## Scenario: Panel Node Authoritative Configuration UI
+
+### 1. Scope / Trigger
+
+- Trigger: changes to `PanelNodeDetail.vue`, `src/components/panel/PanelNode*Section.vue`, Panel node resource types/methods in `src/api/client.ts`, or the draft/published/applied status contract.
+- Goal: provide the complete node configuration lifecycle without hiding the explicit publish boundary, leaking one-time secrets, or making requests for the standalone service mode.
+
+### 2. Signatures
+
+- Node status: `PanelNode.draft_dirty`, `publish_required`, `desired_version`, `applied_version`, `sync_state`, and optional `last_error`.
+- Typed resources: `PanelBucket`, `PanelCredential`, `PanelCreatedCredential`, `PanelWebhook`, `PanelRateLimit`, `PanelImportSummary`, and `PanelPublishResult`.
+- Client methods: `list/create/update/deleteNodeBucket`, `list/create/update/delete/rotateNodeCredential`, `list/create/update/deleteNodeWebhook`, `get/update/resetNodeRateLimit`, `get/request/confirm/abortNodeImport`, `publishNodeDesiredState`, and `pushNodeDesiredState`.
+- Focused components:
+  - `PanelNodeImportSection.vue`
+  - `PanelNodeBucketsSection.vue`
+  - `PanelNodeCredentialsSection.vue`
+  - `PanelNodeWebhooksSection.vue`
+  - `PanelNodeRateLimitSection.vue`
+- Resource sections receive `nodeId`, a disabled state, and `refreshKey`; successful draft mutations emit `changed` so the parent refreshes authoritative status.
+
+### 3. Contracts
+
+- The parent detail page owns node lifecycle, online/sync state, desired/applied versions, publish, push, and shared refresh. Each resource section owns only its form/loading/error/modal state.
+- CRUD changes are labeled as draft changes. The page must state that effects occur only after explicit publish and successful node apply.
+- “发布草稿” creates a new version from current draft. “重推已发布版本” sends the existing exact snapshot and must never imply that draft changes are included.
+- `draft_dirty=true` enables the publish affordance, including a fresh node whose intended baseline is empty. `publish_required=true` shows that a legacy snapshot must be republished.
+- Credential bucket input is a same-node bucket select. Credential secret results exist only in component-local `secretResult` and are cleared when the result modal closes.
+- Bucket deletion confirmation states both safety facts: native objects are retained, and S3 hiding happens only after publish + apply.
+- Webhook events use explicit `ObjectCreated` / `ObjectDeleted` choices, not a free-form comma string.
+- Rate-limit UI distinguishes configured values from effective defaults and warns that `trust_forwarded` is safe only behind trusted proxies.
+- Import is a visible state machine: request online node -> review redacted summary -> confirm or abort. Confirm copy states that no authoritative rows are written before confirmation.
+- `ApiError.status` is preserved for UI decisions. Pending import `404` is normalized to `null`; `409` and `504` receive specific, visible messages.
+- Every path component such as access key or bucket name uses `encodeURIComponent`. All async event handlers catch and display failures; no unhandled promise rejection is acceptable.
+
+### 4. Validation & Error Matrix
+
+- Resource load/mutation failure -> visible section error while the rest of node detail remains usable.
+- Protected API `401` -> shared `apiFetch` clears auth and redirects to `/login`.
+- Missing pending import `404` -> idle import state, not a page-level error.
+- Offline/already-managed/in-progress import `409` -> targeted conflict copy; import timeout `504` -> targeted timeout copy.
+- Bucket delete bound-credential `409` -> visible instruction to unbind/delete credentials first.
+- Invalid credential quota, webhook URL/event selection, or non-positive rate-limit values -> block submit or show the sanitized backend error.
+- Secret modal close -> immediately set local secret state to `null`; subsequent table/status refresh must not recover or redisplay it.
+- Panel service mode -> no `/dashboard`, standalone `/credentials`, `/buckets`, or `/logs` requests during node-detail usage.
+
+### 5. Good/Base/Bad Cases
+
+- Good: create a bucket and credential, see `draft_dirty`, publish version N, and then see desired/applied/sync state refresh independently.
+- Good: rotate a secret, save it from the one-time modal, close the modal, and verify the value is absent from the DOM and later API responses.
+- Good: request import, review only counts/bucket names/access keys/hash, abort, request again, then confirm version 1.
+- Base: an offline node can edit and publish drafts; push reports offline while the page explains reconnect reconciliation.
+- Base: resetting rate limit shows effective defaults but remains an unpublished draft until publish.
+- Bad: changing a draft and labeling “push” as though it sends those edits.
+- Bad: storing secret/token values in localStorage, parent/global state, route state, or a reusable API cache.
+- Bad: saying a bucket is hidden immediately after deleting its draft declaration.
+
+### 6. Tests Required
+
+- `npm ci && npm run build` must pass TypeScript checking and the production Vite build.
+- Typed client tests/review assert all node resource routes and path encoding, `ApiError.status`, and pending-import `404 -> null` behavior.
+- Component tests or browser checks cover visible loading/empty/error states, `changed` refresh events, draft/publish/push copy, and confirmation text.
+- Browser secret test closes create/rotate results and asserts the secret is no longer present in the DOM or retained component state.
+- Panel browser network gate: login -> node detail -> CRUD -> publish, with no standalone-mode API request and no unexpected HTTP status `>= 400`.
+- Responsive browser check covers the five sections at desktop and narrow widths without page-level horizontal overflow.
+- Live control-plane check covers offline publish, reconnect reconciliation, import request/abort/confirm, and refreshed desired/applied/sync status.
+
+### 7. Wrong vs Correct
+
+Wrong:
+
+```ts
+await adminApi.deleteNodeBucket(nodeId, name)
+toast('Bucket 已从 S3 删除')
+```
+
+Correct:
+
+```ts
+await adminApi.deleteNodeBucket(nodeId, name)
+emit('changed')
+notice.value = '草稿已删除；发布并由节点应用后才会从 S3 视图隐藏，磁盘对象不会删除。'
+```
+
+Wrong:
+
+```ts
+localStorage.setItem('lastSecret', created.secret_key)
+```
+
+Correct:
+
+```ts
+secretResult.value = { accessKey: created.access_key, secretKey: created.secret_key }
+// Modal close:
+secretResult.value = null
+```

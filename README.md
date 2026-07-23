@@ -622,7 +622,7 @@ Hook manager 从数据库的 `hook_configs` 表加载启用的 Webhook 配置。
 - 非 2xx、连接失败或超时会按 `hooks.max_retry` 指数退避重试。
 - 禁用的 hook config 不会投递。
 
-当前 panel Admin API 尚未提供 webhook CRUD。不要把直接修改 node 的 `hook_configs` 当作长期配置入口；业务配置应由 panel 权威状态管理，缺少的管理能力需在后续版本补齐。
+Panel 节点详情页和 `/api/admin/nodes/{id}/webhooks` 已提供 webhook 草稿 CRUD，事件类型使用 `ObjectCreated` / `ObjectDeleted` 显式选择。修改只有在管理员发布草稿且 node 成功应用后才替换运行时 hook 集合；不要直接修改 node 的 `hook_configs` 绕过 Panel 权威状态。
 
 ## Docker 部署
 
