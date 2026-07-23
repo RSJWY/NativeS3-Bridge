@@ -2,190 +2,305 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/controlproto"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/managedconfig"
 )
 
-// DesiredStateAuthority owns the panel's authoritative desired state for each
-// node. It builds a controlproto.DesiredState from the panel's own tables
-// (node_credentials, and node-scoped buckets/webhooks/limits), decrypting secret
-// keys with the master-key cipher only at build time, and publishes new
-// monotonic versions. Only the latest version is retained (design §2.2): a new
-// publish overwrites the single desired_configs row for the node.
+const desiredSnapshotSchemaVersion = 1
+
+var (
+	// ErrDesiredSnapshotRepublishRequired is returned for the legacy masked
+	// controlproto JSON format. Its missing credential secrets make the original
+	// version impossible to reconstruct exactly, so pushes must fail closed.
+	ErrDesiredSnapshotRepublishRequired = errors.New("published desired snapshot must be republished")
+	ErrDesiredSnapshotHashMismatch      = errors.New("published desired snapshot hash mismatch")
+)
+
+type persistedDesiredSnapshot struct {
+	SchemaVersion int                            `json:"schema_version"`
+	Credentials   []persistedDesiredCredential   `json:"credentials"`
+	Buckets       []controlproto.DesiredBucket   `json:"buckets"`
+	Webhooks      []controlproto.DesiredWebhook  `json:"webhooks"`
+	RateLimit     *controlproto.DesiredRateLimit `json:"rate_limit,omitempty"`
+}
+
+type persistedDesiredCredential struct {
+	AccessKey       string `json:"access_key"`
+	SecretKeyCipher string `json:"secret_key_cipher"`
+	Name            string `json:"name,omitempty"`
+	Bucket          string `json:"bucket,omitempty"`
+	Status          string `json:"status"`
+	QuotaBytes      int64  `json:"quota_bytes"`
+}
+
+// DesiredStateAuthority owns both sides of the draft -> published boundary.
+// Draft rows are read only during an explicit publish. Every push is rebuilt
+// solely from the encrypted, schema-versioned DesiredConfig snapshot.
 type DesiredStateAuthority struct {
 	db     *gorm.DB
 	cipher *SecretCipher
 }
 
-// NewDesiredStateAuthority builds the authority over the panel DB and cipher.
 func NewDesiredStateAuthority(db *gorm.DB, cipher *SecretCipher) *DesiredStateAuthority {
 	return &DesiredStateAuthority{db: db, cipher: cipher}
 }
 
-// Build assembles the desired state for a node from panel tables. Secret keys
-// are decrypted here (and only here) so the plaintext exists transiently in the
-// state that is pushed over mTLS; it is never persisted in plaintext on the
-// panel. A decryption failure aborts the build (fail-closed): the panel will not
-// push a desired state with missing/garbled secrets.
+// Build materializes the current editable draft. It is intentionally not used
+// by any push path.
 func (a *DesiredStateAuthority) Build(nodeID uint) (controlproto.DesiredState, error) {
-	var state controlproto.DesiredState
-
-	var creds []NodeCredential
-	if err := a.db.Where("node_id = ?", nodeID).Order("access_key ASC").Find(&creds).Error; err != nil {
-		return state, err
+	snapshot, err := a.loadDraftSnapshot(a.db, nodeID)
+	if err != nil {
+		return controlproto.DesiredState{}, err
 	}
-	for _, c := range creds {
-		secret, err := a.cipher.Decrypt(c.SecretKeyCipher)
-		if err != nil {
-			return state, fmt.Errorf("decrypt secret for %q: %w", c.AccessKey, err)
-		}
-		status := c.Status
-		if status == "" {
-			status = "enabled"
-		}
-		state.Credentials = append(state.Credentials, controlproto.DesiredCredential{
-			AccessKey:  c.AccessKey,
-			SecretKey:  secret,
-			Name:       c.Name,
-			Bucket:     c.Bucket,
-			Status:     status,
-			QuotaBytes: c.QuotaBytes,
+	state, err := a.decryptSnapshot(snapshot)
+	if err != nil {
+		return controlproto.DesiredState{}, err
+	}
+	if err := managedconfig.ValidateDesiredState(state); err != nil {
+		return controlproto.DesiredState{}, fmt.Errorf("validate desired draft: %w", err)
+	}
+	return state, nil
+}
+
+func (a *DesiredStateAuthority) loadDraftSnapshot(db *gorm.DB, nodeID uint) (persistedDesiredSnapshot, error) {
+	snapshot := persistedDesiredSnapshot{
+		SchemaVersion: desiredSnapshotSchemaVersion,
+		Credentials:   []persistedDesiredCredential{},
+		Buckets:       []controlproto.DesiredBucket{},
+		Webhooks:      []controlproto.DesiredWebhook{},
+	}
+
+	var credentials []NodeCredential
+	if err := db.Where("node_id = ?", nodeID).Order("access_key ASC").Find(&credentials).Error; err != nil {
+		return snapshot, err
+	}
+	for _, credential := range credentials {
+		status := managedconfig.NormalizeCredentialStatus(credential.Status)
+		snapshot.Credentials = append(snapshot.Credentials, persistedDesiredCredential{
+			AccessKey:       credential.AccessKey,
+			SecretKeyCipher: credential.SecretKeyCipher,
+			Name:            credential.Name,
+			Bucket:          credential.Bucket,
+			Status:          status,
+			QuotaBytes:      credential.QuotaBytes,
 		})
 	}
 
 	var buckets []NodeBucket
-	if err := a.db.Where("node_id = ?", nodeID).Order("name ASC").Find(&buckets).Error; err != nil {
-		return state, err
+	if err := db.Where("node_id = ?", nodeID).Order("name ASC").Find(&buckets).Error; err != nil {
+		return snapshot, err
 	}
-	for _, b := range buckets {
-		acl := b.ACL
+	for _, bucket := range buckets {
+		acl := bucket.ACL
 		if acl == "" {
 			acl = "private"
 		}
-		state.Buckets = append(state.Buckets, controlproto.DesiredBucket{Name: b.Name, ACL: acl})
+		snapshot.Buckets = append(snapshot.Buckets, controlproto.DesiredBucket{Name: bucket.Name, ACL: acl})
 	}
 
 	var webhooks []NodeWebhook
-	if err := a.db.Where("node_id = ?", nodeID).Order("url ASC").Find(&webhooks).Error; err != nil {
-		return state, err
+	if err := db.Where("node_id = ?", nodeID).Order("url ASC, events ASC, id ASC").Find(&webhooks).Error; err != nil {
+		return snapshot, err
 	}
-	for _, h := range webhooks {
-		state.Webhooks = append(state.Webhooks, controlproto.DesiredWebhook{URL: h.URL, Events: h.Events, Enabled: h.Enabled})
+	for _, webhook := range webhooks {
+		snapshot.Webhooks = append(snapshot.Webhooks, controlproto.DesiredWebhook{
+			URL: webhook.URL, Events: webhook.Events, Enabled: webhook.Enabled,
+		})
 	}
 
 	var limit NodeRateLimit
-	err := a.db.Where("node_id = ?", nodeID).First(&limit).Error
-	if err == nil {
-		state.RateLimit = &controlproto.DesiredRateLimit{
-			AnonymousRPS:   limit.AnonymousRPS,
-			AnonymousBurst: limit.AnonymousBurst,
-			TrustForwarded: limit.TrustForwarded,
+	if err := db.Where("node_id = ?", nodeID).First(&limit).Error; err == nil {
+		snapshot.RateLimit = &controlproto.DesiredRateLimit{
+			AnonymousRPS: limit.AnonymousRPS, AnonymousBurst: limit.AnonymousBurst, TrustForwarded: limit.TrustForwarded,
 		}
-	} else if err != gorm.ErrRecordNotFound {
-		return state, err
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return snapshot, err
 	}
+	return snapshot, nil
+}
 
+func (a *DesiredStateAuthority) decryptSnapshot(snapshot persistedDesiredSnapshot) (controlproto.DesiredState, error) {
+	if a.cipher == nil {
+		return controlproto.DesiredState{}, ErrMasterKeyMissing
+	}
+	state := controlproto.DesiredState{
+		Credentials: make([]controlproto.DesiredCredential, 0, len(snapshot.Credentials)),
+		Buckets:     append([]controlproto.DesiredBucket(nil), snapshot.Buckets...),
+		Webhooks:    append([]controlproto.DesiredWebhook(nil), snapshot.Webhooks...),
+		RateLimit:   snapshot.RateLimit,
+	}
+	for _, credential := range snapshot.Credentials {
+		if credential.SecretKeyCipher == "" {
+			return controlproto.DesiredState{}, fmt.Errorf("decrypt secret for %q: ciphertext is empty", credential.AccessKey)
+		}
+		secret, err := a.cipher.Decrypt(credential.SecretKeyCipher)
+		if err != nil {
+			return controlproto.DesiredState{}, fmt.Errorf("decrypt secret for %q: %w", credential.AccessKey, err)
+		}
+		state.Credentials = append(state.Credentials, controlproto.DesiredCredential{
+			AccessKey: credential.AccessKey, SecretKey: secret, Name: credential.Name,
+			Bucket: credential.Bucket, Status: managedconfig.NormalizeCredentialStatus(credential.Status), QuotaBytes: credential.QuotaBytes,
+		})
+	}
 	return state, nil
 }
 
-// Publish rebuilds the desired state for a node, bumps its version, and writes
-// the single latest desired_configs row (upsert). It returns the new version and
-// the content hash. The plaintext secrets in the built state are NOT persisted:
-// only the content JSON (which does contain plaintext secrets by necessity, so
-// the desired_configs row is as sensitive as the push) — see note below.
-//
-// NOTE: the stored ContentJSON includes plaintext secret keys because the node
-// needs them for SigV4. This row is written to the panel DB. To keep the master
-// key meaningful we store the content WITHOUT plaintext secrets and re-decrypt on
-// push; see PublishMasked.
+func encodePersistedDesiredSnapshot(snapshot persistedDesiredSnapshot) ([]byte, error) {
+	return json.Marshal(snapshot)
+}
+
+func decodePersistedDesiredSnapshot(raw string) (persistedDesiredSnapshot, error) {
+	var header struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal([]byte(raw), &header); err != nil {
+		return persistedDesiredSnapshot{}, fmt.Errorf("decode published desired snapshot: %w", err)
+	}
+	if header.SchemaVersion != desiredSnapshotSchemaVersion {
+		return persistedDesiredSnapshot{}, ErrDesiredSnapshotRepublishRequired
+	}
+	var snapshot persistedDesiredSnapshot
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		return persistedDesiredSnapshot{}, fmt.Errorf("decode published desired snapshot: %w", err)
+	}
+	if snapshot.Credentials == nil {
+		snapshot.Credentials = []persistedDesiredCredential{}
+	}
+	if snapshot.Buckets == nil {
+		snapshot.Buckets = []controlproto.DesiredBucket{}
+	}
+	if snapshot.Webhooks == nil {
+		snapshot.Webhooks = []controlproto.DesiredWebhook{}
+	}
+	return snapshot, nil
+}
+
 func (a *DesiredStateAuthority) Publish(nodeID uint, updatedBy string) (int64, string, error) {
-	state, err := a.Build(nodeID)
-	if err != nil {
-		return 0, "", err
-	}
-	// Persist a masked copy (no plaintext secrets) so the panel DB alone never
-	// yields plaintext S3 secrets (design §2.3, §7.3). The hash is computed over
-	// the REAL state (with secrets) so the node's applied hash matches.
-	realHash := state.ContentHash()
-	masked := maskSecrets(state)
-	maskedJSON, err := json.Marshal(masked)
-	if err != nil {
-		return 0, "", fmt.Errorf("marshal desired state: %w", err)
-	}
+	unlock := lockNodeDraft(nodeID)
+	defer unlock()
 
 	var version int64
-	err = a.db.Transaction(func(tx *gorm.DB) error {
-		var existing DesiredConfig
-		err := tx.Where("node_id = ?", nodeID).First(&existing).Error
-		if err == nil {
-			version = existing.Version + 1
-			return tx.Model(&DesiredConfig{}).Where("node_id = ?", nodeID).Updates(map[string]any{
-				"version":      version,
-				"content_json": string(maskedJSON),
-				"content_hash": realHash,
-				"updated_by":   updatedBy,
-				"updated_at":   nowUTC(),
-			}).Error
-		}
-		if err != gorm.ErrRecordNotFound {
-			return err
-		}
-		version = 1
-		return tx.Create(&DesiredConfig{
-			NodeID:      nodeID,
-			Version:     version,
-			ContentJSON: string(maskedJSON),
-			ContentHash: realHash,
-			UpdatedBy:   updatedBy,
-			UpdatedAt:   nowUTC(),
-		}).Error
+	var hash string
+	err := a.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		version, hash, err = a.PublishTx(tx, nodeID, updatedBy)
+		return err
 	})
 	if err != nil {
 		return 0, "", err
 	}
-	return version, realHash, nil
+	return version, hash, nil
 }
 
-// BuildPushable returns the desired state WITH plaintext secrets and the current
-// version/hash for pushing to a node. It is used by the transport push path so
-// the node receives usable secrets while the panel DB retains only masked copies.
+// PublishTx creates the exact encrypted snapshot using the supplied transaction.
+// Import confirmation uses this primitive so draft adoption and baseline publish
+// either commit together or roll back together.
+func (a *DesiredStateAuthority) PublishTx(tx *gorm.DB, nodeID uint, updatedBy string) (int64, string, error) {
+	snapshot, err := a.loadDraftSnapshot(tx, nodeID)
+	if err != nil {
+		return 0, "", err
+	}
+	state, err := a.decryptSnapshot(snapshot)
+	if err != nil {
+		return 0, "", err
+	}
+	if err := managedconfig.ValidateDesiredState(state); err != nil {
+		return 0, "", fmt.Errorf("validate desired draft: %w", err)
+	}
+	encoded, err := encodePersistedDesiredSnapshot(snapshot)
+	if err != nil {
+		return 0, "", fmt.Errorf("encode desired snapshot: %w", err)
+	}
+	hash := state.ContentHash()
+
+	var existing DesiredConfig
+	err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", nodeID).First(&existing).Error
+	if err == nil {
+		version := existing.Version + 1
+		if err := tx.Model(&DesiredConfig{}).Where("node_id = ?", nodeID).Updates(map[string]any{
+			"version": version, "content_json": string(encoded), "content_hash": hash,
+			"updated_by": updatedBy, "updated_at": nowUTC(),
+		}).Error; err != nil {
+			return 0, "", err
+		}
+		return version, hash, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, "", err
+	}
+	row := DesiredConfig{
+		NodeID: nodeID, Version: 1, ContentJSON: string(encoded), ContentHash: hash,
+		UpdatedBy: updatedBy, UpdatedAt: nowUTC(),
+	}
+	if err := tx.Create(&row).Error; err != nil {
+		return 0, "", err
+	}
+	return 1, hash, nil
+}
+
+// BuildPushable decrypts only the persisted published snapshot and verifies its
+// plaintext-derived hash. It never reads any editable draft table.
 func (a *DesiredStateAuthority) BuildPushable(nodeID uint) (controlproto.DesiredStatePayload, error) {
-	var cfg DesiredConfig
-	if err := a.db.Where("node_id = ?", nodeID).First(&cfg).Error; err != nil {
+	var config DesiredConfig
+	if err := a.db.Where("node_id = ?", nodeID).First(&config).Error; err != nil {
 		return controlproto.DesiredStatePayload{}, err
 	}
-	state, err := a.Build(nodeID)
+	snapshot, err := decodePersistedDesiredSnapshot(config.ContentJSON)
 	if err != nil {
 		return controlproto.DesiredStatePayload{}, err
 	}
-	return controlproto.DesiredStatePayload{
-		Version:     cfg.Version,
-		ContentHash: cfg.ContentHash,
-		Content:     state,
-	}, nil
+	state, err := a.decryptSnapshot(snapshot)
+	if err != nil {
+		return controlproto.DesiredStatePayload{}, err
+	}
+	if err := managedconfig.ValidateDesiredState(state); err != nil {
+		return controlproto.DesiredStatePayload{}, fmt.Errorf("validate published desired snapshot: %w", err)
+	}
+	hash := state.ContentHash()
+	if hash != config.ContentHash {
+		return controlproto.DesiredStatePayload{}, fmt.Errorf("%w: stored=%s computed=%s", ErrDesiredSnapshotHashMismatch, config.ContentHash, hash)
+	}
+	return controlproto.DesiredStatePayload{Version: config.Version, ContentHash: hash, Content: state}, nil
 }
 
-// maskSecrets returns a copy of state with credential secret keys blanked, for
-// safe persistence in the panel DB. The content hash must be computed on the
-// UNMASKED state so the node (which applies real secrets) computes the same hash.
-func maskSecrets(state controlproto.DesiredState) controlproto.DesiredState {
-	out := state
-	out.Credentials = make([]controlproto.DesiredCredential, len(state.Credentials))
-	copy(out.Credentials, state.Credentials)
-	for i := range out.Credentials {
-		out.Credentials[i].SecretKey = ""
+// DraftStatus reports whether current draft rows differ from the latest exact
+// published snapshot and whether the stored snapshot is legacy/unpushable.
+func (a *DesiredStateAuthority) DraftStatus(nodeID uint) (dirty bool, publishRequired bool, err error) {
+	draft, err := a.loadDraftSnapshot(a.db, nodeID)
+	if err != nil {
+		return false, false, err
 	}
-	return out
-}
-
-// nodeConfigVersion returns the current desired version for a node, or 0 if none.
-func nodeConfigVersion(db *gorm.DB, nodeID uint) int64 {
-	var cfg DesiredConfig
-	if err := db.Where("node_id = ?", nodeID).First(&cfg).Error; err != nil {
-		return 0
+	var config DesiredConfig
+	if err := a.db.Where("node_id = ?", nodeID).First(&config).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Absence of a published snapshot is itself an unpublished state,
+			// including when the intended authoritative configuration is empty.
+			// This keeps the first explicit publish available so an administrator
+			// can intentionally establish (or clear to) an empty baseline.
+			return true, false, nil
+		}
+		return false, false, err
 	}
-	return cfg.Version
+	published, err := decodePersistedDesiredSnapshot(config.ContentJSON)
+	if errors.Is(err, ErrDesiredSnapshotRepublishRequired) {
+		return false, true, nil
+	}
+	if err != nil {
+		return false, true, nil
+	}
+	draftJSON, err := encodePersistedDesiredSnapshot(draft)
+	if err != nil {
+		return false, false, err
+	}
+	publishedJSON, err := encodePersistedDesiredSnapshot(published)
+	if err != nil {
+		return false, false, err
+	}
+	return string(draftJSON) != string(publishedJSON), false, nil
 }

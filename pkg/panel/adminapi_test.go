@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/RSJWY/NativeS3-Bridge/pkg/controlproto"
 )
 
 // newTestAdminAPI builds an AdminAPI over a migrated in-memory-ish panel DB with
@@ -136,6 +138,136 @@ func TestAuditNeverContainsSecret(t *testing.T) {
 		if strings.Contains(l.TargetResource, created.SecretKey) {
 			t.Fatalf("audit row leaked secret: %+v", l)
 		}
+	}
+}
+
+func TestOfflinePublishExposesWaitingUntilNewVersionIsApplied(t *testing.T) {
+	api, _ := newTestAdminAPI(t)
+	serve(api, http.MethodPost, "/api/admin/nodes", `{"display_name":"node-a"}`)
+
+	version, hash, err := api.desired.Publish(1, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Create(&NodeState{
+		NodeID: 1, Online: false, AppliedVersion: version, ContentHash: hash, SyncState: SyncStateSynced,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rw := serve(api, http.MethodPut, "/api/admin/nodes/1/rate-limit", `{"anonymous_rps":2,"anonymous_burst":2,"trust_forwarded":false}`); rw.Code != http.StatusOK {
+		t.Fatalf("save draft = %d %s", rw.Code, rw.Body.String())
+	}
+	if rw := serve(api, http.MethodPost, "/api/admin/nodes/1/desired-state", ""); rw.Code != http.StatusOK {
+		t.Fatalf("offline publish = %d %s", rw.Code, rw.Body.String())
+	}
+
+	rw := serve(api, http.MethodGet, "/api/admin/nodes/1", "")
+	var response nodeResponse
+	if err := json.Unmarshal(rw.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Online || response.DesiredVersion != version+1 || response.AppliedVersion != version || response.SyncState != SyncStateWaiting || response.LastError != "" {
+		t.Fatalf("offline published response = %+v", response)
+	}
+}
+
+func TestNewPublishPreservesFailedAndDriftEvidence(t *testing.T) {
+	for _, syncState := range []string{SyncStateFailed, SyncStateDrift} {
+		t.Run(syncState, func(t *testing.T) {
+			api, _ := newTestAdminAPI(t)
+			serve(api, http.MethodPost, "/api/admin/nodes", `{"display_name":"node-a"}`)
+			version, hash, err := api.desired.Publish(1, "admin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			lastError := "existing " + syncState + " evidence"
+			if err := api.db.Create(&NodeState{
+				NodeID: 1, AppliedVersion: version, ContentHash: hash, SyncState: syncState, LastError: lastError,
+			}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if rw := serve(api, http.MethodPut, "/api/admin/nodes/1/rate-limit", `{"anonymous_rps":3,"anonymous_burst":3,"trust_forwarded":false}`); rw.Code != http.StatusOK {
+				t.Fatalf("save draft = %d %s", rw.Code, rw.Body.String())
+			}
+			if rw := serve(api, http.MethodPost, "/api/admin/nodes/1/desired-state", ""); rw.Code != http.StatusOK {
+				t.Fatalf("publish = %d %s", rw.Code, rw.Body.String())
+			}
+
+			rw := serve(api, http.MethodGet, "/api/admin/nodes/1", "")
+			var response nodeResponse
+			if err := json.Unmarshal(rw.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.SyncState != syncState || response.LastError != lastError {
+				t.Fatalf("response lost evidence = %+v", response)
+			}
+		})
+	}
+}
+
+func TestNodeResponseKeepsMatchingOnlineNodeSynced(t *testing.T) {
+	api, _ := newTestAdminAPI(t)
+	serve(api, http.MethodPost, "/api/admin/nodes", `{"display_name":"node-a"}`)
+	version, hash, err := api.desired.Publish(1, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Create(&NodeState{NodeID: 1, Online: true, AppliedVersion: version, ContentHash: hash, SyncState: SyncStateSynced}).Error; err != nil {
+		t.Fatal(err)
+	}
+	api.hub.Register(1, &AgentConn{NodeID: 1})
+
+	rw := serve(api, http.MethodGet, "/api/admin/nodes/1", "")
+	var response nodeResponse
+	if err := json.Unmarshal(rw.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Online || response.SyncState != SyncStateSynced || response.DesiredVersion != version || response.AppliedVersion != version {
+		t.Fatalf("matching online response = %+v", response)
+	}
+}
+
+func TestNodeResponseDoesNotReportSyncedWithoutPublishedTarget(t *testing.T) {
+	api, _ := newTestAdminAPI(t)
+	serve(api, http.MethodPost, "/api/admin/nodes", `{"display_name":"node-a"}`)
+	if err := api.db.Create(&NodeState{NodeID: 1, AppliedVersion: 4, ContentHash: "orphaned", SyncState: SyncStateSynced}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	rw := serve(api, http.MethodGet, "/api/admin/nodes/1", "")
+	var response nodeResponse
+	if err := json.Unmarshal(rw.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.DesiredVersion != 0 || response.SyncState != SyncStateWaiting {
+		t.Fatalf("missing desired target response = %+v", response)
+	}
+}
+
+func TestNodeResponseMarksLegacySnapshotAsRepublishFailure(t *testing.T) {
+	api, _ := newTestAdminAPI(t)
+	serve(api, http.MethodPost, "/api/admin/nodes", `{"display_name":"node-a"}`)
+	legacy := controlproto.DesiredState{}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Create(&DesiredConfig{NodeID: 1, Version: 2, ContentJSON: string(raw), ContentHash: legacy.ContentHash()}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Create(&NodeState{
+		NodeID: 1, AppliedVersion: 2, ContentHash: legacy.ContentHash(), SyncState: SyncStateSynced,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	rw := serve(api, http.MethodGet, "/api/admin/nodes/1", "")
+	var response nodeResponse
+	if err := json.Unmarshal(rw.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.PublishRequired || response.SyncState != SyncStateFailed || response.LastError == "" {
+		t.Fatalf("legacy desired response = %+v", response)
 	}
 }
 

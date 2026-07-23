@@ -72,7 +72,12 @@ func TestAgentHandshakeAndDesiredStatePush(t *testing.T) {
 	gdb := openTestDB(t)
 	ca := newTestIntermediateCA(t)
 	hub := NewHub()
-	ts := NewTransportServer(TransportDeps{DB: gdb, CA: ca, Hub: hub})
+	key := make([]byte, masterKeyLen)
+	cipher, err := NewSecretCipher(key)
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	ts := NewTransportServer(TransportDeps{DB: gdb, CA: ca, Hub: hub, Cipher: cipher})
 
 	// Create node + issue its client cert, persist the cert row.
 	node := Node{DisplayName: "n1", Status: NodeStatusActive}
@@ -87,15 +92,19 @@ func TestAgentHandshakeAndDesiredStatePush(t *testing.T) {
 		t.Fatalf("store cert: %v", err)
 	}
 
-	// Seed a desired config at version 2 so hello triggers needs_sync.
-	state := controlproto.DesiredState{
-		Credentials: []controlproto.DesiredCredential{{AccessKey: "AK1", SecretKey: "sk1", Status: "enabled"}},
+	secretCipher, err := cipher.Encrypt("sk1")
+	if err != nil {
+		t.Fatalf("encrypt secret: %v", err)
 	}
-	stateJSON := mustJSON(t, state)
-	if err := gdb.Create(&DesiredConfig{
-		NodeID: node.ID, Version: 2, ContentJSON: stateJSON, ContentHash: state.ContentHash(),
-	}).Error; err != nil {
-		t.Fatalf("seed desired config: %v", err)
+	if err := gdb.Create(&NodeCredential{NodeID: node.ID, AccessKey: "AK1", SecretKeyCipher: secretCipher, Status: "enabled"}).Error; err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	authority := NewDesiredStateAuthority(gdb, cipher)
+	if _, _, err := authority.Publish(node.ID, "test"); err != nil {
+		t.Fatalf("publish v1: %v", err)
+	}
+	if _, _, err := authority.Publish(node.ID, "test"); err != nil {
+		t.Fatalf("publish v2: %v", err)
 	}
 
 	srv := startTestServer(t, ts, ca)
@@ -123,6 +132,7 @@ func TestAgentHandshakeAndDesiredStatePush(t *testing.T) {
 		ProtocolVersion: controlproto.ProtocolVersion,
 		NodeID:          "1",
 		AppliedVersion:  1,
+		Capabilities:    []string{controlproto.CapabilityAuthoritativeConfigV1},
 	})
 
 	// Expect hello_ack with needs_sync=true, desired_version=2.
@@ -141,10 +151,8 @@ func TestAgentHandshakeAndDesiredStatePush(t *testing.T) {
 	// The node should now be registered online in the hub.
 	waitFor(t, func() bool { return hub.IsOnline(node.ID) })
 
-	// Panel pushes desired state; node acks synced.
-	if err := ts.PushDesiredState(ctx, node.ID); err != nil {
-		t.Fatalf("push desired state: %v", err)
-	}
+	// Panel automatically pushes desired state after the connection is registered;
+	// node acks synced.
 	ds := readEnv(t, ctx, ws)
 	if ds.Type != controlproto.TypeDesiredState {
 		t.Fatalf("expected desired_state, got %s", ds.Type)

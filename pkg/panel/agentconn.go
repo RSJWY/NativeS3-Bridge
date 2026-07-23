@@ -30,6 +30,10 @@ type AgentConn struct {
 	NodeID          uint
 	ProtocolVersion int
 	Fingerprint     string
+	Capabilities    []string
+	AppliedVersion  int64
+	ContentHash     string
+	NeedsSync       bool
 
 	ws *websocket.Conn
 
@@ -45,6 +49,10 @@ type AgentConn struct {
 	// loop updates it and the offline sweeper reads it.
 	lastSeenMu sync.RWMutex
 	lastSeen   time.Time
+}
+
+func (c *AgentConn) Supports(capability string) bool {
+	return controlproto.HasCapability(c.Capabilities, capability)
 }
 
 // newAgentConn wraps an accepted websocket connection for a node.

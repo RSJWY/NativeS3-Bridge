@@ -9,11 +9,23 @@ package controlproto
 // handshake. It advertises the node identity and the state the node has already
 // applied so the panel can decide whether reconciliation is required.
 type HelloPayload struct {
-	ProtocolVersion int    `json:"protocol_version"`
-	NodeID          string `json:"node_id"`
-	AgentVersion    string `json:"agent_version"`
-	AppliedVersion  int64  `json:"applied_version"`
-	ContentHash     string `json:"content_hash"`
+	ProtocolVersion int      `json:"protocol_version"`
+	NodeID          string   `json:"node_id"`
+	AgentVersion    string   `json:"agent_version"`
+	AppliedVersion  int64    `json:"applied_version"`
+	ContentHash     string   `json:"content_hash"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+}
+
+const CapabilityAuthoritativeConfigV1 = "authoritative_config_v1"
+
+func HasCapability(capabilities []string, capability string) bool {
+	for _, candidate := range capabilities {
+		if candidate == capability {
+			return true
+		}
+	}
+	return false
 }
 
 // HelloAckPayload is the panel's response to hello. It reports the negotiated

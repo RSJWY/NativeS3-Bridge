@@ -51,6 +51,9 @@ var expectedIndexes = []struct {
 	{table: "desired_configs", name: "idx_desired_configs_node_id", model: &DesiredConfig{}},
 	{table: "node_states", name: "idx_node_states_node_id", model: &NodeState{}},
 	{table: "node_credentials", name: "idx_node_access", model: &NodeCredential{}},
+	{table: "node_buckets", name: "idx_node_bucket", model: &NodeBucket{}},
+	{table: "node_webhooks", name: "idx_node_webhooks_node_id", model: &NodeWebhook{}},
+	{table: "node_rate_limits", name: "idx_node_ratelimit", model: &NodeRateLimit{}},
 	{table: "tasks", name: "idx_tasks_task_id", model: &Task{}},
 }
 

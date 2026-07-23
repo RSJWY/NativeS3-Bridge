@@ -2,6 +2,7 @@ package controlproto
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -12,6 +13,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 		AgentVersion:    "test",
 		AppliedVersion:  7,
 		ContentHash:     "abc",
+		Capabilities:    []string{CapabilityAuthoritativeConfigV1},
 	}
 	env, err := NewEnvelope(TypeHello, "req-1", hello)
 	if err != nil {
@@ -44,7 +46,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	if err := decoded.DecodePayload(&out); err != nil {
 		t.Fatalf("DecodePayload: %v", err)
 	}
-	if out != hello {
+	if !reflect.DeepEqual(out, hello) {
 		t.Fatalf("payload = %+v, want %+v", out, hello)
 	}
 }

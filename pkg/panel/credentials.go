@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
+
+	"github.com/RSJWY/NativeS3-Bridge/pkg/managedconfig"
 )
 
 // CredentialStore manages panel-authoritative S3 credentials. Secret keys are
@@ -29,27 +31,34 @@ func NewPanelCredentialStore(db *gorm.DB, cipher *SecretCipher) *CredentialStore
 // CreatedCredential is the one-time result of Create/Rotate. SecretKey is the
 // plaintext, present only in this return value.
 type CreatedCredential struct {
-	ID        uint
-	NodeID    uint
-	AccessKey string
-	SecretKey string // plaintext, returned once
-	Name      string
-	Bucket    string
-	Status    string
+	ID         uint
+	NodeID     uint
+	AccessKey  string
+	SecretKey  string // plaintext, returned once
+	Name       string
+	Bucket     string
+	Status     string
+	QuotaBytes int64
 }
 
 // Create provisions a new credential for a node: it generates the access/secret
 // keypair, encrypts the secret with the master key, persists ciphertext, and
 // returns the plaintext secret exactly once. It never stores the plaintext.
 func (s *CredentialStore) Create(nodeID uint, name, bucket string, quotaBytes int64) (CreatedCredential, error) {
+	unlock := lockNodeDraft(nodeID)
+	defer unlock()
+
 	if s.cipher == nil {
 		return CreatedCredential{}, ErrMasterKeyMissing
 	}
-	if quotaBytes < 0 {
-		return CreatedCredential{}, fmt.Errorf("quota_bytes must be >= 0")
-	}
 	name = strings.TrimSpace(name)
 	bucket = strings.TrimSpace(bucket)
+	if err := managedconfig.ValidateCredentialFields(name, bucket, "enabled", quotaBytes); err != nil {
+		return CreatedCredential{}, err
+	}
+	if err := s.ensureBucket(nodeID, bucket); err != nil {
+		return CreatedCredential{}, err
+	}
 
 	for attempt := 0; attempt < 5; attempt++ {
 		accessKey, err := randomAccessKey()
@@ -81,7 +90,7 @@ func (s *CredentialStore) Create(nodeID uint, name, bucket string, quotaBytes in
 		}
 		return CreatedCredential{
 			ID: cred.ID, NodeID: nodeID, AccessKey: accessKey, SecretKey: secretKey,
-			Name: name, Bucket: bucket, Status: "enabled",
+			Name: name, Bucket: bucket, Status: "enabled", QuotaBytes: quotaBytes,
 		}, nil
 	}
 	return CreatedCredential{}, fmt.Errorf("create credential: exhausted access key attempts")
@@ -93,6 +102,9 @@ func (s *CredentialStore) Create(nodeID uint, name, bucket string, quotaBytes in
 // state (design §2.3 rotation). The caller must publish + push desired state so
 // the node picks up the new secret.
 func (s *CredentialStore) Rotate(nodeID uint, accessKey string) (CreatedCredential, error) {
+	unlock := lockNodeDraft(nodeID)
+	defer unlock()
+
 	if s.cipher == nil {
 		return CreatedCredential{}, ErrMasterKeyMissing
 	}
@@ -111,14 +123,97 @@ func (s *CredentialStore) Rotate(nodeID uint, accessKey string) (CreatedCredenti
 	if err != nil {
 		return CreatedCredential{}, fmt.Errorf("encrypt secret: %w", err)
 	}
-	if err := s.db.Model(&NodeCredential{}).Where("id = ?", cred.ID).
+	if err := s.db.Model(&NodeCredential{}).Where("id = ? AND node_id = ?", cred.ID, nodeID).
 		Update("secret_key_cipher", ciphertext).Error; err != nil {
 		return CreatedCredential{}, fmt.Errorf("update secret: %w", err)
 	}
 	return CreatedCredential{
 		ID: cred.ID, NodeID: nodeID, AccessKey: accessKey, SecretKey: secretKey,
-		Name: cred.Name, Bucket: cred.Bucket, Status: cred.Status,
+		Name: cred.Name, Bucket: cred.Bucket, Status: cred.Status, QuotaBytes: cred.QuotaBytes,
 	}, nil
+}
+
+// CredentialUpdate contains the editable, non-secret credential fields.
+type CredentialUpdate struct {
+	Name       *string
+	Bucket     *string
+	Status     *string
+	QuotaBytes *int64
+}
+
+func (s *CredentialStore) Update(nodeID uint, accessKey string, update CredentialUpdate) (NodeCredential, error) {
+	unlock := lockNodeDraft(nodeID)
+	defer unlock()
+
+	var credential NodeCredential
+	if err := s.db.Where("node_id = ? AND access_key = ?", nodeID, accessKey).First(&credential).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return NodeCredential{}, ErrCredentialNotFound
+		}
+		return NodeCredential{}, err
+	}
+
+	name := credential.Name
+	bucket := credential.Bucket
+	status := managedconfig.NormalizeCredentialStatus(credential.Status)
+	quotaBytes := credential.QuotaBytes
+	if update.Name != nil {
+		name = strings.TrimSpace(*update.Name)
+	}
+	if update.Bucket != nil {
+		bucket = strings.TrimSpace(*update.Bucket)
+	}
+	if update.Status != nil {
+		status = strings.TrimSpace(*update.Status)
+	}
+	if update.QuotaBytes != nil {
+		quotaBytes = *update.QuotaBytes
+	}
+	if err := managedconfig.ValidateCredentialFields(name, bucket, status, quotaBytes); err != nil {
+		return NodeCredential{}, err
+	}
+	if err := s.ensureBucket(nodeID, bucket); err != nil {
+		return NodeCredential{}, err
+	}
+
+	if err := s.db.Model(&NodeCredential{}).Where("id = ? AND node_id = ?", credential.ID, nodeID).Updates(map[string]any{
+		"name": name, "bucket": bucket, "status": status, "quota_bytes": quotaBytes,
+	}).Error; err != nil {
+		return NodeCredential{}, err
+	}
+	credential.Name = name
+	credential.Bucket = bucket
+	credential.Status = status
+	credential.QuotaBytes = quotaBytes
+	return credential, nil
+}
+
+func (s *CredentialStore) Delete(nodeID uint, accessKey string) error {
+	unlock := lockNodeDraft(nodeID)
+	defer unlock()
+
+	result := s.db.Where("node_id = ? AND access_key = ?", nodeID, accessKey).Delete(&NodeCredential{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrCredentialNotFound
+	}
+	return nil
+}
+
+func (s *CredentialStore) ensureBucket(nodeID uint, bucket string) error {
+	if bucket == "" {
+		return nil
+	}
+	var count int64
+	if err := s.db.Model(&NodeBucket{}).Where("node_id = ? AND name = ?", nodeID, bucket).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrNodeBucketNotFound
+	}
+	return nil
 }
 
 // ErrCredentialNotFound is returned when a credential lookup misses.

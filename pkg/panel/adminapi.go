@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/controlproto"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/managedconfig"
 )
 
 // AdminAPI serves the panel's management REST surface: node lifecycle, tokens,
@@ -61,15 +62,18 @@ func (a *AdminAPI) Routes(mux *http.ServeMux, wrap func(http.Handler) http.Handl
 // --- request/response shapes ---
 
 type nodeResponse struct {
-	ID             uint       `json:"id"`
-	DisplayName    string     `json:"display_name"`
-	Status         string     `json:"status"`
-	Online         bool       `json:"online"`
-	AppliedVersion int64      `json:"applied_version"`
-	DesiredVersion int64      `json:"desired_version"`
-	SyncState      string     `json:"sync_state"`
-	LastHeartbeat  *time.Time `json:"last_heartbeat,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	ID              uint       `json:"id"`
+	DisplayName     string     `json:"display_name"`
+	Status          string     `json:"status"`
+	Online          bool       `json:"online"`
+	AppliedVersion  int64      `json:"applied_version"`
+	DesiredVersion  int64      `json:"desired_version"`
+	SyncState       string     `json:"sync_state"`
+	LastError       string     `json:"last_error,omitempty"`
+	DraftDirty      bool       `json:"draft_dirty"`
+	PublishRequired bool       `json:"publish_required"`
+	LastHeartbeat   *time.Time `json:"last_heartbeat,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 type createNodeRequest struct {
@@ -125,6 +129,12 @@ func (a *AdminAPI) NodeByID(w http.ResponseWriter, r *http.Request) {
 		a.issueToken(w, r, id)
 	case "credentials":
 		a.credentialsRoute(w, r, id, segments[2:])
+	case "buckets":
+		a.bucketsRoute(w, r, id, segments[2:])
+	case "webhooks":
+		a.webhooksRoute(w, r, id, segments[2:])
+	case "rate-limit":
+		a.rateLimitRoute(w, r, id, segments[2:])
 	case "desired-state":
 		a.desiredStateRoute(w, r, id, segments[2:])
 	case "tasks":
@@ -368,6 +378,9 @@ type createCredentialRequest struct {
 func (a *AdminAPI) credentialsRoute(w http.ResponseWriter, r *http.Request, id uint, rest []string) {
 	// /api/admin/nodes/{id}/credentials                 GET (list) / POST (create)
 	// /api/admin/nodes/{id}/credentials/{ak}/rotate      POST
+	if _, ok := a.loadNode(w, id); !ok {
+		return
+	}
 	if len(rest) == 0 {
 		switch r.Method {
 		case http.MethodGet:
@@ -383,7 +396,25 @@ func (a *AdminAPI) credentialsRoute(w http.ResponseWriter, r *http.Request, id u
 		a.rotateCredential(w, r, id, rest[0])
 		return
 	}
+	if len(rest) == 1 {
+		switch r.Method {
+		case http.MethodPatch:
+			a.updateCredential(w, r, id, rest[0])
+		case http.MethodDelete:
+			a.deleteCredential(w, id, rest[0])
+		default:
+			writeTransportError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
 	writeTransportError(w, http.StatusNotFound, "not found")
+}
+
+func credentialToResponse(credential NodeCredential) credentialResponse {
+	return credentialResponse{
+		ID: credential.ID, NodeID: credential.NodeID, AccessKey: credential.AccessKey,
+		Name: credential.Name, Bucket: credential.Bucket, Status: credential.Status, QuotaBytes: credential.QuotaBytes,
+	}
 }
 
 func (a *AdminAPI) listCredentials(w http.ResponseWriter, id uint) {
@@ -395,18 +426,12 @@ func (a *AdminAPI) listCredentials(w http.ResponseWriter, id uint) {
 	items := make([]credentialResponse, 0, len(creds))
 	for _, c := range creds {
 		// SecretKey is deliberately omitted: list never returns plaintext (§2.3).
-		items = append(items, credentialResponse{
-			ID: c.ID, NodeID: c.NodeID, AccessKey: c.AccessKey, Name: c.Name,
-			Bucket: c.Bucket, Status: c.Status, QuotaBytes: c.QuotaBytes,
-		})
+		items = append(items, credentialToResponse(c))
 	}
 	writeTransportJSON(w, http.StatusOK, items)
 }
 
 func (a *AdminAPI) createCredential(w http.ResponseWriter, r *http.Request, id uint) {
-	if _, ok := a.loadNode(w, id); !ok {
-		return
-	}
 	var req createCredentialRequest
 	if err := decodeAdminJSON(r, &req); err != nil {
 		writeTransportError(w, http.StatusBadRequest, "invalid json body")
@@ -418,15 +443,70 @@ func (a *AdminAPI) createCredential(w http.ResponseWriter, r *http.Request, id u
 			writeTransportError(w, http.StatusInternalServerError, "master key unavailable")
 			return
 		}
-		writeTransportError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, ErrNodeBucketNotFound) {
+			writeTransportError(w, http.StatusBadRequest, "bucket does not exist")
+			return
+		}
+		if errors.Is(err, managedconfig.ErrInvalidCredential) {
+			writeTransportError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeTransportError(w, http.StatusInternalServerError, "create credential failed")
 		return
 	}
 	a.audit.Write(AuditEntry{Action: "credential_create", TargetNode: id, TargetResource: created.AccessKey, Result: "created", Source: a.adminIdentity})
 	// The plaintext secret is returned exactly once here.
 	writeTransportJSON(w, http.StatusCreated, credentialResponse{
 		ID: created.ID, NodeID: id, AccessKey: created.AccessKey, Name: created.Name,
-		Bucket: created.Bucket, Status: created.Status, SecretKey: created.SecretKey,
+		Bucket: created.Bucket, Status: created.Status, QuotaBytes: created.QuotaBytes, SecretKey: created.SecretKey,
 	})
+}
+
+type updateCredentialRequest struct {
+	Name       *string `json:"name"`
+	Bucket     *string `json:"bucket"`
+	Status     *string `json:"status"`
+	QuotaBytes *int64  `json:"quota_bytes"`
+}
+
+func (a *AdminAPI) updateCredential(w http.ResponseWriter, r *http.Request, nodeID uint, accessKey string) {
+	var request updateCredentialRequest
+	if err := decodeAdminJSON(r, &request); err != nil {
+		writeTransportError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	credential, err := a.creds.Update(nodeID, accessKey, CredentialUpdate{
+		Name: request.Name, Bucket: request.Bucket, Status: request.Status, QuotaBytes: request.QuotaBytes,
+	})
+	switch {
+	case errors.Is(err, ErrCredentialNotFound):
+		writeTransportError(w, http.StatusNotFound, "credential not found")
+		return
+	case errors.Is(err, ErrNodeBucketNotFound):
+		writeTransportError(w, http.StatusBadRequest, "bucket does not exist")
+		return
+	case errors.Is(err, managedconfig.ErrInvalidCredential):
+		writeTransportError(w, http.StatusBadRequest, err.Error())
+		return
+	case err != nil:
+		writeTransportError(w, http.StatusInternalServerError, "update credential failed")
+		return
+	}
+	a.audit.Write(AuditEntry{Action: "credential_update", TargetNode: nodeID, TargetResource: accessKey, Result: "updated", Source: a.adminIdentity})
+	writeTransportJSON(w, http.StatusOK, credentialToResponse(credential))
+}
+
+func (a *AdminAPI) deleteCredential(w http.ResponseWriter, nodeID uint, accessKey string) {
+	if err := a.creds.Delete(nodeID, accessKey); err != nil {
+		if errors.Is(err, ErrCredentialNotFound) {
+			writeTransportError(w, http.StatusNotFound, "credential not found")
+			return
+		}
+		writeTransportError(w, http.StatusInternalServerError, "delete credential failed")
+		return
+	}
+	a.audit.Write(AuditEntry{Action: "credential_delete", TargetNode: nodeID, TargetResource: accessKey, Result: "deleted", Source: a.adminIdentity})
+	writeTransportJSON(w, http.StatusOK, map[string]any{"deleted": true})
 }
 
 func (a *AdminAPI) rotateCredential(w http.ResponseWriter, _ *http.Request, id uint, accessKey string) {
@@ -448,7 +528,7 @@ func (a *AdminAPI) rotateCredential(w http.ResponseWriter, _ *http.Request, id u
 	// state for the node to pick it up (surfaced in the response hint).
 	writeTransportJSON(w, http.StatusOK, credentialResponse{
 		ID: rotated.ID, NodeID: id, AccessKey: rotated.AccessKey, Name: rotated.Name,
-		Bucket: rotated.Bucket, Status: rotated.Status, SecretKey: rotated.SecretKey,
+		Bucket: rotated.Bucket, Status: rotated.Status, QuotaBytes: rotated.QuotaBytes, SecretKey: rotated.SecretKey,
 	})
 }
 
@@ -495,7 +575,7 @@ func (a *AdminAPI) publishDesiredState(w http.ResponseWriter, r *http.Request, i
 	resp := publishResponse{Version: version, ContentHash: hash}
 	if a.hub.IsOnline(id) {
 		if err := a.transport.PushDesiredState(r.Context(), id); err != nil {
-			resp.PushError = err.Error()
+			resp.PushError = desiredPushAdminMessage(err)
 		} else {
 			resp.Pushed = true
 		}
@@ -509,11 +589,28 @@ func (a *AdminAPI) pushDesiredState(w http.ResponseWriter, r *http.Request, id u
 		return
 	}
 	if err := a.transport.PushDesiredState(r.Context(), id); err != nil {
-		writeTransportError(w, http.StatusInternalServerError, err.Error())
+		if errors.Is(err, ErrAuthoritativeConfigCapabilityRequired) || errors.Is(err, ErrDesiredSnapshotRepublishRequired) {
+			writeTransportError(w, http.StatusConflict, desiredPushAdminMessage(err))
+			return
+		}
+		writeTransportError(w, http.StatusInternalServerError, desiredPushAdminMessage(err))
 		return
 	}
 	a.audit.Write(AuditEntry{Action: "desired_push", TargetNode: id, Result: "pushed", Source: a.adminIdentity})
 	writeTransportJSON(w, http.StatusOK, map[string]any{"pushed": true})
+}
+
+func desiredPushAdminMessage(err error) string {
+	switch {
+	case errors.Is(err, ErrAuthoritativeConfigCapabilityRequired):
+		return "node agent must be upgraded before authoritative config can be pushed"
+	case errors.Is(err, ErrDesiredSnapshotRepublishRequired):
+		return "published snapshot is legacy; publish the current draft again"
+	case errors.Is(err, ErrDesiredSnapshotHashMismatch):
+		return "published snapshot failed integrity verification; publish again"
+	default:
+		return "push desired state failed"
+	}
 }
 
 // --- tasks ---
@@ -590,6 +687,9 @@ func (a *AdminAPI) importRoute(w http.ResponseWriter, r *http.Request, id uint, 
 		writeTransportError(w, http.StatusNotImplemented, "migration is not configured")
 		return
 	}
+	if _, ok := a.loadNode(w, id); !ok {
+		return
+	}
 	if len(rest) == 0 {
 		switch r.Method {
 		case http.MethodPost:
@@ -616,9 +716,6 @@ func (a *AdminAPI) importRoute(w http.ResponseWriter, r *http.Request, id uint, 
 }
 
 func (a *AdminAPI) requestImport(w http.ResponseWriter, r *http.Request, id uint) {
-	if _, ok := a.loadNode(w, id); !ok {
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	summary, err := a.migration.RequestImport(ctx, a.hub, id)
@@ -628,6 +725,10 @@ func (a *AdminAPI) requestImport(w http.ResponseWriter, r *http.Request, id uint
 			writeTransportError(w, http.StatusConflict, "node is offline")
 		case errors.Is(err, ErrImportTimeout):
 			writeTransportError(w, http.StatusGatewayTimeout, "node did not report in time")
+		case errors.Is(err, ErrAlreadyManaged):
+			writeTransportError(w, http.StatusConflict, "node already has managed config")
+		case errors.Is(err, ErrImportPending), errors.Is(err, ErrImportInProgress):
+			writeTransportError(w, http.StatusConflict, err.Error())
 		default:
 			writeTransportError(w, http.StatusInternalServerError, "request import failed")
 		}
@@ -653,6 +754,8 @@ func (a *AdminAPI) confirmImport(w http.ResponseWriter, id uint) {
 			writeTransportError(w, http.StatusNotFound, "no pending import")
 		case errors.Is(err, ErrAlreadyManaged):
 			writeTransportError(w, http.StatusConflict, "node already has managed config")
+		case errors.Is(err, ErrImportInProgress):
+			writeTransportError(w, http.StatusConflict, "import confirmation is already in progress")
 		default:
 			writeTransportError(w, http.StatusInternalServerError, "confirm import failed")
 		}
@@ -663,6 +766,10 @@ func (a *AdminAPI) confirmImport(w http.ResponseWriter, id uint) {
 
 func (a *AdminAPI) abortImport(w http.ResponseWriter, id uint) {
 	if err := a.migration.Abort(id, a.adminIdentity); err != nil {
+		if errors.Is(err, ErrImportInProgress) {
+			writeTransportError(w, http.StatusConflict, "import operation is already in progress")
+			return
+		}
 		writeTransportError(w, http.StatusNotFound, "no pending import")
 		return
 	}
@@ -693,9 +800,42 @@ func (a *AdminAPI) nodeToResponse(n Node) nodeResponse {
 	if err := a.db.Where("node_id = ?", n.ID).First(&st).Error; err == nil {
 		resp.AppliedVersion = st.AppliedVersion
 		resp.SyncState = st.SyncState
+		resp.LastError = st.LastError
 		resp.LastHeartbeat = st.LastHeartbeat
 	}
-	resp.DesiredVersion = nodeConfigVersion(a.db, n.ID)
+	var desired DesiredConfig
+	desiredErr := a.db.Where("node_id = ?", n.ID).First(&desired).Error
+	if desiredErr == nil {
+		resp.DesiredVersion = desired.Version
+		// Failed and drift states carry useful evidence that must remain visible
+		// until a later successful reconciliation. For every other state, a
+		// published version/hash that is not the last observed apply is waiting,
+		// even when the node was offline and no push attempt occurred.
+		if desired.Version > 0 && resp.SyncState != SyncStateFailed && resp.SyncState != SyncStateDrift &&
+			(st.AppliedVersion != desired.Version || st.ContentHash != desired.ContentHash) {
+			resp.SyncState = SyncStateWaiting
+		}
+		if desired.Version <= 0 && resp.SyncState == SyncStateSynced {
+			resp.SyncState = SyncStateWaiting
+		}
+	} else if errors.Is(desiredErr, gorm.ErrRecordNotFound) && resp.SyncState == SyncStateSynced {
+		// Synced means equality with a published target. With no desired row there
+		// is no target to match, even if an older persisted NodeState says synced.
+		resp.SyncState = SyncStateWaiting
+	}
+	dirty, publishRequired, err := a.desired.DraftStatus(n.ID)
+	if err == nil {
+		resp.DraftDirty = dirty
+		resp.PublishRequired = publishRequired
+	} else {
+		resp.PublishRequired = resp.DesiredVersion > 0
+	}
+	if resp.PublishRequired && resp.SyncState != SyncStateFailed && resp.SyncState != SyncStateDrift {
+		resp.SyncState = SyncStateFailed
+		if resp.LastError == "" {
+			resp.LastError = "published snapshot is unavailable and must be republished"
+		}
+	}
 	return resp
 }
 

@@ -72,8 +72,9 @@ type RegistrationToken struct {
 
 // DesiredConfig holds the single latest desired state for a node. Version is
 // monotonic; only the newest version is retained (no per-command backlog). The
-// content is the JSON of controlproto.DesiredState and ContentHash is its
-// canonical hash.
+// content is a schema-versioned panel-internal snapshot. Credential secrets are
+// stored only as AEAD ciphertext; ContentHash is derived from the decrypted
+// wire content and verified again before every push.
 type DesiredConfig struct {
 	ID          uint   `gorm:"primaryKey"`
 	NodeID      uint   `gorm:"uniqueIndex;not null"`

@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/controlproto"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/managedconfig"
 )
 
 // In-place migration adopts an existing single-node deployment under the panel
@@ -40,6 +41,11 @@ var ErrImportTimeout = errors.New("timed out waiting for node import report")
 // re-adopting would clobber managed state, so it is refused.
 var ErrAlreadyManaged = errors.New("node already has managed config; refusing to overwrite")
 
+var (
+	ErrImportPending    = errors.New("node already has a pending import")
+	ErrImportInProgress = errors.New("node import operation is already in progress")
+)
+
 // pendingImport is an encrypted, not-yet-adopted snapshot of a node's reported
 // local config. Secrets are stored as ciphertext from the moment of receipt so
 // plaintext never rests in panel memory beyond the encryption call.
@@ -64,13 +70,14 @@ type pendingCredential struct {
 // ImportSummary is the admin-facing summary of a pending import. It intentionally
 // carries only counts and non-sensitive identifiers — never secret keys.
 type ImportSummary struct {
-	NodeID          uint     `json:"node_id"`
-	CredentialCount int      `json:"credential_count"`
-	BucketCount     int      `json:"bucket_count"`
-	WebhookCount    int      `json:"webhook_count"`
-	AccessKeys      []string `json:"access_keys"`
-	BucketNames     []string `json:"bucket_names"`
-	ContentHash     string   `json:"content_hash"`
+	NodeID              uint     `json:"node_id"`
+	CredentialCount     int      `json:"credential_count"`
+	BucketCount         int      `json:"bucket_count"`
+	WebhookCount        int      `json:"webhook_count"`
+	AccessKeys          []string `json:"access_keys"`
+	BucketNames         []string `json:"bucket_names"`
+	ContentHash         string   `json:"content_hash"`
+	RateLimitConfigured bool     `json:"rate_limit_configured"`
 }
 
 // MigrationCoordinator drives the import lifecycle. It holds pending imports in
@@ -82,20 +89,22 @@ type MigrationCoordinator struct {
 	desired *DesiredStateAuthority
 	audit   *Auditor
 
-	mu      sync.Mutex
-	pending map[uint]*pendingImport
-	waiters map[uint]chan *pendingImport
+	mu         sync.Mutex
+	pending    map[uint]*pendingImport
+	waiters    map[uint]chan *pendingImport
+	confirming map[uint]bool
 }
 
 // NewMigrationCoordinator builds the coordinator over its collaborators.
 func NewMigrationCoordinator(db *gorm.DB, cipher *SecretCipher, desired *DesiredStateAuthority, audit *Auditor) *MigrationCoordinator {
 	return &MigrationCoordinator{
-		db:      db,
-		cipher:  cipher,
-		desired: desired,
-		audit:   audit,
-		pending: make(map[uint]*pendingImport),
-		waiters: make(map[uint]chan *pendingImport),
+		db:         db,
+		cipher:     cipher,
+		desired:    desired,
+		audit:      audit,
+		pending:    make(map[uint]*pendingImport),
+		waiters:    make(map[uint]chan *pendingImport),
+		confirming: make(map[uint]bool),
 	}
 }
 
@@ -105,6 +114,13 @@ func NewMigrationCoordinator(db *gorm.DB, cipher *SecretCipher, desired *Desired
 func (m *MigrationCoordinator) ingestReport(nodeID uint, report controlproto.ImportReportPayload) error {
 	if m.cipher == nil {
 		return ErrMasterKeyMissing
+	}
+	if err := managedconfig.ValidateDesiredState(report.State); err != nil {
+		return fmt.Errorf("validate imported state: %w", err)
+	}
+	computedHash := report.State.ContentHash()
+	if report.LocalContentHash == "" || report.LocalContentHash != computedHash {
+		return fmt.Errorf("imported state hash mismatch")
 	}
 	pi := &pendingImport{
 		nodeID:      nodeID,
@@ -135,6 +151,14 @@ func (m *MigrationCoordinator) ingestReport(nodeID uint, report controlproto.Imp
 	}
 
 	m.mu.Lock()
+	if m.confirming[nodeID] {
+		m.mu.Unlock()
+		return ErrImportInProgress
+	}
+	if _, exists := m.pending[nodeID]; exists {
+		m.mu.Unlock()
+		return ErrImportPending
+	}
 	m.pending[nodeID] = pi
 	waiter := m.waiters[nodeID]
 	delete(m.waiters, nodeID)
@@ -155,6 +179,13 @@ func (m *MigrationCoordinator) ingestReport(nodeID uint, report controlproto.Imp
 // It writes nothing to the node and nothing to the panel's authoritative tables:
 // the result is a PENDING import awaiting confirmation.
 func (m *MigrationCoordinator) RequestImport(ctx context.Context, hub *Hub, nodeID uint) (ImportSummary, error) {
+	managed, err := nodeAlreadyManaged(m.db, nodeID)
+	if err != nil {
+		return ImportSummary{}, err
+	}
+	if managed {
+		return ImportSummary{}, ErrAlreadyManaged
+	}
 	conn, ok := hub.Get(nodeID)
 	if !ok {
 		return ImportSummary{}, ErrNodeOffline
@@ -162,6 +193,14 @@ func (m *MigrationCoordinator) RequestImport(ctx context.Context, hub *Hub, node
 
 	waiter := make(chan *pendingImport, 1)
 	m.mu.Lock()
+	if _, exists := m.pending[nodeID]; exists {
+		m.mu.Unlock()
+		return ImportSummary{}, ErrImportPending
+	}
+	if _, exists := m.waiters[nodeID]; exists {
+		m.mu.Unlock()
+		return ImportSummary{}, ErrImportInProgress
+	}
 	m.waiters[nodeID] = waiter
 	m.mu.Unlock()
 
@@ -203,21 +242,42 @@ func (m *MigrationCoordinator) PendingSummary(nodeID uint) (ImportSummary, bool)
 // node. After confirmation the panel is authoritative; the admin must
 // publish/push desired state for the node to reconcile against it.
 func (m *MigrationCoordinator) Confirm(nodeID uint, adminIdentity string) (int64, string, error) {
+	unlock := lockNodeDraft(nodeID)
+	defer unlock()
+
 	m.mu.Lock()
+	if m.confirming[nodeID] {
+		m.mu.Unlock()
+		return 0, "", ErrImportInProgress
+	}
+	if _, waiting := m.waiters[nodeID]; waiting {
+		m.mu.Unlock()
+		return 0, "", ErrImportInProgress
+	}
 	pi, ok := m.pending[nodeID]
+	if ok {
+		m.confirming[nodeID] = true
+	}
 	m.mu.Unlock()
 	if !ok {
 		return 0, "", ErrNoPendingImport
 	}
+	defer func() {
+		m.mu.Lock()
+		delete(m.confirming, nodeID)
+		m.mu.Unlock()
+	}()
 
+	var version int64
+	var hash string
 	err := m.db.Transaction(func(tx *gorm.DB) error {
 		// Adopt only if the node has no panel-side config yet (fresh adoption). This
 		// guards against clobbering an already-managed node.
-		var existing int64
-		if err := tx.Model(&NodeCredential{}).Where("node_id = ?", nodeID).Count(&existing).Error; err != nil {
+		managed, err := nodeAlreadyManaged(tx, nodeID)
+		if err != nil {
 			return err
 		}
-		if existing > 0 {
+		if managed {
 			return ErrAlreadyManaged
 		}
 		for _, c := range pi.credentials {
@@ -244,7 +304,8 @@ func (m *MigrationCoordinator) Confirm(nodeID uint, adminIdentity string) (int64
 			}
 		}
 		for _, h := range pi.webhooks {
-			if err := tx.Create(&NodeWebhook{NodeID: nodeID, URL: h.URL, Events: h.Events, Enabled: h.Enabled}).Error; err != nil {
+			webhook := NodeWebhook{NodeID: nodeID, URL: h.URL, Events: h.Events, Enabled: h.Enabled}
+			if err := insertNodeWebhook(tx, &webhook); err != nil {
 				return err
 			}
 		}
@@ -258,20 +319,17 @@ func (m *MigrationCoordinator) Confirm(nodeID uint, adminIdentity string) (int64
 				return err
 			}
 		}
-		return nil
+		version, hash, err = m.desired.PublishTx(tx, nodeID, adminIdentity)
+		return err
 	})
 	if err != nil {
 		return 0, "", fmt.Errorf("adopt imported config: %w", err)
 	}
 
-	// Publish the version=1 baseline from the now-populated panel tables.
-	version, hash, err := m.desired.Publish(nodeID, adminIdentity)
-	if err != nil {
-		return 0, "", fmt.Errorf("publish baseline: %w", err)
-	}
-
 	m.mu.Lock()
-	delete(m.pending, nodeID)
+	if m.pending[nodeID] == pi {
+		delete(m.pending, nodeID)
+	}
 	m.mu.Unlock()
 
 	if m.audit != nil {
@@ -285,6 +343,14 @@ func (m *MigrationCoordinator) Confirm(nodeID uint, adminIdentity string) (int64
 // later, or the adoption abandoned entirely).
 func (m *MigrationCoordinator) Abort(nodeID uint, adminIdentity string) error {
 	m.mu.Lock()
+	if m.confirming[nodeID] {
+		m.mu.Unlock()
+		return ErrImportInProgress
+	}
+	if _, waiting := m.waiters[nodeID]; waiting {
+		m.mu.Unlock()
+		return ErrImportInProgress
+	}
 	_, ok := m.pending[nodeID]
 	delete(m.pending, nodeID)
 	m.mu.Unlock()
@@ -299,11 +365,14 @@ func (m *MigrationCoordinator) Abort(nodeID uint, adminIdentity string) error {
 
 func summarize(pi *pendingImport) ImportSummary {
 	s := ImportSummary{
-		NodeID:          pi.nodeID,
-		CredentialCount: len(pi.credentials),
-		BucketCount:     len(pi.buckets),
-		WebhookCount:    len(pi.webhooks),
-		ContentHash:     pi.contentHash,
+		NodeID:              pi.nodeID,
+		CredentialCount:     len(pi.credentials),
+		BucketCount:         len(pi.buckets),
+		WebhookCount:        len(pi.webhooks),
+		ContentHash:         pi.contentHash,
+		RateLimitConfigured: pi.rateLimit != nil,
+		AccessKeys:          []string{},
+		BucketNames:         []string{},
 	}
 	for _, c := range pi.credentials {
 		s.AccessKeys = append(s.AccessKeys, c.accessKey)
@@ -312,4 +381,18 @@ func summarize(pi *pendingImport) ImportSummary {
 		s.BucketNames = append(s.BucketNames, b.Name)
 	}
 	return s
+}
+
+func nodeAlreadyManaged(db *gorm.DB, nodeID uint) (bool, error) {
+	models := []any{&NodeCredential{}, &NodeBucket{}, &NodeWebhook{}, &NodeRateLimit{}, &DesiredConfig{}}
+	for _, model := range models {
+		var count int64
+		if err := db.Model(model).Where("node_id = ?", nodeID).Count(&count).Error; err != nil {
+			return false, err
+		}
+		if count > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
