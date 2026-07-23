@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 21
-- **Last Active**: 2026-07-21
+- **Total Sessions**: 22
+- **Last Active**: 2026-07-23
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~709 | Active |
+| `journal-1.md` | ~745 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 22 | 2026-07-23 | Panel authoritative configuration lifecycle | `5e6a890`, `d3900b4`, `cd938f0`, `302d6c2` | `main` |
 | 21 | 2026-07-21 | Reliable node registration and health | `cf783fe` | `main` |
 | 20 | 2026-07-21 | 修复 Panel 管理界面 API 契约错配 | `1bd0d22` | `main` |
 | 19 | 2026-07-20 | 拆分 Panel 与 Node Docker 部署 | `d116fb0` | `07-13-multi-node-mtls-control-plane` |
