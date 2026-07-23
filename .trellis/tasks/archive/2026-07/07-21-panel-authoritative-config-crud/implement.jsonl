@@ -1,0 +1,10 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Feature spans Panel DB/API, control protocol, node persistence/runtime, S3 routing, and Vue UI; map and preserve every boundary contract."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse existing standalone validation, quota formatting, cache invalidation, and API/UI patterns without duplicating divergent contracts."}
+{"file":".trellis/spec/backend/index.md","reason":"Backend guideline index for selecting the database, storage, auth/quota, hooks, and webadmin contracts touched by this task."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Panel and node schema changes must stay additive, GORM-portable across SQLite/MySQL/Postgres, and migration-validated."}
+{"file":".trellis/spec/backend/storage-guidelines.md","reason":"Managed bucket visibility and deletion must preserve native object bytes, paths, listing semantics, and sanitized storage errors."}
+{"file":".trellis/spec/backend/auth-quota-guidelines.md","reason":"Credential status/quota cache behavior and bucket ACL/existence checks must remain immediately correct for signed and anonymous S3 requests."}
+{"file":".trellis/spec/backend/presigned-hooks-guidelines.md","reason":"Webhook CRUD and desired-state apply must preserve non-blocking delivery, supported event taxonomy, retries, and runtime reload semantics."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Panel admin APIs reuse authenticated JSON, credential secret-once, bucket validation, error, and audit-adjacent webadmin conventions."}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend guideline index for the shared Vue admin bundle and runtime-selected Panel mode."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Panel node detail components must preserve typed apiFetch behavior, one-time secrets, restrained UI, error states, responsive layout, and browser validation."}

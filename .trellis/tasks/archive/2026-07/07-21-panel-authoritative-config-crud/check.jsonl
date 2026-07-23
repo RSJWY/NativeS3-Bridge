@@ -1,0 +1,8 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Review end-to-end draft->published->wire->node runtime flow and catch format, validation, or state-owner drift across layers."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Check new handlers/controllers/components reuse existing shared contracts and do not introduce duplicated validators or payload parsing."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify additive portable migrations, indexes, transaction boundaries, and rollback behavior for Panel and node state."}
+{"file":".trellis/spec/backend/storage-guidelines.md","reason":"Verify logical bucket deletion never removes native objects and managed routing preserves S3 path/list/error contracts."}
+{"file":".trellis/spec/backend/auth-quota-guidelines.md","reason":"Verify credential disable/quota and bucket ACL changes invalidate caches and take effect immediately without weakening auth."}
+{"file":".trellis/spec/backend/presigned-hooks-guidelines.md","reason":"Verify webhook runtime replacement preserves queue/retry/non-blocking behavior and only supported events are accepted."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Verify every Panel mutation is authenticated, validated, sanitized, secret-safe, and returns the expected HTTP error matrix."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Verify typed client/UI behavior, one-time secret handling, visible failures, shared style classes, build, responsive, and browser acceptance requirements."}
