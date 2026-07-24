@@ -18,6 +18,17 @@ func openTestDB(t *testing.T) *gorm.DB {
 	if err := Migrate(gdb); err != nil {
 		t.Fatalf("migrate panel schema: %v", err)
 	}
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		t.Fatalf("get sqlite db handle: %v", err)
+	}
+	// Close the pool before t.TempDir removes the SQLite directory. Control-plane
+	// cleanup can finish after the WebSocket closes and leave WAL sidecars behind.
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close sqlite db: %v", err)
+		}
+	})
 	return gdb
 }
 

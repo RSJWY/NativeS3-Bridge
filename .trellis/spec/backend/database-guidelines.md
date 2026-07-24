@@ -172,9 +172,11 @@ type RequestStat struct {
 - Corrupt SQLite DB fails preflight before migration.
 - Schema validation detects missing expected indexes.
 - Tests that serve requests from a temp-file SQLite database must close client
-  connections and wait for background server goroutines to finish their final DB
-  writes before `t.TempDir()` cleanup. In control-plane tests, wait until the Hub
-  has unregistered the node after closing its WebSocket.
+  connections, wait for background server goroutines to finish their final DB
+  writes, and close the underlying `*sql.DB` pool before `t.TempDir()` cleanup.
+  In control-plane tests, a WebSocket cleanup barrier must wait for both Hub
+  unregistration and the persisted `NodeState.online=false`; Hub removal happens
+  before the final state write and is not sufficient by itself.
 - Full regression: `go test ./pkg/db`, `go test ./...`, `go vet ./...`, `go build ./...`.
 
 #### 7. Wrong vs Correct
@@ -226,4 +228,7 @@ If `go mod tidy -go=1.21` tries to resolve newer transitive packages that requir
 - Do not let `t.TempDir()` remove a SQLite directory while a background goroutine
   can still update the database. This can surface as `attempt to write a readonly
   database` or `TempDir RemoveAll cleanup: directory not empty`, especially on
-  Go 1.21. Close the connection and wait on an observable shutdown barrier first.
+  Go 1.21. Close the client connection, wait for Hub unregistration *and* the
+  final persisted offline state, then close `gdb.DB()` before directory cleanup.
+  Checking only `hub.IsOnline(nodeID)` is insufficient because `disconnect`
+  unregisters before writing `NodeState.online=false`.

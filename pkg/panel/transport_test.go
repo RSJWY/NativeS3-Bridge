@@ -125,7 +125,7 @@ func TestAgentHandshakeAndDesiredStatePush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer ws.Close(websocket.StatusNormalClosure, "done")
+	t.Cleanup(func() { closeTestNode(t, gdb, hub, node.ID, ws) })
 
 	// Send hello advertising an older applied version (1) than desired (2).
 	sendEnv(t, ctx, ws, controlproto.TypeHello, "h1", controlproto.HelloPayload{

@@ -205,19 +205,7 @@ func dialTestNode(t *testing.T, gdb *gorm.DB, ca *CA, hub *Hub, ts *TransportSer
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = ws.Close(websocket.StatusNormalClosure, "test cleanup")
-		// Closing the client only initiates server-side teardown. Wait until the
-		// serve goroutine has persisted online=false and unregistered the
-		// connection before t.TempDir removes the SQLite directory. Without this
-		// barrier Go 1.21 can intermittently report a non-empty temp directory or
-		// a read-only database during cleanup.
-		deadline := time.Now().Add(3 * time.Second)
-		for hub.IsOnline(node.ID) && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if hub.IsOnline(node.ID) {
-			t.Errorf("node %d remained online during test cleanup", node.ID)
-		}
+		closeTestNode(t, gdb, hub, node.ID, ws)
 	})
 
 	// Complete handshake: node sends hello, panel replies hello_ack.
@@ -231,4 +219,29 @@ func dialTestNode(t *testing.T, gdb *gorm.DB, ca *CA, hub *Hub, ts *TransportSer
 	// Node is now online and registered.
 	waitFor(t, func() bool { return hub.IsOnline(node.ID) })
 	return node, ws
+}
+
+// closeTestNode waits for the complete server-side disconnect sequence. The
+// Hub unregisters before the final NodeState write, so waiting only for Hub
+// status can race SQLite WAL cleanup under Go 1.21.
+func closeTestNode(t *testing.T, gdb *gorm.DB, hub *Hub, nodeID uint, ws *websocket.Conn) {
+	t.Helper()
+	_ = ws.Close(websocket.StatusNormalClosure, "test cleanup")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if hub.IsOnline(nodeID) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		var state NodeState
+		if err := gdb.Where("node_id = ?", nodeID).First(&state).Error; err == nil && !state.Online {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if hub.IsOnline(nodeID) {
+		t.Errorf("node %d remained online during test cleanup", nodeID)
+		return
+	}
+	t.Errorf("node %d state write did not settle during test cleanup", nodeID)
 }
