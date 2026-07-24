@@ -22,7 +22,9 @@
 - Images are `ghcr.io/<lowercase-owner>/natives3-panel` and `.../natives3-node`, each with the release tag and `latest`.
 - Images use `linux/amd64,linux/arm64`, component-specific build target and GHA cache scope, `provenance: mode=min`, and explicit `sbom: false`.
 - Default workflow permission is `contents: read`; only the image job receives `packages: write`, and only the release job receives `contents: write`.
-- The release job depends on both archives and both matrix image builds. Archives and images depend on the quality gate.
+- The `e2e` job depends on `prepare` and `quality`. Archives and images depend on
+  `e2e`, and the release job depends on `e2e`, both archives, and both matrix
+  image builds.
 
 ### 4. Validation & Error Matrix
 
@@ -30,7 +32,7 @@
 | --- | --- |
 | Empty or invalid tag | Stop in `prepare`; publish nothing |
 | Existing tag resolves to another SHA | Stop in `prepare`; publish nothing |
-| UI, vet, test, race, or distribution contract fails | Do not run archive/image/release publication |
+| UI, vet, test, race, distribution contract, or Panel/Node E2E fails | Do not run archive/image/release publication |
 | Either image matrix entry fails | Do not create the GitHub Release |
 | Archive upload/download has no matching files | Fail instead of creating a partial Release |
 
@@ -44,6 +46,9 @@
 
 - `actionlint .github/workflows/release.yml` must pass.
 - `bash scripts/test-distribution-contract.sh` must assert component targets, image names, cache scopes, provenance/SBOM, release dependencies, and absence of `cmd/natives3bridge`.
+- `bash scripts/test-panel-node-e2e.sh --mode local` must pass with the browser
+  gate, and Docker-capable release runners must also pass `--mode docker` before
+  archives or images are built.
 - Build all ten component/OS/architecture combinations with `CGO_ENABLED=0`; inspect each tar listing for its binary, component config, and operations document; assert ten checksum lines.
 - Run the same UI build and Go 1.21 vet/test/race commands used by the quality job.
 
@@ -74,6 +79,155 @@ jobs:
     strategy:
       matrix:
         component: [panel, node]
+```
+
+## Scenario: Panel/Node E2E Release Gate
+
+### 1. Scope / Trigger
+
+- Trigger: changes to Panel/Node registration, mTLS transport, authoritative
+  configuration, S3 authentication/data paths, Panel service-mode routing,
+  Docker final targets, or `.github/workflows/release.yml`.
+- Goal: prove the shipped processes work together before any archive, image, or
+  GitHub Release is published.
+
+### 2. Signatures
+
+- Main command:
+  `bash scripts/test-panel-node-e2e.sh --mode local|docker|auto [--timeout N] [--skip-build] [--skip-browser] [--report PATH]`.
+- Main environment keys: `E2E_MODE`, `E2E_TIMEOUT`, `E2E_SKIP_BUILD`,
+  `E2E_SKIP_BROWSER`, `E2E_REPORT`, `E2E_PANEL_BIN`, `E2E_NODE_BIN`, and
+  `E2E_ADMIN_PASSWORD`.
+- `E2E_TIMEOUT`/`--timeout` must be a positive integer in the shell harness;
+  the Python browser helper must reject a non-positive per-step timeout before
+  starting ChromeDriver.
+- Browser command:
+  `python3 scripts/internal/e2e-browser.py --panel-url URL --expected-node-name NAME [--chromedriver PATH] [--chrome PATH] [--report PATH] [--timeout N]`.
+- Browser discovery keys: `CHROMEDRIVER`, runner-provided
+  `CHROMEWEBDRIVER` (directory containing `chromedriver`), `CHROME_BIN`, and
+  `GOOGLE_CHROME_BIN`.
+- Workflow topology: `prepare -> quality -> e2e -> {artifacts, images} -> release`.
+
+### 3. Contracts
+
+- Every run uses `umask 077`, a mode-700 temporary root, random loopback ports,
+  separate Panel/Node data roots and SQLite files, temporary PKI, and unique
+  Docker names/network. Cleanup removes processes, containers, images, network,
+  cookies, configs, databases, and private material on success or failure.
+- Panel readiness is `GET /api/admin/auth-settings` with
+  `service_mode=panel`; a SPA `200` is not readiness evidence.
+- While Node is offline, the test creates a logical node, registration token,
+  bucket, credential, and published desired state. The fresh Node must persist
+  its key/certificate, establish mTLS, report heartbeat, and reach matching
+  non-zero desired/applied versions with `sync_state=synced`.
+- S3 requests use curl SigV4, not AWS CLI as the sole dependency. The managed
+  bucket rejects direct creation, accepts signed HEAD, and object
+  PUT/HEAD/GET/DELETE must match the native file bytes.
+- During Panel outage and restart, Node keeps serving the last applied S3
+  state. The test logs in again after Panel restart because admin sessions are
+  process-memory state, then waits for automatic mTLS reconnect/sync.
+- Node restart clears the registration token and must reuse the same private
+  key/certificate while preserving S3 bytes.
+- An unrelated CA must leave the negative Node without a client certificate,
+  produce TLS verification evidence on the Node or Panel side, and leave its S3
+  listener alive.
+- The browser gate logs in, uses SPA history navigation for the
+  `/dashboard -> /nodes` guard, requires a same-origin `/api/admin/nodes`
+  request, rejects standalone API paths/non-Panel origins/HTTP `>=400`, and
+  removes its profile. Do not combine ChromeDriver `--silent` with
+  `--log-level`; current drivers reject that combination.
+- Docker mode validates both Compose templates, builds the final `panel` and
+  `node` targets, gives the Panel container network alias `panel`, runs with the
+  invoking UID/GID so mode-600 bind-mounted configs remain readable, and maps
+  only Panel `9001/9443` and Node `9000`. The Docker context excludes local AI
+  tool directories and every `node_modules` tree; container lifecycle probes use
+  `docker container inspect` so an identically named image cannot be mistaken
+  for a running container.
+- Persistent CI evidence is only the redacted text report. Browser failure JSON
+  (safe URL, page summary, network/status findings) is folded into that report;
+  raw cookies, configs, PKI, databases, object roots, and signed URLs are never
+  uploaded. The structured `browser-report.json` is the single browser
+  diagnostic; `browser.stderr` is a fallback only when that JSON was not
+  produced.
+- Redaction replaces every generated credential/token value even when a test
+  override is short, then scans the finished report and deletes it if any
+  known value remains. This prevents a useful-looking failure artifact from
+  becoming a secret leak.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Local prerequisite missing | Fail with the missing command; clean temporary state |
+| Docker daemon or Compose v2 unavailable in Docker mode | Fail before starting the scenario |
+| `CHROMEWEBDRIVER` names a runner directory | Resolve `<dir>/chromedriver` |
+| ChromeDriver cannot start or create a session | Return non-zero and retain one redacted browser diagnostic in `E2E_REPORT` |
+| Browser helper receives a non-positive timeout | Reject arguments before launching ChromeDriver |
+| Panel restarts | Discard the old cookie jar, log in again, then poll reconnect/sync |
+| Wrong CA | Persist no client certificate; S3 remains reachable; record TLS verification evidence |
+| Any E2E adapter fails in GitHub Actions | Do not run artifacts, images, or release publication |
+| Report contains a generated token/password/S3 secret | Delete the report and fail the run |
+
+### 5. Good/Base/Bad Cases
+
+- Good: both adapters complete registration, sync, SigV4 CRUD, Panel outage,
+  tokenless Node restart, wrong-CA isolation, and browser API/routing evidence.
+- Base: a developer without Docker runs the full local adapter with compatible
+  Chrome/ChromeDriver; the release runner additionally runs Docker mode.
+- Bad: treating `/healthz` SPA fallback as Panel readiness, reusing a pre-restart
+  admin cookie, full-page navigating the SPA route check, omitting Docker's
+  `panel` alias, weakening private config modes for container readability,
+  allowing tool `node_modules` symlinks into the Docker context, using generic
+  `docker inspect` when image and container names collide, or uploading the
+  temporary runtime directory.
+
+### 6. Tests Required
+
+- `bash -n scripts/test-panel-node-e2e.sh scripts/test-distribution-contract.sh`.
+- `python3 -m py_compile scripts/internal/e2e-browser.py`.
+- Two consecutive full local runs, including ChromeDriver and the positive
+  same-origin `/api/admin/nodes` assertion.
+- Docker mode on a Docker-capable runner, including `docker compose config`,
+  both final targets from the repository context, port boundaries,
+  reconnect/restart, and wrong-CA checks.
+- Failure injection for ChromeDriver startup/session creation: the outer report
+  contains exactly one redacted browser JSON diagnostic and no known secret.
+- `actionlint .github/workflows/release.yml`, distribution contract, UI build,
+  `go vet ./...`, `go test ./...`, and `go test -race ./...`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```yaml
+artifacts:
+  needs: [prepare, quality]
+```
+
+```python
+driver_args = ["--log-level=SEVERE", "--silent"]
+```
+
+#### Correct
+
+```yaml
+e2e:
+  needs: [prepare, quality]
+artifacts:
+  needs: [prepare, quality, e2e]
+```
+
+```python
+driver_args = ["--log-level=SEVERE"]
+```
+
+```text
+browser-report.json + browser.stderr
+```
+
+```text
+browser-report.json (browser.stderr only when JSON is absent)
+```
 
 ## Scenario: Docker First-Registration TLS Smoke
 
