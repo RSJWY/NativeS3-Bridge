@@ -7,11 +7,12 @@
 
 import { existsSync, readFileSync, appendFileSync, readdirSync } from "fs"
 import { isAbsolute, join } from "path"
+import { platform } from "os"
 import { execSync } from "child_process"
 import { createHash } from "crypto"
 import process from "process"
 
-const PYTHON_CMD = "python"
+const PYTHON_CMD = platform() === "win32" ? "python" : "python3"
 // Debug logging
 const DEBUG_LOG = "/tmp/trellis-plugin-debug.log"
 
