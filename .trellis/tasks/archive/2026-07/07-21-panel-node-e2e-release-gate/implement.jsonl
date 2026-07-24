@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"定义 Release workflow 的 quality/artifact/image/release 依赖、双镜像边界和发布前验证要求。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"规定临时 SQLite 测试的连接关闭、后台写入屏障和目录清理契约。"}
+{"file":".trellis/spec/backend/panel-authoritative-config-guidelines.md","reason":"定义 Panel 节点、credential、bucket、desired-state 发布和同步状态的 API/数据契约。"}
+{"file":".trellis/spec/backend/auth-quota-guidelines.md","reason":"确认 Node S3 credential、SigV4、quota 和数据面验证边界。"}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"定义 Panel 模式 UI 路由、API 请求和浏览器验收约束。"}

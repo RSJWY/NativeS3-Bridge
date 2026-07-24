@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"检查 e2e job 是否位于 artifacts/images/release 之前且不扩大 workflow 权限。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"检查测试进程、SQLite 连接池和临时目录是否按生命周期顺序清理。"}
+{"file":".trellis/spec/backend/panel-authoritative-config-guidelines.md","reason":"检查发布的配置快照、版本、secret 脱敏和 Node 应用状态断言。"}
+{"file":".trellis/spec/backend/auth-quota-guidelines.md","reason":"检查 S3 签名请求、credential 状态和 quota 边界的验证结果。"}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"检查浏览器路由和 API 网络断言没有回退到 standalone 接口。"}
