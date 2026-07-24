@@ -142,9 +142,57 @@ jobs:
       - name: Verify distribution contracts
         run: bash scripts/test-distribution-contract.sh
 
+  e2e:
+    name: Panel/Node end-to-end release gate
+    needs: [prepare, quality]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fixed revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: pkg/webadmin/ui/package-lock.json
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.21.x"
+          cache: true
+
+      - name: Run local Panel/Node E2E adapter
+        env:
+          E2E_MODE: local
+          E2E_TIMEOUT: "120"
+          E2E_REPORT: ${{ runner.temp }}/natives3-e2e-local-report.txt
+        run: bash scripts/test-panel-node-e2e.sh --mode local
+
+      - name: Run Docker Panel/Node E2E adapter
+        env:
+          E2E_MODE: docker
+          E2E_TIMEOUT: "120"
+          E2E_REPORT: ${{ runner.temp }}/natives3-e2e-docker-report.txt
+        run: bash scripts/test-panel-node-e2e.sh --mode docker
+
+      - name: Upload redacted E2E evidence on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: panel-node-e2e-reports
+          if-no-files-found: ignore
+          retention-days: 3
+          path: |
+            ${{ runner.temp }}/natives3-e2e-*-report.txt
+
   artifacts:
     name: Build release archives
-    needs: [prepare, quality]
+    needs: [prepare, quality, e2e]
     runs-on: ubuntu-latest
 
     steps:
@@ -224,7 +272,7 @@ jobs:
 
   images:
     name: Publish ${{ matrix.component }} image
-    needs: [prepare, quality]
+    needs: [prepare, quality, e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -274,7 +322,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [prepare, artifacts, images]
+    needs: [prepare, artifacts, images, e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write

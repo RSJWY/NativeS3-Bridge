@@ -1,5 +1,9 @@
 .git
 .github
+.agents
+.claude
+.codex
+.opencode
 .trellis
 dist
 data
@@ -14,3 +18,4 @@ natives3bridge
 *.tar.gz
 pkg/webadmin/ui/dist
 pkg/webadmin/ui/node_modules
+**/node_modules

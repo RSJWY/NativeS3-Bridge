@@ -30,6 +30,8 @@ require_text Dockerfile 'EXPOSE 9001 9443'
 require_text Dockerfile 'EXPOSE 9000'
 require_text Dockerfile 'ENTRYPOINT ["panel"]'
 require_text Dockerfile 'ENTRYPOINT ["node"]'
+require_text .dockerignore '**/node_modules'
+require_text .dockerignore '.opencode'
 
 require_text docker-compose.panel.yml 'ghcr.io/rsjwy/natives3-panel:${NATIVES3_TAG:-latest}'
 require_text docker-compose.panel.yml '127.0.0.1:9001:9001'
@@ -86,7 +88,37 @@ require_text .github/workflows/release.yml 'cache-from: type=gha,scope=natives3-
 require_text .github/workflows/release.yml 'cache-to: type=gha,mode=max,scope=natives3-${{ matrix.component }}'
 require_text .github/workflows/release.yml 'provenance: mode=min'
 require_text .github/workflows/release.yml 'sbom: false'
-require_text .github/workflows/release.yml 'needs: [prepare, artifacts, images]'
+require_text .github/workflows/release.yml 'e2e:'
+require_text .github/workflows/release.yml 'needs: [prepare, quality]'
+require_text .github/workflows/release.yml 'E2E_MODE: local'
+require_text .github/workflows/release.yml 'E2E_MODE: docker'
+require_text .github/workflows/release.yml 'if: ${{ failure() }}'
+require_text .github/workflows/release.yml 'needs: [prepare, quality, e2e]'
+require_text .github/workflows/release.yml 'needs: [prepare, artifacts, images, e2e]'
+[[ -x scripts/test-panel-node-e2e.sh ]] || {
+	printf 'distribution contract failed: scripts/test-panel-node-e2e.sh is not executable\n' >&2
+	exit 1
+}
+require_text scripts/test-panel-node-e2e.sh '/api/admin/auth-settings'
+require_text scripts/test-panel-node-e2e.sh '--aws-sigv4'
+require_text scripts/test-panel-node-e2e.sh 'wrong-CA registration failed closed'
+require_text scripts/test-panel-node-e2e.sh 'browser-report.json'
+[[ -x scripts/internal/e2e-browser.py ]] || {
+	printf 'distribution contract failed: scripts/internal/e2e-browser.py is not executable\n' >&2
+	exit 1
+}
+require_text scripts/internal/e2e-browser.py 'no same-origin /api/admin/nodes request was observed'
+require_text scripts/internal/e2e-browser.py 'panel_nodes_api'
+
+e2e_line="$(grep -n '^  e2e:' .github/workflows/release.yml | head -n 1 | cut -d: -f1)"
+artifacts_line="$(grep -n '^  artifacts:' .github/workflows/release.yml | head -n 1 | cut -d: -f1)"
+images_line="$(grep -n '^  images:' .github/workflows/release.yml | head -n 1 | cut -d: -f1)"
+release_line="$(grep -n '^  release:' .github/workflows/release.yml | head -n 1 | cut -d: -f1)"
+if [[ -z "$e2e_line" || -z "$artifacts_line" || -z "$images_line" || -z "$release_line" ]] || \
+	((e2e_line >= artifacts_line || e2e_line >= images_line || e2e_line >= release_line)); then
+	printf 'distribution contract failed: e2e job must precede artifacts/images/release\n' >&2
+	exit 1
+fi
 
 if grep -Fq 'cmd/natives3bridge' .github/workflows/release.yml; then
 	printf 'distribution contract failed: release workflow still builds cmd/natives3bridge\n' >&2
