@@ -776,3 +776,37 @@ Completed Panel-authoritative node configuration CRUD, exact published snapshots
 ### Next Steps
 
 - None - task complete
+
+
+## Session 24: Panel Node E2E release gate
+
+**Date**: 2026-07-25
+**Task**: Panel Node E2E release gate
+**Branch**: `main`
+
+### Summary
+
+Implemented and verified the Panel/Node E2E release gate: local and Docker adapters cover registration, mTLS sync/reconnect, SigV4 CRUD, outage/restart, wrong-CA isolation, and ChromeDriver browser routing/API assertions. Added the release workflow e2e dependency, redacted failure evidence, distribution contracts, and release spec. Pushed main; archived the task. The next release tag remains user-authorized separately.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `008fc14` | (see git log) |
+| `a5fdf28` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
