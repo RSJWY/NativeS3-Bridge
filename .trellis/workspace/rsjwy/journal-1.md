@@ -743,3 +743,36 @@ Completed Panel-authoritative node configuration CRUD, exact published snapshots
 ### Next Steps
 
 - None - task complete
+
+
+## Session 23: 修复 0.8.4 Release Go 1.21 清理竞态
+
+**Date**: 2026-07-24
+**Task**: 修复 0.8.4 Release Go 1.21 清理竞态
+**Branch**: `main`
+
+### Summary
+
+复现并修复 Panel WebSocket 测试在 Go 1.21 race 下与 SQLite TempDir 清理竞态；补充双屏障与连接池关闭，完成全量发布门禁并发布 0.8.5。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `335b85d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
