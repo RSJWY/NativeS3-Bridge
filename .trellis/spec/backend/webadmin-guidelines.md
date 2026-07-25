@@ -265,10 +265,11 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 
 ### 2. Signatures
 - `GET /api/admin/logs?limit=&level=&q=&file=<enumerated-id>`.
+- `NewLogsViewer(logRing *logging.Ring, logFile string) *LogsViewer` / `NewLogsHandler(...) http.Handler`.
 - `POST /api/admin/buckets/{name}/reconcile`, body `{"apply": false|true}`.
 
 ### 3. Contracts
-- Both routes exist only behind admin session middleware, never public ops or S3 routers.
+- The reusable logs handler is mounted by both standalone and Panel admin servers behind their existing session middleware; it owns only a ring and effective active file path. Reconcile remains standalone-only and authenticated. Neither route is public ops or S3 surface.
 - Logs preserve `source`, `file_enabled`, `limit`, `entries`, and optional `warning`, and add `files` plus optional `selected_file` (`id`, `name`, `size`, `modified_at`, `current`, `compressed`).
 - Omitted `file` reads the configured active file and may fall back to the ring. Explicit `file` must be a freshly enumerated basename and never falls back to another source on failure.
 - Only the active basename and exact lumberjack timestamp backups are exposed; gzip history is decompressed server-side and uses the same level/query/limit filters.
@@ -285,7 +286,7 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 - Bad: client log paths, silent fallback for explicit history, symlink-backed log records, applying stale browser totals, returning secrets, or mounting routes publicly.
 
 ### 6. Tests Required
-- Backend: auth, methods, current/ring compatibility, file metadata/order, plain/gzip filters, unsafe IDs, symlinks, cleaned-file/corrupt-gzip errors, dry-run immutability, apply side effects, invalidation, and sanitized errors.
+- Backend: standalone and Panel auth, Panel ring/file injection, methods, current/ring compatibility, file metadata/order, plain/gzip filters, unsafe IDs, symlinks, cleaned-file/corrupt-gzip errors, dry-run immutability, apply side effects, invalidation, and sanitized errors.
 - Frontend: type-check/Vite build and browser checks for `/logs`, report, and confirmation.
 
 ### 7. Wrong vs Correct
@@ -298,7 +299,7 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 
 ### 1. Scope / Trigger
 
-- Trigger: serving `pkg/webadmin/ui` from a backend whose admin API is not the standalone `/dashboard`, `/credentials`, `/buckets`, and `/logs` surface.
+- Trigger: serving `pkg/webadmin/ui` from standalone and Panel backends that share auth and `/logs` but otherwise expose different admin API surfaces.
 - Goal: prevent a shared embedded SPA from mounting pages whose API routes do not exist on the current service.
 
 ### 2. Signatures
@@ -312,6 +313,7 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 - `auth-settings` always includes `service_mode`, exactly `standalone` or `panel`.
 - `NewAuth` defaults to `standalone` for backward compatibility.
 - Panel admin servers construct auth with `ServiceModePanel`; mode is never inferred from request failures.
+- `/logs` is a shared authenticated route. Panel navigation labels it `Panel 日志`; standalone keeps `日志`. Dashboard, credential, and bucket pages remain standalone-only, while node pages remain Panel-only.
 - The field is additive and non-sensitive; password hashes, captcha secrets, session keys, and one-time tokens remain excluded.
 
 ### 4. Validation & Error Matrix
@@ -322,14 +324,14 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 
 ### 5. Good/Base/Bad Cases
 
-- Good: Panel `auth-settings` returns `panel`, followed by `/api/admin/nodes*` requests only.
+- Good: Panel `auth-settings` returns `panel`, followed only by `/api/admin/nodes*` and `/api/admin/logs` requests.
 - Base: older clients ignore the additive field without breaking login.
-- Bad: embed the standalone SPA in Panel and treat repeated `/dashboard`, `/buckets`, or `/logs` 404 responses as a proxy problem.
+- Bad: embed the standalone SPA in Panel and treat repeated `/dashboard` or `/buckets` 404 responses as a proxy problem; `/logs` must exist before Panel navigation exposes it.
 
 ### 6. Tests Required
 
 - Unit test the default `standalone` and explicit `panel` response values.
-- Panel admin-server test authenticates, asserts `/api/admin/nodes` succeeds, and asserts a standalone-only route is not registered.
+- Panel admin-server test asserts unauthenticated `/api/admin/logs` returns 401, authenticates, proves `/api/admin/nodes` and `/api/admin/logs` succeed, and asserts a standalone-only route is not registered.
 - Browser smoke records network responses after login and fails if the UI requests an API from the other service mode.
 
 ### 7. Wrong vs Correct

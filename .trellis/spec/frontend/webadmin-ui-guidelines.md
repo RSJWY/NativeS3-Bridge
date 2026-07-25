@@ -179,26 +179,28 @@ adminApi.logs({ file: selectedFileID, limit, level, q }) // ID came from respons
 
 - `AuthSettings.service_mode: 'standalone' | 'panel'`.
 - Runtime owner: `runtimeState`, `setServiceMode`, `serviceHomePath`, and `routeMatchesService` in `src/state/runtime.ts`.
-- Panel routes: `/nodes` and `/nodes/:id`; standalone routes remain `/dashboard`, `/credentials`, `/buckets`, and `/logs`.
+- Shared authenticated route: `/logs`. Panel-specific routes are `/nodes` and `/nodes/:id`; standalone-specific routes remain `/dashboard`, `/credentials`, and `/buckets`.
 
 ### 3. Contracts
 
 - Login records `service_mode` before redirecting.
 - On a protected-page refresh, `App.vue` fetches auth settings and gates `<router-view>` until runtime mode is ready.
 - Route redirects and sidebar navigation use the shared runtime helpers; components do not implement private mode checks.
-- Panel pages call only typed `/api/admin/nodes*` methods through the shared `apiFetch` client.
+- Panel pages call only typed `/api/admin/nodes*` methods plus the shared typed `/api/admin/logs` client through `apiFetch`.
+- `Logs.vue` uses runtime mode only for title/description/search copy. File selection, filters, error handling, endpoint, and payload stay shared; Panel navigation text is `Panel 日志` and standalone remains `日志`.
 - One-time registration tokens and credential secrets remain component-local and are cleared when their result modal closes.
 
 ### 4. Validation & Error Matrix
 
 - Auth settings unavailable -> protected page remains gated and shows a retry/login choice; neither mode's data page mounts.
-- Panel user opens a standalone route -> redirect to `/nodes` before the standalone component mounts.
+- Panel user opens `/dashboard`, `/credentials`, or `/buckets` -> redirect to `/nodes` before the standalone component mounts; `/logs` remains allowed.
 - Standalone user opens a Panel route -> redirect to `/dashboard` before the Panel component mounts.
 - Protected API `401` -> clear login state and redirect to `/login`, unchanged across modes.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: Panel login reaches `/nodes`, creates a node, and signs a token with no standalone API request in the network log.
+- Good: Panel navigation opens `/logs`, renders Panel-specific copy, and requests only `/api/admin/logs`; standalone `/logs` retains its S3-service copy.
 - Good: standalone login reaches `/dashboard` and loads all three dashboard endpoints with no `/api/admin/nodes` request.
 - Base: an older backend omitting `service_mode` is normalized by runtime code to standalone behavior.
 - Bad: probe mode by calling `/api/admin/nodes` and interpreting a 404 or transient error as standalone.
@@ -206,7 +208,7 @@ adminApi.logs({ file: selectedFileID, limit, level, q }) // ID came from respons
 ### 6. Tests Required
 
 - `npm run build` for typed mode values, routes, and API methods.
-- Panel browser smoke: login -> `/nodes` -> create node -> node detail -> issue token; reject any standalone API request or API status >= 400.
+- Panel browser smoke: login -> `/nodes` -> `/logs`; require authenticated `/api/admin/logs`, then create node -> node detail -> issue token; reject standalone-only API requests or status >= 400.
 - Standalone browser smoke: login -> `/dashboard`; reject any `/api/admin/nodes` request or dashboard API status >= 400.
 - Narrow viewport check for node tables, detail actions, and one-time secret modals.
 
@@ -267,7 +269,7 @@ Correct:
 - Bucket delete bound-credential `409` -> visible instruction to unbind/delete credentials first.
 - Invalid credential quota, webhook URL/event selection, or non-positive rate-limit values -> block submit or show the sanitized backend error.
 - Secret modal close -> immediately set local secret state to `null`; subsequent table/status refresh must not recover or redisplay it.
-- Panel service mode -> no `/dashboard`, standalone `/credentials`, `/buckets`, or `/logs` requests during node-detail usage.
+- Panel node-detail usage -> no `/dashboard`, standalone `/credentials`, or `/buckets` requests; the shared `/logs` endpoint is requested only after explicit log-page navigation.
 
 ### 5. Good/Base/Bad Cases
 

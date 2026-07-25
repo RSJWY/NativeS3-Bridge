@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Implement shared ring/file/history and rotation contracts."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Mount authenticated Panel logs API while preserving standalone behavior."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Allow shared /logs route in Panel mode and preserve file selector semantics."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Search before extracting duplicated setup and viewer logic."}
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"Keep Panel/Node release targets and standalone compatibility checks intact."}
+{"file":".trellis/tasks/07-25-panel-node-logging/research/current-audit.md","reason":"Repository evidence and scope boundary for the child."}

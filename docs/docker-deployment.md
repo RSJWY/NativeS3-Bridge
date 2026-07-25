@@ -415,6 +415,24 @@ sudo docker compose logs -f
 sudo docker compose down
 ```
 
+Panel 与 Node 始终输出 stdout，并各自保留最近 2000 条进程内 ring。若希望在容器
+重启后保留日志并使用轮转历史，在对应的 `panel.yaml` / `node.yaml` 中配置：
+
+```yaml
+log:
+  dir: "/data/logs"
+  max_size_mb: 100
+  max_backups: 5
+  max_age_days: 14
+  compress: false
+```
+
+`dir` 会解析为 `/data/logs/natives3bridge.log`；旧 `log.file` 完整路径仍兼容，但
+两者不能同时设置。日志目录位于已挂载的 `data/` 中，因此会随其他运行数据持久化。
+登录 Panel 后可在 `/logs` 查看 Panel 自身 ring、当前文件和安全枚举的普通/gzip
+轮转历史，并使用级别、关键字和条数过滤。Node 的轮转原始文件仍只保存在 Node
+主机，不通过控制面下载或传输。
+
 `docker compose down` 不会删除 bind mount 中的 `data/`。重新 `up -d` 会继续使用原数据。
 
 ## 7. 卸载

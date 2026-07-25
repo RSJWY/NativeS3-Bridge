@@ -37,6 +37,15 @@ database:
   dsn: "/data/panel.db"
 
 log_level: "info"
+log:
+  # Panel /logs reads this process-local ring plus the active file and exact
+  # lumberjack history under this directory. Legacy log.file remains supported
+  # but is mutually exclusive with dir.
+  dir: "/data/logs"
+  max_size_mb: 100
+  max_backups: 5
+  max_age_days: 14
+  compress: false
 
 heartbeat_interval: 15s
 offline_multiplier: 3

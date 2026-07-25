@@ -22,6 +22,14 @@ database:
 
 region: "us-east-1"
 log_level: "info"
+log:
+  # Node logs stay on the node host. dir resolves to
+  # /data/logs/natives3bridge.log; legacy log.file is mutually exclusive.
+  dir: "/data/logs"
+  max_size_mb: 100
+  max_backups: 5
+  max_age_days: 14
+  compress: false
 
 # Control-plane connection to the panel. The node dials the panel; the panel
 # never dials back (design §1.3).

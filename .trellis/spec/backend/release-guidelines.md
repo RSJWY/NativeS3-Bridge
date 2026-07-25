@@ -132,9 +132,10 @@ jobs:
   produce TLS verification evidence on the Node or Panel side, and leave its S3
   listener alive.
 - The browser gate logs in, uses SPA history navigation for the
-  `/dashboard -> /nodes` guard, requires a same-origin `/api/admin/nodes`
-  request, rejects standalone API paths/non-Panel origins/HTTP `>=400`, and
-  removes its profile. Do not combine ChromeDriver `--silent` with
+  `/dashboard -> /nodes -> /logs` guard, requires same-origin
+  `/api/admin/nodes` and shared `/api/admin/logs` requests, rejects
+  standalone-only API paths/non-Panel origins/HTTP `>=400`, and removes its
+  profile. Do not combine ChromeDriver `--silent` with
   `--log-level`; current drivers reject that combination.
 - Docker mode validates both Compose templates, builds the final `panel` and
   `node` targets, gives the Panel container network alias `panel`, runs with the
@@ -171,7 +172,8 @@ jobs:
 ### 5. Good/Base/Bad Cases
 
 - Good: both adapters complete registration, sync, SigV4 CRUD, Panel outage,
-  tokenless Node restart, wrong-CA isolation, and browser API/routing evidence.
+  tokenless Node restart, wrong-CA isolation, and browser API/routing evidence
+  for Panel nodes plus the shared `/logs` page.
 - Base: a developer without Docker runs the full local adapter with compatible
   Chrome/ChromeDriver; the release runner additionally runs Docker mode.
 - Bad: treating `/healthz` SPA fallback as Panel readiness, reusing a pre-restart
@@ -186,7 +188,7 @@ jobs:
 - `bash -n scripts/test-panel-node-e2e.sh scripts/test-distribution-contract.sh`.
 - `python3 -m py_compile scripts/internal/e2e-browser.py`.
 - Two consecutive full local runs, including ChromeDriver and the positive
-  same-origin `/api/admin/nodes` assertion.
+  same-origin `/api/admin/nodes` and `/api/admin/logs` assertions.
 - Docker mode on a Docker-capable runner, including `docker compose config`,
   both final targets from the repository context, port boundaries,
   reconnect/restart, and wrong-CA checks.

@@ -472,6 +472,31 @@ GET /api/admin/auth-settings
 | `GET` | `/api/admin/nodes/{id}/tasks/{taskId}` | 查询任务结果。 |
 | `GET` | `/api/admin/nodes/{id}/certs` | 查看 node 客户端证书。 |
 | `POST` | `/api/admin/nodes/{id}/certs/revoke` | 撤销该节点的全部证书并断开控制面连接。 |
+| `GET` | `/api/admin/logs` | 查看 Panel 自身的内存 ring、当前日志文件和安全枚举的轮转历史。 |
+
+### Panel 日志
+
+登录后可从侧栏进入 `/logs` 查看 Panel 自身日志。页面和
+`GET /api/admin/logs` 共用同一契约，支持级别、关键字、条数和日志文件选择；
+轮转历史包括 lumberjack 生成的普通文件与 gzip 文件。该接口只接受服务端枚举的
+文件 ID，不接受路径，也不提供下载、删除或实时流。
+
+Panel 与 Node 始终同时写 stdout 和最近 2000 条内存 ring。配置 `log.dir` 后还会
+写入 `<dir>/natives3bridge.log` 并按 lumberjack 轮转；旧 `log.file` 完整路径仍兼容，
+但不能和 `log.dir` 同时设置。Docker 部署可使用：
+
+```yaml
+log_level: "info"
+log:
+  dir: "/data/logs"
+  max_size_mb: 100
+  max_backups: 5
+  max_age_days: 14
+  compress: false
+```
+
+Panel `/logs` 只查看 Panel 本机文件。Node 的轮转原始文件留在各 Node 主机，不通过
+控制面传输。
 
 创建节点和令牌的 Curl 示例：
 
