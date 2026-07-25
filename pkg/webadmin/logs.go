@@ -38,7 +38,29 @@ type logsResponse struct {
 	SelectedFile *logFileInfo    `json:"selected_file,omitempty"`
 }
 
-func (a *API) Logs(w http.ResponseWriter, r *http.Request) {
+// LogsViewer owns the process-local ring and effective active log file used by
+// the admin logs endpoint. It deliberately accepts only the already-resolved
+// active file path; request parameters are restricted to enumerated basenames
+// by the viewer before any file is opened.
+type LogsViewer struct {
+	logRing *logging.Ring
+	logFile string
+}
+
+// NewLogsViewer constructs a reusable local-log viewer for either the
+// standalone admin server or the Panel admin server.
+func NewLogsViewer(logRing *logging.Ring, logFile string) *LogsViewer {
+	return &LogsViewer{logRing: logRing, logFile: logFile}
+}
+
+// NewLogsHandler returns an http.Handler suitable for mounting behind the
+// shared admin session middleware.
+func NewLogsHandler(logRing *logging.Ring, logFile string) http.Handler {
+	return NewLogsViewer(logRing, logFile)
+}
+
+// ServeHTTP implements the authenticated GET /api/admin/logs contract.
+func (v *LogsViewer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -47,15 +69,15 @@ func (a *API) Logs(w http.ResponseWriter, r *http.Request) {
 	level := strings.TrimSpace(r.URL.Query().Get("level"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	selectedID := r.URL.Query().Get("file")
-	response := logsResponse{Source: "ring", FileEnabled: a.logFile != "", Limit: limit, Entries: []logging.Entry{}, Files: []logFileInfo{}}
-	if a.logFile != "" {
-		files, listErr := listLogFiles(a.logFile)
+	response := logsResponse{Source: "ring", FileEnabled: v.logFile != "", Limit: limit, Entries: []logging.Entry{}, Files: []logFileInfo{}}
+	if v.logFile != "" {
+		files, listErr := listLogFiles(v.logFile)
 		if listErr == nil {
 			response.Files = files
 		}
 
 		selected := currentLogFile(files)
-		path := a.logFile
+		path := v.logFile
 		compressed := false
 		if selectedID != "" {
 			if !validLogFileID(selectedID) {
@@ -96,10 +118,16 @@ func (a *API) Logs(w http.ResponseWriter, r *http.Request) {
 		}
 		response.Warning = "读取日志文件失败，已回退到内存日志"
 	}
-	if a.logRing != nil {
-		response.Entries = a.logRing.Snapshot(limit, level, query)
+	if v.logRing != nil {
+		response.Entries = v.logRing.Snapshot(limit, level, query)
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// Logs preserves the API method used by existing standalone callers and unit
+// tests while delegating to the shared viewer implementation.
+func (a *API) Logs(w http.ResponseWriter, r *http.Request) {
+	NewLogsViewer(a.logRing, a.logFile).ServeHTTP(w, r)
 }
 
 func listLogFiles(activeFile string) ([]logFileInfo, error) {

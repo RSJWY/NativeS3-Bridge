@@ -109,6 +109,8 @@ require_text scripts/test-panel-node-e2e.sh 'browser-report.json'
 }
 require_text scripts/internal/e2e-browser.py 'no same-origin /api/admin/nodes request was observed'
 require_text scripts/internal/e2e-browser.py 'panel_nodes_api'
+require_text scripts/internal/e2e-browser.py 'no same-origin /api/admin/logs request was observed'
+require_text scripts/internal/e2e-browser.py 'panel_logs_api'
 
 e2e_line="$(grep -n '^  e2e:' .github/workflows/release.yml | head -n 1 | cut -d: -f1)"
 artifacts_line="$(grep -n '^  artifacts:' .github/workflows/release.yml | head -n 1 | cut -d: -f1)"

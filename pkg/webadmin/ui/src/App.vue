@@ -27,6 +27,7 @@
       <nav class="nav-list" aria-label="管理导航">
         <template v-if="runtimeState.serviceMode === 'panel'">
           <RouterLink to="/nodes">节点管理</RouterLink>
+          <RouterLink to="/logs">Panel 日志</RouterLink>
         </template>
         <template v-else>
           <RouterLink to="/dashboard">仪表盘</RouterLink>

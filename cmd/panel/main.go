@@ -10,13 +10,10 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -25,7 +22,6 @@ import (
 	loggingpkg "github.com/RSJWY/NativeS3-Bridge/pkg/logging"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/panel"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/webadmin"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 func main() {
@@ -39,7 +35,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if _, err := setupSlog(cfg.LogLevel, cfg.Log); err != nil {
+	logRuntime, err := setupLogging(cfg.LogLevel, cfg.Log)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "configure logging:", err)
 		os.Exit(1)
 	}
@@ -118,6 +115,8 @@ func main() {
 		Transport: transport,
 		Migration: migration,
 		Audit:     auditor,
+		LogRing:   logRuntime.Ring,
+		LogFile:   logRuntime.File,
 	})
 	if err != nil {
 		slog.Error("init admin server", "error", err)
@@ -199,41 +198,17 @@ func runOfflineSweeper(ctx context.Context, transport *panel.TransportServer, in
 	}
 }
 
-func setupSlog(level string, logCfg config.LogConfig) (*loggingpkg.Ring, error) {
-	var slogLevel slog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		slogLevel = slog.LevelDebug
-	case "warn":
-		slogLevel = slog.LevelWarn
-	case "error":
-		slogLevel = slog.LevelError
-	default:
-		slogLevel = slog.LevelInfo
-	}
+func setupLogging(level string, logCfg config.LogConfig) (*loggingpkg.Runtime, error) {
+	return loggingpkg.Setup(level, logCfg)
+}
 
-	writers := []io.Writer{os.Stdout}
-	logFile := logCfg.EffectiveFile()
-	if logFile != "" {
-		directory := filepath.Dir(logFile)
-		if err := os.MkdirAll(directory, 0o750); err != nil {
-			return nil, fmt.Errorf("create log directory %q: %w", directory, err)
-		}
-		fileWriter := &lumberjack.Logger{
-			Filename:   logFile,
-			MaxSize:    logCfg.MaxSizeMB,
-			MaxBackups: logCfg.MaxBackups,
-			MaxAge:     logCfg.MaxAgeDays,
-			Compress:   logCfg.Compress,
-			LocalTime:  true,
-		}
-		if _, err := fileWriter.Write(nil); err != nil {
-			return nil, fmt.Errorf("open log file %q: %w", logFile, err)
-		}
-		writers = append(writers, fileWriter)
+// setupSlog remains as a thin compatibility helper for command-level tests and
+// older internal callers. New wiring should use setupLogging when the effective
+// active file path is also needed by an admin viewer.
+func setupSlog(level string, logCfg config.LogConfig) (*loggingpkg.Ring, error) {
+	runtime, err := setupLogging(level, logCfg)
+	if err != nil {
+		return nil, err
 	}
-	ring := loggingpkg.NewRing(loggingpkg.DefaultRingCapacity)
-	base := slog.NewTextHandler(io.MultiWriter(writers...), &slog.HandlerOptions{Level: slogLevel})
-	slog.SetDefault(slog.New(loggingpkg.NewRingHandler(base, ring)))
-	return ring, nil
+	return runtime.Ring, nil
 }

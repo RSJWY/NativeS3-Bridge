@@ -44,6 +44,31 @@ func (c LogConfig) EffectiveFile() string {
 	return c.File
 }
 
+func (c *LogConfig) applyDefaults() {
+	if !c.maxSizeSet && c.MaxSizeMB == 0 {
+		c.MaxSizeMB = 100
+	}
+	if !c.maxBackupsSet && c.MaxBackups == 0 {
+		c.MaxBackups = 5
+	}
+}
+
+func (c LogConfig) validate() error {
+	if c.Dir != "" && c.File != "" {
+		return fmt.Errorf("log.dir and log.file are mutually exclusive")
+	}
+	if c.EffectiveFile() != "" && c.MaxSizeMB < 1 {
+		return fmt.Errorf("log.max_size_mb must be at least 1 when file logging is enabled")
+	}
+	if c.MaxBackups < 0 {
+		return fmt.Errorf("log.max_backups must not be negative")
+	}
+	if c.MaxAgeDays < 0 {
+		return fmt.Errorf("log.max_age_days must not be negative")
+	}
+	return nil
+}
+
 func (c *LogConfig) UnmarshalYAML(node *yaml.Node) error {
 	type rawLogConfig LogConfig
 	var raw rawLogConfig
@@ -208,12 +233,7 @@ func (c *Config) applyDefaults() {
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
-	if !c.Log.maxSizeSet && c.Log.MaxSizeMB == 0 {
-		c.Log.MaxSizeMB = 100
-	}
-	if !c.Log.maxBackupsSet && c.Log.MaxBackups == 0 {
-		c.Log.MaxBackups = 5
-	}
+	c.Log.applyDefaults()
 	if c.WebAdmin.SessionTTLMinutes == 0 {
 		c.WebAdmin.SessionTTLMinutes = 720
 	}
@@ -257,17 +277,8 @@ func (c *Config) Validate() error {
 	if c.Storage.MultipartMaxPendingBytes < 0 {
 		return fmt.Errorf("storage.multipart_max_pending_bytes must be positive")
 	}
-	if c.Log.Dir != "" && c.Log.File != "" {
-		return fmt.Errorf("log.dir and log.file are mutually exclusive")
-	}
-	if c.Log.EffectiveFile() != "" && c.Log.MaxSizeMB < 1 {
-		return fmt.Errorf("log.max_size_mb must be at least 1 when file logging is enabled")
-	}
-	if c.Log.MaxBackups < 0 {
-		return fmt.Errorf("log.max_backups must not be negative")
-	}
-	if c.Log.MaxAgeDays < 0 {
-		return fmt.Errorf("log.max_age_days must not be negative")
+	if err := c.Log.validate(); err != nil {
+		return err
 	}
 	if err := validateSessionSecret(c.WebAdmin.SessionSecret); err != nil {
 		return err

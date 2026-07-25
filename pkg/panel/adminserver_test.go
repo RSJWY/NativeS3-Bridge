@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/logging"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -40,10 +43,17 @@ func TestAdminServerUsesPanelModeAndPanelRoutes(t *testing.T) {
 	tasks := NewTaskOrchestrator(gdb, hub, 0)
 	transport := NewTransportServer(TransportDeps{DB: gdb, Hub: hub, Cipher: cipher})
 	migration := NewMigrationCoordinator(gdb, cipher, desired, audit)
+	logFile := filepath.Join(t.TempDir(), "panel.log")
+	if err := os.WriteFile(logFile, []byte("time=2026-07-25T10:00:00Z level=INFO msg=panel-ready component=admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logRing := logging.NewRing(10)
+	logRing.Append(logging.Entry{Level: "WARN", Message: "ring fallback"})
 
 	server, err := NewAdminServer(AdminServerDeps{
 		Config: cfg, DB: gdb, Hub: hub, Creds: creds, Desired: desired,
 		Tasks: tasks, Transport: transport, Migration: migration, Audit: audit,
+		LogRing: logRing, LogFile: logFile,
 	})
 	if err != nil {
 		t.Fatalf("new admin server: %v", err)
@@ -60,6 +70,11 @@ func TestAdminServerUsesPanelModeAndPanelRoutes(t *testing.T) {
 	}
 	if settingsBody["service_mode"] != string("panel") {
 		t.Fatalf("service_mode = %v, want panel", settingsBody["service_mode"])
+	}
+	unauthorizedLogs := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(unauthorizedLogs, httptest.NewRequest(http.MethodGet, "/api/admin/logs", nil))
+	if unauthorizedLogs.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized logs status = %d, body=%s", unauthorizedLogs.Code, unauthorizedLogs.Body.String())
 	}
 
 	login := httptest.NewRecorder()
@@ -86,6 +101,21 @@ func TestAdminServerUsesPanelModeAndPanelRoutes(t *testing.T) {
 	nodes := serveAuthenticated("/api/admin/nodes")
 	if nodes.Code != http.StatusOK || nodes.Body.String() != "[]\n" {
 		t.Fatalf("panel nodes status = %d, body=%s", nodes.Code, nodes.Body.String())
+	}
+	logs := serveAuthenticated("/api/admin/logs?limit=10&q=admin")
+	if logs.Code != http.StatusOK {
+		t.Fatalf("panel logs status = %d, body=%s", logs.Code, logs.Body.String())
+	}
+	var logsBody struct {
+		Source      string          `json:"source"`
+		FileEnabled bool            `json:"file_enabled"`
+		Entries     []logging.Entry `json:"entries"`
+	}
+	if err := json.Unmarshal(logs.Body.Bytes(), &logsBody); err != nil {
+		t.Fatalf("decode panel logs: %v", err)
+	}
+	if logsBody.Source != "file" || !logsBody.FileEnabled || len(logsBody.Entries) != 1 || logsBody.Entries[0].Message != "panel-ready" {
+		t.Fatalf("panel logs body = %+v", logsBody)
 	}
 	standaloneRoute := serveAuthenticated("/api/admin/dashboard/summary")
 	if standaloneRoute.Code != http.StatusNotFound || !bytes.Contains(standaloneRoute.Body.Bytes(), []byte(`"not found"`)) {

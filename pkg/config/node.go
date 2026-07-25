@@ -120,12 +120,7 @@ func (c *NodeConfig) applyDefaults() {
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
-	if !c.Log.maxSizeSet && c.Log.MaxSizeMB == 0 {
-		c.Log.MaxSizeMB = 100
-	}
-	if !c.Log.maxBackupsSet && c.Log.MaxBackups == 0 {
-		c.Log.MaxBackups = 5
-	}
+	c.Log.applyDefaults()
 	if c.Panel.HeartbeatInterval == 0 {
 		c.Panel.HeartbeatInterval = 15 * time.Second
 	}
@@ -143,11 +138,8 @@ func (c *NodeConfig) Validate() error {
 	if c.Storage.MultipartMaxPendingBytes < 0 {
 		return fmt.Errorf("storage.multipart_max_pending_bytes must be positive")
 	}
-	if c.Log.Dir != "" && c.Log.File != "" {
-		return fmt.Errorf("log.dir and log.file are mutually exclusive")
-	}
-	if c.Log.EffectiveFile() != "" && c.Log.MaxSizeMB < 1 {
-		return fmt.Errorf("log.max_size_mb must be at least 1 when file logging is enabled")
+	if err := c.Log.validate(); err != nil {
+		return err
 	}
 	if c.Server.TLS.Enabled && (c.Server.TLS.CertFile == "" || c.Server.TLS.KeyFile == "") {
 		return fmt.Errorf("server.tls cert_file and key_file are required when enabled")

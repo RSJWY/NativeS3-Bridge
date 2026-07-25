@@ -2,8 +2,8 @@
   <section class="page-stack">
     <div class="page-header">
       <div>
-        <h1>日志</h1>
-        <p class="muted">查看最近的服务运行和 S3 请求日志。</p>
+        <h1>{{ isPanelMode ? 'Panel 日志' : '日志' }}</h1>
+        <p class="muted">{{ isPanelMode ? '查看 Panel 管理接口、节点控制面和后台任务日志。' : '查看最近的服务运行和 S3 请求日志。' }}</p>
       </div>
       <button class="secondary-button" type="button" :disabled="loading" @click="load">{{ loading ? '刷新中…' : '刷新' }}</button>
     </div>
@@ -22,7 +22,7 @@
           </select>
         </div>
         <div class="form-field"><label for="log-level">级别</label><select id="log-level" v-model="level"><option value="">全部</option><option>DEBUG</option><option>INFO</option><option>WARN</option><option>ERROR</option></select></div>
-        <div class="form-field"><label for="log-query">搜索</label><input id="log-query" v-model="query" type="search" placeholder="消息、桶名或请求 ID" /></div>
+        <div class="form-field"><label for="log-query">搜索</label><input id="log-query" v-model="query" type="search" :placeholder="isPanelMode ? '消息、节点或请求 ID' : '消息、桶名或请求 ID'" /></div>
         <div class="form-field log-limit"><label for="log-limit">条数</label><select id="log-limit" v-model.number="limit"><option :value="100">100</option><option :value="200">200</option><option :value="500">500</option></select></div>
         <button class="primary-button" type="submit" :disabled="loading">查询</button>
       </form>
@@ -44,8 +44,9 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { adminApi, type LogFileInfo, type LogsResponse } from '../api/client'
+import { runtimeState } from '../state/runtime'
 
 const response = ref<LogsResponse | null>(null)
 const loading = ref(false)
@@ -54,6 +55,7 @@ const level = ref('')
 const query = ref('')
 const limit = ref(200)
 const selectedFile = ref('')
+const isPanelMode = computed(() => runtimeState.serviceMode === 'panel')
 
 onMounted(load)
 

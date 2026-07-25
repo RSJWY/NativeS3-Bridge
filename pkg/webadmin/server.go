@@ -45,6 +45,7 @@ func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb 
 	authenticator := NewAuth(webCfg, effectiveTLS.Enabled)
 	authenticator.trustForwarded = options.TrustForwarded
 	api := NewAPI(gdb, credentialStore, bucketStore, APIOptions{LogRing: options.LogRing, LogFile: options.LogFile, DataRoot: options.DataRoot, MetadataSuffix: options.MetadataSuffix})
+	logsHandler := NewLogsHandler(options.LogRing, options.LogFile)
 	staticFS, err := fs.Sub(ui.DistFS, "dist")
 	if err != nil {
 		return nil, err
@@ -62,7 +63,7 @@ func NewServer(serverCfg config.ServerConfig, webCfg config.WebAdminConfig, gdb 
 	mux.Handle("/api/admin/credentials/", authenticator.Middleware(http.HandlerFunc(api.CredentialByID)))
 	mux.Handle("/api/admin/buckets", authenticator.Middleware(http.HandlerFunc(api.Buckets)))
 	mux.Handle("/api/admin/buckets/", authenticator.Middleware(http.HandlerFunc(api.BucketByName)))
-	mux.Handle("/api/admin/logs", authenticator.Middleware(http.HandlerFunc(api.Logs)))
+	mux.Handle("/api/admin/logs", authenticator.Middleware(logsHandler))
 	mux.Handle("/api/admin/dashboard/summary", authenticator.Middleware(http.HandlerFunc(api.DashboardSummary)))
 	mux.Handle("/api/admin/dashboard/usage-ranking", authenticator.Middleware(http.HandlerFunc(api.UsageRanking)))
 	mux.Handle("/api/admin/dashboard/request-trend", authenticator.Middleware(http.HandlerFunc(api.RequestTrend)))

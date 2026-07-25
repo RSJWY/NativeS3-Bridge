@@ -34,7 +34,6 @@ FORBIDDEN_API_PREFIXES = (
     "/api/admin/dashboard",
     "/api/admin/credentials",
     "/api/admin/buckets",
-    "/api/admin/logs",
 )
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 LEGACY_ELEMENT_KEY = "ELEMENT"
@@ -553,12 +552,35 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             lambda: expected_name in str(webdriver.execute("return document.body ? document.body.innerText : '';")),
             "created node visible in Panel",
         )
+        # Logs are a shared authenticated route.  Visit it explicitly so the
+        # Panel gate proves that the mode-specific navigation and API wiring
+        # agree, while the forbidden list above continues to protect only
+        # standalone-only surfaces.
+        webdriver.push_route("/logs")
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: webdriver.current_url().rstrip("/").endswith("/logs"),
+            "Panel navigation to logs",
+        )
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: webdriver.execute(
+                """
+                const file = document.querySelector('#log-file');
+                const body = document.body ? document.body.innerText : '';
+                return Boolean(file && !body.includes('加载中…'));
+                """
+            ),
+            "Panel logs page",
+        )
         entries = webdriver.logs("performance")
         resource_urls = webdriver.resource_urls()
         if not entries and not resource_urls:
             raise BrowserGateError("ChromeDriver returned no network evidence")
         if not _saw_same_origin_api_path(entries, resource_urls, panel_url, "/api/admin/nodes"):
             raise BrowserGateError("no same-origin /api/admin/nodes request was observed")
+        if not _saw_same_origin_api_path(entries, resource_urls, panel_url, "/api/admin/logs"):
+            raise BrowserGateError("no same-origin /api/admin/logs request was observed")
         failures = _assert_network(entries, (args.admin_password, expected_name), panel_url)
         failures.extend(_assert_resource_urls(resource_urls, (args.admin_password, expected_name), panel_url))
         failures = list(dict.fromkeys(failures))
@@ -569,9 +591,11 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             "dashboard_redirect",
             "node_visible",
             "panel_nodes_api",
+            "panel_logs_route",
+            "panel_logs_api",
             "network_contract",
         ]
-        report["route"] = "/nodes"
+        report["route"] = "/logs"
         report["network_events"] = len(entries)
         return report
     except BrowserGateError as exc:

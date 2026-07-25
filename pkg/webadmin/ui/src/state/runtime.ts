@@ -17,6 +17,7 @@ export function serviceHomePath(mode: ServiceMode = runtimeState.serviceMode) {
 }
 
 export function routeMatchesService(path: string, mode: ServiceMode = runtimeState.serviceMode) {
-  const panelRoute = path === '/nodes' || path.startsWith('/nodes/')
-  return mode === 'panel' ? panelRoute : !panelRoute
+  const nodeRoute = path === '/nodes' || path.startsWith('/nodes/')
+  const panelRoute = nodeRoute || path === '/logs'
+  return mode === 'panel' ? panelRoute : !nodeRoute
 }

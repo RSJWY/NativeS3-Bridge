@@ -348,3 +348,70 @@ log:
 		t.Fatalf("explicit max_backups = %d, want 0", explicitCfg.Log.MaxBackups)
 	}
 }
+
+func TestPanelAndNodeShareLogDefaultsAndValidation(t *testing.T) {
+	panelCfg := PanelConfig{}
+	panelCfg.applyDefaults()
+	nodeCfg := NodeConfig{}
+	nodeCfg.applyDefaults()
+	for name, logCfg := range map[string]LogConfig{
+		"panel": panelCfg.Log,
+		"node":  nodeCfg.Log,
+	} {
+		if logCfg.MaxSizeMB != 100 || logCfg.MaxBackups != 5 || logCfg.MaxAgeDays != 0 {
+			t.Fatalf("%s log defaults = %+v", name, logCfg)
+		}
+	}
+
+	validPanel := PanelConfig{
+		Database:      DatabaseConfig{Driver: "sqlite", DSN: "panel.db"},
+		WebAdmin:      WebAdminConfig{SessionSecret: validTestSessionSecret},
+		MasterKeyFile: "master.key",
+		PKI:           PKIConfig{IntermediateCertFile: "ca.crt", IntermediateKeyFile: "ca.key"},
+		Agent:         AgentListenerConfig{CertFile: "agent.crt", KeyFile: "agent.key"},
+	}
+	validNode := NodeConfig{
+		Storage:  StorageConfig{DataRoot: "/data"},
+		Database: DatabaseConfig{Driver: "sqlite", DSN: "node.db"},
+		Panel: PanelClientConfig{
+			NodeID: 1, AgentURL: "wss://panel/agent", CertFile: "node.crt", KeyFile: "node.key", CAFile: "ca.crt",
+		},
+	}
+
+	tests := []struct {
+		name string
+		log  LogConfig
+		want string
+	}{
+		{name: "mutually exclusive paths", log: LogConfig{Dir: "/logs", File: "/logs/app.log", MaxSizeMB: 1}, want: "mutually exclusive"},
+		{name: "zero size with file", log: LogConfig{File: "/logs/app.log"}, want: "max_size_mb"},
+		{name: "negative backups", log: LogConfig{MaxBackups: -1}, want: "max_backups"},
+		{name: "negative age", log: LogConfig{MaxAgeDays: -1}, want: "max_age_days"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			panelCase := validPanel
+			panelCase.Log = tt.log
+			if err := panelCase.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("panel validation error = %v, want %q", err, tt.want)
+			}
+			nodeCase := validNode
+			nodeCase.Log = tt.log
+			if err := nodeCase.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("node validation error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+
+	validLog := LogConfig{File: "/logs/app.log", MaxSizeMB: 1, MaxBackups: 0, MaxAgeDays: 0}
+	panelCase := validPanel
+	panelCase.Log = validLog
+	if err := panelCase.Validate(); err != nil {
+		t.Fatalf("panel rejected explicit zero backups: %v", err)
+	}
+	nodeCase := validNode
+	nodeCase.Log = validLog
+	if err := nodeCase.Validate(); err != nil {
+		t.Fatalf("node rejected explicit zero backups: %v", err)
+	}
+}

@@ -1,13 +1,34 @@
 package main
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
 )
+
+func TestSetupSlogUsesSharedFileAndRingContract(t *testing.T) {
+	originalLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(originalLogger) })
+
+	path := filepath.Join(t.TempDir(), "logs", "node.log")
+	ring, err := setupSlog("info", config.LogConfig{File: path, MaxSizeMB: 1, MaxBackups: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slog.Info("node setup test", "node_id", 7)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	if entries := ring.Snapshot(1, "INFO", "node_id"); len(entries) != 1 || entries[0].Message != "node setup test" {
+		t.Fatalf("ring entries = %+v", entries)
+	}
+}
 
 func TestProbeS3ListenerAcceptsHTTPErrorResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
