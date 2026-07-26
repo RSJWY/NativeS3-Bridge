@@ -45,6 +45,26 @@ func TestRingConcurrentAppend(t *testing.T) {
 	}
 }
 
+func TestRingQueryAppliesInclusiveTimeFiltersBeforeLimit(t *testing.T) {
+	ring := NewRing(10)
+	base := time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+	ring.Append(Entry{Time: base, Level: "INFO", Message: "old"})
+	ring.Append(Entry{Time: base.Add(time.Minute), Level: "ERROR", Message: "first match", Attrs: map[string]any{"component": "media"}})
+	ring.Append(Entry{Time: base.Add(2 * time.Minute), Level: "ERROR", Message: "newest match", Attrs: map[string]any{"component": "media"}})
+	ring.Append(Entry{Time: base.Add(3 * time.Minute), Level: "ERROR", Message: "too new", Attrs: map[string]any{"component": "media"}})
+	since := base.Add(time.Minute)
+	until := base.Add(2 * time.Minute)
+
+	entries := ring.Query(QueryOptions{Limit: 1, Level: "error", Query: "MEDIA", Since: &since, Until: &until})
+	if len(entries) != 1 || entries[0].Message != "newest match" {
+		t.Fatalf("entries = %+v, want newest inclusive match", entries)
+	}
+	entries[0].Attrs["component"] = "changed"
+	if got := ring.Query(QueryOptions{Limit: 1, Level: "error", Query: "media", Since: &since, Until: &until})[0].Attrs["component"]; got != "media" {
+		t.Fatalf("query returned mutable attrs, got %v", got)
+	}
+}
+
 func TestRingHandlerFiltersSensitiveAttrs(t *testing.T) {
 	ring := NewRing(10)
 	handler := NewRingHandler(slog.NewTextHandler(io.Discard, nil), ring)

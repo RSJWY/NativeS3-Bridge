@@ -103,6 +103,9 @@ require_text scripts/test-panel-node-e2e.sh '/api/admin/auth-settings'
 require_text scripts/test-panel-node-e2e.sh '--aws-sigv4'
 require_text scripts/test-panel-node-e2e.sh 'wrong-CA registration failed closed'
 require_text scripts/test-panel-node-e2e.sh 'browser-report.json'
+require_text scripts/test-panel-node-e2e.sh '/api/admin/nodes/1/tasks'
+require_text scripts/test-panel-node-e2e.sh 'bounded structured Node ring log query over mTLS'
+require_text scripts/test-panel-node-e2e.sh 'authenticated bounded Panel local log query'
 [[ -x scripts/internal/e2e-browser.py ]] || {
 	printf 'distribution contract failed: scripts/internal/e2e-browser.py is not executable\n' >&2
 	exit 1
@@ -111,6 +114,8 @@ require_text scripts/internal/e2e-browser.py 'no same-origin /api/admin/nodes re
 require_text scripts/internal/e2e-browser.py 'panel_nodes_api'
 require_text scripts/internal/e2e-browser.py 'no same-origin /api/admin/logs request was observed'
 require_text scripts/internal/e2e-browser.py 'panel_logs_api'
+require_text scripts/internal/e2e-browser.py 'no same-origin Node task dispatch request was observed'
+require_text scripts/internal/e2e-browser.py 'node_logs_ui'
 
 e2e_line="$(grep -n '^  e2e:' .github/workflows/release.yml | head -n 1 | cut -d: -f1)"
 artifacts_line="$(grep -n '^  artifacts:' .github/workflows/release.yml | head -n 1 | cut -d: -f1)"

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,6 +31,9 @@ var (
 	// ErrUnsupportedTaskType guards against dispatching anything outside the
 	// predefined operation set (no generic command channel).
 	ErrUnsupportedTaskType = errors.New("unsupported task type")
+	// ErrInvalidTaskParams is returned before persistence/dispatch when a
+	// predefined task's typed parameters violate its bounded contract.
+	ErrInvalidTaskParams = errors.New("invalid task params")
 )
 
 // TaskOrchestrator dispatches one-shot tasks to online nodes and records their
@@ -74,13 +78,18 @@ func (o *TaskOrchestrator) Dispatch(ctx context.Context, nodeID uint, taskType c
 	if !isSupportedTaskType(taskType) {
 		return "", ErrUnsupportedTaskType
 	}
+	if taskType == controlproto.TaskLogQuery {
+		if _, err := controlproto.ParseLogQuery(params); err != nil {
+			return "", fmt.Errorf("%w: %v", ErrInvalidTaskParams, err)
+		}
+	}
 	conn, ok := o.hub.Get(nodeID)
 	if !ok {
 		return "", ErrNodeOffline
 	}
 
 	taskID := uuid.NewString()
-	paramsJSON, err := json.Marshal(params)
+	paramsJSON, err := json.Marshal(persistedTaskParams(taskType, params))
 	if err != nil {
 		return "", fmt.Errorf("marshal task params: %w", err)
 	}
@@ -128,13 +137,57 @@ func (o *TaskOrchestrator) Dispatch(ctx context.Context, nodeID uint, taskType c
 
 	o.markState(taskID, controlproto.TaskStateRunning, "", "")
 	o.audit("task_dispatch", nodeID, taskID, string(taskType), createdBy)
+	go o.expireTask(conn, taskID, nodeID)
 	return taskID, nil
+}
+
+func persistedTaskParams(taskType controlproto.TaskType, params controlproto.TaskParams) any {
+	if taskType != controlproto.TaskLogQuery {
+		return params
+	}
+	return struct {
+		Since           string `json:"since,omitempty"`
+		Until           string `json:"until,omitempty"`
+		Level           string `json:"level,omitempty"`
+		Limit           int    `json:"limit,omitempty"`
+		KeywordProvided bool   `json:"keyword_provided,omitempty"`
+	}{
+		Since: strings.TrimSpace(params.Since), Until: strings.TrimSpace(params.Until),
+		Level: strings.TrimSpace(params.Level), Limit: params.Limit,
+		KeywordProvided: strings.TrimSpace(params.Keyword) != "",
+	}
+}
+
+func (o *TaskOrchestrator) expireTask(conn *AgentConn, taskID string, nodeID uint) {
+	timer := time.NewTimer(o.timeout)
+	defer timer.Stop()
+	<-timer.C
+	conn.releaseTask(taskID)
+	res := o.db.Model(&Task{}).
+		Where("task_id = ? AND node_id = ? AND state IN ?", taskID, nodeID, []string{
+			string(controlproto.TaskStatePending), string(controlproto.TaskStateRunning),
+		}).
+		Updates(map[string]any{
+			"state": string(controlproto.TaskStateFailed), "error": "task timed out waiting for node result", "updated_at": nowUTC(),
+		})
+	if res.Error == nil && res.RowsAffected > 0 {
+		o.audit("task_timeout", nodeID, taskID, string(controlproto.TaskStateFailed), "control-plane")
+	}
 }
 
 // GetTask returns the current persisted state of a task by ID.
 func (o *TaskOrchestrator) GetTask(taskID string) (Task, error) {
 	var task Task
 	if err := o.db.Where("task_id = ?", taskID).First(&task).Error; err != nil {
+		return Task{}, err
+	}
+	return task, nil
+}
+
+// GetTaskForNode scopes task lookup to the node encoded in the REST path.
+func (o *TaskOrchestrator) GetTaskForNode(nodeID uint, taskID string) (Task, error) {
+	var task Task
+	if err := o.db.Where("node_id = ? AND task_id = ?", nodeID, taskID).First(&task).Error; err != nil {
 		return Task{}, err
 	}
 	return task, nil

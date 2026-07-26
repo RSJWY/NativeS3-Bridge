@@ -1,5 +1,11 @@
 package controlproto
 
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
 // This file defines the type-specific payload structures carried in
 // Envelope.Payload. Every payload is plain JSON with exported fields. New
 // fields must be optional (omitempty where reasonable) so that older peers that
@@ -108,12 +114,90 @@ type TaskParams struct {
 	// log_query
 	Since   string `json:"since,omitempty"`
 	Until   string `json:"until,omitempty"`
+	Level   string `json:"level,omitempty"`
 	Limit   int    `json:"limit,omitempty"`
 	Keyword string `json:"keyword,omitempty"`
 
 	// storage_scan / storage_reconcile_apply
 	Bucket string `json:"bucket,omitempty"`
 	Apply  bool   `json:"apply,omitempty"`
+}
+
+const (
+	DefaultLogQueryLimit    = 200
+	MaxLogQueryLimit        = 500
+	MaxLogQueryKeywordBytes = 256
+	MaxLogQueryResultBytes  = 256 << 10
+	MaxLogQueryLevelBytes   = 32
+)
+
+// LogQuerySpec is the validated, normalized interpretation of log_query
+// parameters. It is owned by the wire package so Panel and Node cannot drift on
+// limits or time semantics.
+type LogQuerySpec struct {
+	Since   *time.Time
+	Until   *time.Time
+	Level   string
+	Keyword string
+	Limit   int
+}
+
+// ParseLogQuery validates task parameters without echoing user-provided values
+// into errors. RFC3339 boundaries are inclusive when consumed by the ring.
+func ParseLogQuery(params TaskParams) (LogQuerySpec, error) {
+	if params.Limit < 0 {
+		return LogQuerySpec{}, fmt.Errorf("log limit must not be negative")
+	}
+	keyword := strings.TrimSpace(params.Keyword)
+	if len(keyword) > MaxLogQueryKeywordBytes {
+		return LogQuerySpec{}, fmt.Errorf("log keyword is too long")
+	}
+	level := strings.TrimSpace(params.Level)
+	if len(level) > MaxLogQueryLevelBytes {
+		return LogQuerySpec{}, fmt.Errorf("log level is too long")
+	}
+	since, err := parseOptionalRFC3339("since", params.Since)
+	if err != nil {
+		return LogQuerySpec{}, err
+	}
+	until, err := parseOptionalRFC3339("until", params.Until)
+	if err != nil {
+		return LogQuerySpec{}, err
+	}
+	if since != nil && until != nil && since.After(*until) {
+		return LogQuerySpec{}, fmt.Errorf("log since must not be after until")
+	}
+	limit := params.Limit
+	if limit == 0 {
+		limit = DefaultLogQueryLimit
+	}
+	if limit > MaxLogQueryLimit {
+		limit = MaxLogQueryLimit
+	}
+	return LogQuerySpec{Since: since, Until: until, Level: level, Keyword: keyword, Limit: limit}, nil
+}
+
+func parseOptionalRFC3339(name, value string) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return nil, fmt.Errorf("log %s must be RFC3339", name)
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
+}
+
+// TaskLogEntry is the structured, redacted log representation carried over
+// the control channel. Attr values are strings so peers never have to decode
+// arbitrary process-local values.
+type TaskLogEntry struct {
+	Time  string            `json:"time,omitempty"`
+	Level string            `json:"level,omitempty"`
+	Msg   string            `json:"msg"`
+	Attrs map[string]string `json:"attrs,omitempty"`
 }
 
 // TaskState enumerates the terminal states of a task from the panel's view.
@@ -139,9 +223,12 @@ type TaskResultPayload struct {
 
 // TaskResult holds the bounded outputs of a task. Fields are populated per Type.
 type TaskResult struct {
-	// log_query: bounded set of log lines plus whether results were truncated.
-	LogLines     []string `json:"log_lines,omitempty"`
-	LogTruncated bool     `json:"log_truncated,omitempty"`
+	// log_query: new peers prefer structured entries. LogLines remains additive
+	// compatibility for older peers and is bounded by the same limits.
+	LogEntries   []TaskLogEntry `json:"log_entries,omitempty"`
+	LogLines     []string       `json:"log_lines,omitempty"`
+	LogTruncated bool           `json:"log_truncated,omitempty"`
+	LogSource    string         `json:"log_source,omitempty"`
 
 	// storage_scan / storage_reconcile_apply
 	Bucket             string `json:"bucket,omitempty"`

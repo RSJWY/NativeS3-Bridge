@@ -194,6 +194,41 @@ export interface PanelCertificate {
   CreatedAt: string
 }
 
+export type PanelTaskState = 'pending' | 'running' | 'success' | 'failed' | 'unknown'
+
+export interface PanelTaskLogEntry {
+  time?: string
+  level?: string
+  msg: string
+  attrs?: Record<string, string>
+}
+
+export interface PanelTaskResult {
+  log_entries?: PanelTaskLogEntry[]
+  log_lines?: string[]
+  log_truncated?: boolean
+  log_source?: 'ring'
+}
+
+export interface PanelTask {
+  task_id: string
+  node_id: number
+  type: 'log_query' | 'storage_scan' | 'storage_reconcile_apply'
+  state: PanelTaskState
+  result: PanelTaskResult
+  error?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface PanelLogQueryInput {
+  since?: string
+  until?: string
+  level?: string
+  keyword?: string
+  limit: number
+}
+
 export interface LoginInput {
   password: string
   totp_code?: string
@@ -451,5 +486,14 @@ export const adminApi = {
   },
   revokeNodeCertificates(id: number) {
     return apiFetch<{ revoked: number }>(`/api/admin/nodes/${id}/certs/revoke`, { method: 'POST' })
+  },
+  dispatchNodeLogQuery(id: number, params: PanelLogQueryInput) {
+    return apiFetch<{ task_id: string }>(`/api/admin/nodes/${id}/tasks`, {
+      method: 'POST',
+      body: JSON.stringify({ type: 'log_query', params })
+    })
+  },
+  getNodeTask(id: number, taskID: string) {
+    return apiFetch<PanelTask>(`/api/admin/nodes/${id}/tasks/${encodeURIComponent(taskID)}`)
   }
 }

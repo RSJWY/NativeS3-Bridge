@@ -141,6 +141,63 @@ func TestAuditNeverContainsSecret(t *testing.T) {
 	}
 }
 
+func TestTaskAPIIsTypedAndScopedToNode(t *testing.T) {
+	api, _ := newTestAdminAPI(t)
+	serve(api, http.MethodPost, "/api/admin/nodes", `{"display_name":"node-a"}`)
+	serve(api, http.MethodPost, "/api/admin/nodes", `{"display_name":"node-b"}`)
+	resultJSON, err := json.Marshal(controlproto.TaskResult{LogLines: []string{"legacy line"}, LogSource: "ring"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := Task{
+		TaskID: "task-scoped", NodeID: 1, Type: string(controlproto.TaskLogQuery),
+		Params: `{"keyword_provided":true}`, State: string(controlproto.TaskStateSuccess), ResultJSON: string(resultJSON),
+		CreatedAt: nowUTC(), UpdatedAt: nowUTC(),
+	}
+	if err := api.db.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	wrongNode := serve(api, http.MethodGet, "/api/admin/nodes/2/tasks/task-scoped", "")
+	if wrongNode.Code != http.StatusNotFound {
+		t.Fatalf("wrong-node task status = %d body=%s", wrongNode.Code, wrongNode.Body.String())
+	}
+	rightNode := serve(api, http.MethodGet, "/api/admin/nodes/1/tasks/task-scoped", "")
+	if rightNode.Code != http.StatusOK {
+		t.Fatalf("task status = %d body=%s", rightNode.Code, rightNode.Body.String())
+	}
+	var response taskResponse
+	if err := json.Unmarshal(rightNode.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.NodeID != 1 || response.TaskID != task.TaskID || response.State != controlproto.TaskStateSuccess || len(response.Result.LogLines) != 1 {
+		t.Fatalf("typed response = %+v", response)
+	}
+	if strings.Contains(rightNode.Body.String(), "keyword_provided") || strings.Contains(rightNode.Body.String(), "result_json") || strings.Contains(rightNode.Body.String(), "created_by") {
+		t.Fatalf("task response leaked persistence fields: %s", rightNode.Body.String())
+	}
+}
+
+func TestTaskAPIRejectsInvalidLogQueryBeforeDispatch(t *testing.T) {
+	api, _ := newTestAdminAPI(t)
+	serve(api, http.MethodPost, "/api/admin/nodes", `{"display_name":"node-a"}`)
+	sentinel := "not-a-time-secret-sentinel"
+	response := serve(api, http.MethodPost, "/api/admin/nodes/1/tasks", `{"type":"log_query","params":{"since":"`+sentinel+`"}}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), sentinel) {
+		t.Fatalf("validation response echoed input: %s", response.Body.String())
+	}
+	var count int64
+	if err := api.db.Model(&Task{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("invalid task was persisted, count=%d", count)
+	}
+}
+
 func TestOfflinePublishExposesWaitingUntilNewVersionIsApplied(t *testing.T) {
 	api, _ := newTestAdminAPI(t)
 	serve(api, http.MethodPost, "/api/admin/nodes", `{"display_name":"node-a"}`)

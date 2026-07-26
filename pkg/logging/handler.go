@@ -72,3 +72,11 @@ func sensitiveKey(key string) bool {
 	}
 	return false
 }
+
+// IsSensitiveKey exposes the shared case-insensitive log redaction policy for
+// trusted boundary adapters such as the Node task protocol. Normal slog writes
+// are already filtered by RingHandler; callers must filter again before a ring
+// entry crosses a process boundary.
+func IsSensitiveKey(key string) bool {
+	return sensitiveKey(key)
+}

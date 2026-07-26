@@ -76,6 +76,7 @@
       <PanelNodeCredentialsSection :node-id="nodeID" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" @changed="handleDraftChanged" />
       <PanelNodeWebhooksSection :node-id="nodeID" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" @changed="handleDraftChanged" />
       <PanelNodeRateLimitSection :node-id="nodeID" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" @changed="handleDraftChanged" />
+      <PanelNodeLogsSection :node-id="nodeID" :online="node.online" :disabled="node.status === 'retired'" />
 
       <section class="panel panel-detail-section">
         <div class="panel-section-heading">
@@ -122,6 +123,7 @@ import { adminApi, type PanelCertificate, type PanelNode, type PanelPublishResul
 import PanelNodeBucketsSection from '../components/panel/PanelNodeBucketsSection.vue'
 import PanelNodeCredentialsSection from '../components/panel/PanelNodeCredentialsSection.vue'
 import PanelNodeImportSection from '../components/panel/PanelNodeImportSection.vue'
+import PanelNodeLogsSection from '../components/panel/PanelNodeLogsSection.vue'
 import PanelNodeRateLimitSection from '../components/panel/PanelNodeRateLimitSection.vue'
 import PanelNodeWebhooksSection from '../components/panel/PanelNodeWebhooksSection.vue'
 

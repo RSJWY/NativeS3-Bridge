@@ -637,6 +637,25 @@ PY
 	record 'Panel Admin API login (cookie retained only in temp jar)'
 }
 
+assert_panel_logs() {
+	api_expect 200 GET '/api/admin/logs?limit=10'
+	E2E_ADMIN_PASSWORD="$ADMIN_PASSWORD" python3 - "$API_BODY" <<'PY'
+import json, os, sys
+obj = json.load(open(sys.argv[1], encoding="utf-8"))
+if obj.get("source") not in ("file", "ring") or obj.get("limit") != 10:
+    raise SystemExit(1)
+if not obj.get("file_enabled") or not isinstance(obj.get("entries"), list) or len(obj["entries"]) > 10:
+    raise SystemExit(1)
+files = obj.get("files") or []
+if not any(item.get("current") for item in files):
+    raise SystemExit(1)
+password = os.environ.get("E2E_ADMIN_PASSWORD", "")
+if password and password in json.dumps(obj, ensure_ascii=False):
+    raise SystemExit(1)
+PY
+	record 'authenticated bounded Panel local log query'
+}
+
 s3_request() {
 	local method="$1" path="$2" out="$3" body_file="${4:-}"
 	local err="$TMP_DIR/s3-$RANDOM-$RANDOM.err"
@@ -672,6 +691,57 @@ poll_node_synced() {
 	fail 'Node did not reach online/synced state'
 }
 
+assert_node_log_result() {
+	local file="$1"
+	E2E_SECRET_KEY="$SECRET_KEY" E2E_REGISTRATION_TOKEN="$REGISTRATION_TOKEN" E2E_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+		python3 - "$file" <<'PY'
+import json, os, sys
+obj = json.load(open(sys.argv[1], encoding="utf-8"))
+result = obj.get("result") or {}
+entries = result.get("log_entries") or []
+if obj.get("node_id") != 1 or obj.get("type") != "log_query" or obj.get("state") != "success":
+    raise SystemExit(1)
+if result.get("log_source") != "ring" or not entries or len(entries) > 10:
+    raise SystemExit(1)
+if not any(entry.get("msg") == "s3 request" for entry in entries):
+    raise SystemExit(1)
+for entry in entries:
+    for key in (entry.get("attrs") or {}):
+        normalized = key.lower().replace("-", "_").replace(".", "_")
+        if any(part in normalized for part in ("secret", "password", "authorization", "cookie", "signature", "token")):
+            raise SystemExit(1)
+raw = json.dumps(obj, ensure_ascii=False)
+for name in ("E2E_SECRET_KEY", "E2E_REGISTRATION_TOKEN", "E2E_ADMIN_PASSWORD"):
+    value = os.environ.get(name, "")
+    if value and value in raw:
+        raise SystemExit(1)
+PY
+}
+
+query_node_logs() {
+	local request_file="$TMP_DIR/node-log-query.json" task_id deadline=$((SECONDS + TIMEOUT)) state
+	printf '%s\n' '{"type":"log_query","params":{"level":"INFO","keyword":"s3 request","limit":10}}' >"$request_file"
+	api_expect 202 POST /api/admin/nodes/1/tasks "$request_file"
+	task_id="$(json_field "$API_BODY" task_id)"
+	[[ -n "$task_id" ]] || fail 'Panel returned an empty Node log task id'
+	while ((SECONDS < deadline)); do
+		api_request GET "/api/admin/nodes/1/tasks/$task_id"
+		if [[ "$API_STATUS" == 200 ]]; then
+			state="$(json_field "$API_BODY" state)"
+			case "$state" in
+			success)
+				assert_node_log_result "$API_BODY" || fail 'Node log query returned an invalid, unbounded, or sensitive result'
+				record 'bounded structured Node ring log query over mTLS'
+				return 0
+				;;
+			failed|unknown) fail "Node log query reached terminal state $state" ;;
+			esac
+		fi
+		sleep 0.2
+	done
+	fail 'timed out polling Node log query task'
+}
+
 run_browser_gate() {
 	if [[ "$SKIP_BROWSER" == 1 ]]; then
 		record 'browser gate skipped by request'
@@ -686,7 +756,7 @@ run_browser_gate() {
 		>"$TMP_DIR/browser.stdout" 2>"$TMP_DIR/browser.stderr" || {
 			fail "browser gate failed: $(redact_text <"$TMP_DIR/browser.stderr" 2>/dev/null || true)"
 		}
-	record 'ChromeDriver Panel /dashboard -> /nodes and API boundary assertions'
+	record 'ChromeDriver Panel /dashboard -> /nodes -> /logs and API boundary assertions'
 }
 
 main() {
@@ -724,6 +794,7 @@ main() {
 	start_panel
 	wait_panel_ready
 	admin_login
+	assert_panel_logs
 
 	# Keep Node offline while Panel creates the authoritative draft and publishes
 	# an immutable desired snapshot.
@@ -788,6 +859,7 @@ main() {
 	printf 'survives panel and node restart\n' >"$survivor_src"
 	s3_expect 200 PUT "/$BUCKET_NAME/e2e/survivor.txt" "$TMP_DIR/survivor-put.out" "$survivor_src"
 	record 'SigV4 bucket confirmation and object PUT/HEAD/GET/DELETE byte checks'
+	query_node_logs
 
 	# Panel outage: Node keeps serving its S3 listener and reconnects after the
 	# same Panel data/PKI comes back.  Re-login explicitly because sessions are

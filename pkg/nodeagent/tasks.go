@@ -2,8 +2,12 @@ package nodeagent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/controlproto"
 	dbpkg "github.com/RSJWY/NativeS3-Bridge/pkg/db"
@@ -16,8 +20,9 @@ import (
 // data path (design §4.5 backpressure): log queries are bounded in count and
 // scan results are compact summaries, never raw object listings.
 const (
-	maxLogQueryLimit     = 500
-	defaultLogQueryLimit = 200
+	maxLogFieldBytes    = 16 << 10
+	maxLogAttrKeyBytes  = 256
+	maxLogAttrsPerEntry = 64
 )
 
 // LocalTaskRunner executes the predefined one-shot tasks on the node using
@@ -43,7 +48,7 @@ func (r *LocalTaskRunner) Run(ctx context.Context, task controlproto.TaskPayload
 	base := controlproto.TaskResultPayload{TaskID: task.TaskID, Type: task.Type}
 	switch task.Type {
 	case controlproto.TaskLogQuery:
-		return r.runLogQuery(task, base)
+		return r.runLogQuery(ctx, task, base)
 	case controlproto.TaskStorageScan:
 		return r.runStorageScan(task, base, false)
 	case controlproto.TaskStorageReconcileApply:
@@ -58,32 +63,131 @@ func (r *LocalTaskRunner) Run(ctx context.Context, task controlproto.TaskPayload
 // runLogQuery returns a bounded slice of recent log lines from the in-memory
 // ring, filtered by keyword. The count is capped so the control connection is
 // never used as an unbounded log stream.
-func (r *LocalTaskRunner) runLogQuery(task controlproto.TaskPayload, base controlproto.TaskResultPayload) controlproto.TaskResultPayload {
+func (r *LocalTaskRunner) runLogQuery(ctx context.Context, task controlproto.TaskPayload, base controlproto.TaskResultPayload) controlproto.TaskResultPayload {
 	if r.logRing == nil {
-		base.State = controlproto.TaskStateFailed
-		base.Error = "log ring is not configured"
-		return base
+		return failedTask(base, "log ring is not configured")
 	}
-	limit := task.Params.Limit
-	if limit <= 0 {
-		limit = defaultLogQueryLimit
+	spec, err := controlproto.ParseLogQuery(task.Params)
+	if err != nil {
+		return failedTask(base, err.Error())
 	}
-	if limit > maxLogQueryLimit {
-		limit = maxLogQueryLimit
+	if err := ctx.Err(); err != nil {
+		return failedTask(base, "log query cancelled")
 	}
+
 	// Fetch one extra to detect truncation without leaking more than the cap.
-	entries := r.logRing.Snapshot(limit+1, "", task.Params.Keyword)
-	truncated := false
-	if len(entries) > limit {
-		entries = entries[:limit]
-		truncated = true
+	entries := r.logRing.Query(logging.QueryOptions{
+		Limit: spec.Limit + 1, Level: spec.Level, Query: spec.Keyword, Since: spec.Since, Until: spec.Until,
+	})
+	truncated := len(entries) > spec.Limit
+	if len(entries) > spec.Limit {
+		entries = entries[:spec.Limit]
 	}
-	lines := make([]string, 0, len(entries))
+	result := controlproto.TaskResult{LogSource: "ring"}
 	for _, e := range entries {
-		lines = append(lines, formatLogEntry(e))
+		if err := ctx.Err(); err != nil {
+			return failedTask(base, "log query cancelled")
+		}
+		projected, entryTruncated := projectLogEntry(e)
+		candidate := result
+		candidate.LogEntries = append(append([]controlproto.TaskLogEntry(nil), result.LogEntries...), projected)
+		candidate.LogLines = append(append([]string(nil), result.LogLines...), formatTaskLogEntry(projected))
+		candidate.LogTruncated = truncated || entryTruncated
+		encoded, err := json.Marshal(candidate)
+		if err != nil || len(encoded) > controlproto.MaxLogQueryResultBytes {
+			truncated = true
+			break
+		}
+		result = candidate
+		if entryTruncated {
+			truncated = true
+		}
+	}
+	result.LogTruncated = truncated
+	// Setting the final truncation flag adds a few bytes. Remove the oldest
+	// included entries until the complete result remains within the wire budget.
+	for len(result.LogEntries) > 0 {
+		encoded, err := json.Marshal(result)
+		if err == nil && len(encoded) <= controlproto.MaxLogQueryResultBytes {
+			break
+		}
+		result.LogEntries = result.LogEntries[:len(result.LogEntries)-1]
+		result.LogLines = result.LogLines[:len(result.LogLines)-1]
+		result.LogTruncated = true
 	}
 	base.State = controlproto.TaskStateSuccess
-	base.Result = controlproto.TaskResult{LogLines: lines, LogTruncated: truncated}
+	base.Result = result
+	return base
+}
+
+func projectLogEntry(entry logging.Entry) (controlproto.TaskLogEntry, bool) {
+	message, truncated := truncateLogString(entry.Message, maxLogFieldBytes)
+	level, levelTruncated := truncateLogString(strings.ToUpper(entry.Level), controlproto.MaxLogQueryLevelBytes)
+	truncated = truncated || levelTruncated
+	projected := controlproto.TaskLogEntry{Level: level, Msg: message}
+	if !entry.Time.IsZero() {
+		projected.Time = entry.Time.UTC().Format(time.RFC3339Nano)
+	}
+	if len(entry.Attrs) > 0 {
+		projected.Attrs = make(map[string]string)
+		keys := make([]string, 0, len(entry.Attrs))
+		for key := range entry.Attrs {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		count := 0
+		for _, key := range keys {
+			if logging.IsSensitiveKey(key) {
+				continue
+			}
+			if count >= maxLogAttrsPerEntry {
+				truncated = true
+				break
+			}
+			cleanKey, keyTruncated := truncateLogString(key, maxLogAttrKeyBytes)
+			cleanValue, valueTruncated := truncateLogString(fmt.Sprint(entry.Attrs[key]), maxLogFieldBytes)
+			if cleanKey == "" {
+				continue
+			}
+			projected.Attrs[cleanKey] = cleanValue
+			truncated = truncated || keyTruncated || valueTruncated
+			count++
+		}
+		if len(projected.Attrs) == 0 {
+			projected.Attrs = nil
+		}
+	}
+	return projected, truncated
+}
+
+func formatTaskLogEntry(entry controlproto.TaskLogEntry) string {
+	var b strings.Builder
+	if entry.Time != "" {
+		b.WriteString(entry.Time)
+		b.WriteByte(' ')
+	}
+	if entry.Level != "" {
+		b.WriteString(entry.Level)
+		b.WriteByte(' ')
+	}
+	b.WriteString(entry.Msg)
+	return b.String()
+}
+
+func truncateLogString(value string, maxBytes int) (string, bool) {
+	if len(value) <= maxBytes {
+		return value, false
+	}
+	end := maxBytes
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end], true
+}
+
+func failedTask(base controlproto.TaskResultPayload, message string) controlproto.TaskResultPayload {
+	base.State = controlproto.TaskStateFailed
+	base.Error = message
 	return base
 }
 
