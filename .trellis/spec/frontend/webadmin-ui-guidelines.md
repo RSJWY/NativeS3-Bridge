@@ -244,6 +244,7 @@ Correct:
   - `PanelNodeCredentialsSection.vue`
   - `PanelNodeWebhooksSection.vue`
   - `PanelNodeRateLimitSection.vue`
+  - `PanelNodeLogsSection.vue`
 - Resource sections receive `nodeId`, a disabled state, and `refreshKey`; successful draft mutations emit `changed` so the parent refreshes authoritative status.
 
 ### 3. Contracts
@@ -289,7 +290,7 @@ Correct:
 - Component tests or browser checks cover visible loading/empty/error states, `changed` refresh events, draft/publish/push copy, and confirmation text.
 - Browser secret test closes create/rotate results and asserts the secret is no longer present in the DOM or retained component state.
 - Panel browser network gate: login -> node detail -> CRUD -> publish, with no standalone-mode API request and no unexpected HTTP status `>= 400`.
-- Responsive browser check covers the five sections at desktop and narrow widths without page-level horizontal overflow.
+- Responsive browser check covers all focused sections at desktop and narrow widths without page-level horizontal overflow.
 - Live control-plane check covers offline publish, reconnect reconciliation, import request/abort/confirm, and refreshed desired/applied/sync status.
 
 ### 7. Wrong vs Correct
@@ -322,3 +323,37 @@ secretResult.value = { accessKey: created.access_key, secretKey: created.secret_
 // Modal close:
 secretResult.value = null
 ```
+
+## Scenario: Panel Node Log Query UI
+
+### 1. Scope / Trigger
+- Trigger: changes to `PanelNodeLogsSection.vue`, Panel task types/client methods, or Node-detail log polling.
+
+### 2. Signatures
+- `adminApi.dispatchNodeLogQuery(nodeId, {level?,keyword?,since?,until?,limit})`.
+- `adminApi.getNodeTask(nodeId, taskId): Promise<PanelTask>`.
+- `PanelNodeLogsSection` props: `nodeId`, `online`, `disabled`.
+
+### 3. Contracts
+- The component owns only local filters, current task/result, error state, polling generation, and timer; it stores nothing in localStorage, route state, or a global cache.
+- Dispatch uses the predefined `log_query` type. Poll every bounded interval until success/failed/unknown or a 70-second client deadline, and clear timers on unmount/new query.
+- Structured `log_entries` render with existing log-row styles. When absent, `log_lines` render as an explicit old-Node compatibility view.
+- Offline, dispatching/running, empty, failed, server timeout, client deadline, disconnect/unknown, and truncated states are all visible. Retired/offline nodes cannot submit.
+- Copy states that only the current remote ring is queried; no live stream, file history, download, deletion, or shell action is implied.
+
+### 4. Validation & Error Matrix
+- Invalid/reversed local time -> block submit visibly; API 400 -> visible validation error; 409 -> offline/unavailable; 429 -> retry later; 404 -> node/task missing.
+- Failed timeout -> targeted timeout copy; unknown -> connection-disconnected copy; success with no entries/lines -> empty state.
+- Component unmount/new query -> old timer/request generation cannot mutate the current view.
+
+### 5. Good/Base/Bad Cases
+- Good: online Node query returns structured rows and a visible remote-ring/truncation summary.
+- Base: old Node returns only text lines; offline Node leaves the S3 data-plane status untouched and shows a retry instruction.
+- Bad: parse log strings into pseudo-structured rows, keep polling after unmount, persist the keyword globally, or add a download/live-stream button.
+
+### 6. Tests Required
+- Type-check/build, client route/path encoding review, browser query through Node detail with same-origin `/tasks` evidence, structured/legacy/empty states, offline/timeout/unknown/truncated copy, and narrow viewport layout.
+
+### 7. Wrong vs Correct
+- Wrong: `setInterval()` without cleanup and `line.split(' ')` in the component.
+- Correct: typed task result fields, generation-scoped `setTimeout` polling, `onBeforeUnmount` cleanup, and explicit legacy text fallback.

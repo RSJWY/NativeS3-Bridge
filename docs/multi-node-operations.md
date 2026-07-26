@@ -170,3 +170,8 @@ bypass mTLS or export plaintext secrets.
 - Node rotation files remain on each Node host. Raw Node history is not a
   control-plane file-transfer feature, and the UI does not offer download or
   delete actions.
+- The Node detail page may dispatch the predefined `log_query` task over mTLS.
+  It reads only the current in-memory ring, applies level/keyword/inclusive
+  RFC3339 time filters before a 500-entry limit, and keeps the serialized result
+  below 256 KiB. Timeout, disconnect, failure, empty, and truncation states are
+  explicit; no shell, live stream, or raw rotated file is exposed.

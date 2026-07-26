@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify ring/file/history behavior, rotation pruning, and secret filtering."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Verify Panel auth route, response compatibility, and no standalone API leakage."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Verify route-mode behavior, typed task/log payloads, UI states, and responsive conventions."}
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"Verify release targets remain Panel/Node-only and E2E evidence is redacted."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Cross-check payload and state flow across Node, controlproto, Panel API, and Vue."}
+{"file":".trellis/tasks/07-25-panel-node-logging/research/current-audit.md","reason":"Check findings and decisions against the final diff and tests."}

@@ -347,3 +347,42 @@ Correct:
 ```go
 authenticator := webadmin.NewAuthForServiceMode(webCfg, webadmin.ServiceModePanel, tlsEnabled)
 ```
+
+## Scenario: Typed Panel Node Task API
+
+### 1. Scope / Trigger
+- Trigger: changes to `/api/admin/nodes/{id}/tasks*`, `TaskOrchestrator`, or control-plane task result persistence.
+
+### 2. Signatures
+- `POST /api/admin/nodes/{id}/tasks` with `{"type":"log_query","params":TaskParams}` -> `202 {"task_id":"..."}`.
+- `GET /api/admin/nodes/{id}/tasks/{taskID}` -> typed `{task_id,node_id,type,state,result,error,created_at,updated_at}`.
+- `TaskOrchestrator.GetTaskForNode(nodeID, taskID)`.
+
+### 3. Contracts
+- Both routes remain behind Panel admin session middleware and node existence checks. GET is scoped by both path node ID and task ID.
+- Log-query validation runs before persistence/dispatch. Persisted log params omit the raw keyword and retain only `keyword_provided` plus non-secret filters.
+- Results are decoded from the internal JSON column into `controlproto.TaskResult`; persistence field names, raw params, and creator identity are not returned.
+- Dispatch is online-only and limited by the existing per-connection window. A timeout conditionally changes only pending/running tasks to failed and releases the slot.
+- Disconnect conditionally changes pending/running tasks to unknown. A result racing after timeout/disconnect cannot overwrite a terminal state.
+- Only a result resolved by both the authenticated connection's node ID and persisted task ID, with an empty legacy type or the matching persisted task type, releases the in-flight slot. Unknown or type-mismatched frames are ignored without weakening backpressure.
+- Panel re-bounds and re-redacts log results before persistence; task/audit records store only safe type/state/node identifiers and bounded output.
+
+### 4. Validation & Error Matrix
+- Invalid typed params/unsupported task -> 400; missing node/task or wrong-node task lookup -> 404; offline node -> 409; saturated node -> 429.
+- Pending/running -> poll; success/failed/unknown -> terminal. Timeout -> failed with safe timeout text; late result -> ignored.
+- Unknown-node/task or mismatched-type result frame -> ignored; the real task remains pending/running and its in-flight slot remains reserved until a valid result, disconnect, or timeout.
+- Corrupt persisted result JSON -> sanitized 500, never the raw JSON.
+
+### 5. Good/Base/Bad Cases
+- Good: dispatch an online Node query, poll a typed structured result, and observe no keyword in `tasks.params` or audit rows.
+- Base: old Node text-only result is returned in typed `result.log_lines`.
+- Bad: `GET /nodes/2/tasks/<node-1-task>`, returning the GORM `Task` model directly, releasing a slot before validating the result's node/task/type, or unconditionally updating a timed-out task from a late frame.
+
+### 6. Tests Required
+- Invalid/offline/backpressure dispatch, redacted params, node-scoped lookup, typed structured/legacy response, timeout slot release, disconnect unknown, mismatched-type result retaining its slot, timeout/result race, oversized/sensitive result ingestion, and existing storage-task regression.
+
+### 7. Wrong vs Correct
+- Wrong: `GetTask(taskID)` from a node-scoped route followed by `writeJSON(task)`.
+- Wrong: call `conn.releaseTask(result.TaskID)` before resolving the node-scoped persisted task and validating `result.Type`.
+- Correct: `GetTaskForNode(nodeID, taskID)`, decode only the bounded typed result, and project an explicit response DTO.
+- Correct: resolve `(conn.NodeID, result.TaskID)`, accept an empty legacy type or the persisted type, then release the slot and conditionally persist a terminal result.

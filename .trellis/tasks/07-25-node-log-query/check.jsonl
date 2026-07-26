@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Check bounded query, redaction, and ring semantics."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Check node-scoped auth/API errors and persistence safety."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Check typed structured results, polling cleanup, and visible states."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check round-trip payload compatibility and state transitions."}
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"Check real Panel/Node E2E and redacted diagnostics."}
+{"file":".trellis/tasks/07-25-panel-node-logging/research/current-audit.md","reason":"Check scope and existing task behavior against implementation."}

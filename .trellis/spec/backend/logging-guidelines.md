@@ -168,3 +168,40 @@ logAuthDenied(w, r, "verify_failed", auth.ErrorCode(err))
 - Correct: create/check the active path with `O_CREATE|O_APPEND`, then wrap a stdout/effective-file `io.MultiWriter` handler with `logging.NewRingHandler`; enumerate exact regular backup basenames and open only the matched server-side record.
 - Correct: poll the backup glob with a short bounded deadline and assert the
   final count after asynchronous pruning completes.
+
+## Scenario: Bounded Node Ring Log Query
+
+### 1. Scope / Trigger
+- Trigger: changes to `controlproto.TaskLogQuery`, `logging.Ring.Query`, Node task execution, or remote log result projection.
+
+### 2. Signatures
+- `controlproto.ParseLogQuery(TaskParams) (LogQuerySpec, error)`.
+- `(*logging.Ring).Query(logging.QueryOptions) []logging.Entry`.
+- `TaskParams{Since, Until, Level, Limit, Keyword}` and `TaskResult{LogEntries, LogLines, LogTruncated, LogSource}`.
+- `TaskLogEntry{Time, Level, Msg, Attrs map[string]string}`.
+
+### 3. Contracts
+- The protocol owner validates and normalizes both Panel and Node inputs: default 200, maximum 500, keyword maximum 256 bytes, RFC3339Nano-compatible boundaries, and `since <= until`.
+- Ring filtering is inclusive at both time boundaries, case-insensitive for level/keyword, applied before limiting, and returns newest entries first.
+- Remote queries read only the current Node in-memory ring. They never open the Node active file or rotated history.
+- New Nodes return structured entries plus bounded legacy `log_lines`; new Panels prefer structured entries and retain text fallback for old Nodes.
+- The complete serialized `TaskResult` is at most 256 KiB. Count, field, attribute, or byte truncation sets `log_truncated`; `log_source` is forced to `ring`.
+- Attribute values cross the wire only as strings. Sensitive keys are filtered by the shared case-insensitive policy both on the Node projection and Panel ingestion boundary.
+
+### 4. Validation & Error Matrix
+- Negative limit, oversized keyword/level, invalid time, or reversed range -> failed task / HTTP 400 with a safe error that does not echo input.
+- Missing Node ring -> failed task `log ring is not configured`.
+- Count or byte ceiling reached -> success with the newest bounded subset and `log_truncated=true`.
+- Cancelled query context -> failed task `log query cancelled`.
+
+### 5. Good/Base/Bad Cases
+- Good: `level=ERROR&q=media` with inclusive time bounds returns structured sanitized ring entries newest-first.
+- Base: no filters uses 200 entries; an old Node returning only `log_lines` remains renderable.
+- Bad: reading a Node log filename from task params, returning arbitrary attr values, sending more than 500 entries/256 KiB, or exposing an arbitrary command field.
+
+### 6. Tests Required
+- Protocol round-trip/legacy decode, normalized parameter/error cases, inclusive ring time filtering, count and serialized-byte caps, UTF-8 field truncation, repeated sensitive-key filtering, context cancellation, and real Panel↔Node mTLS query.
+
+### 7. Wrong vs Correct
+- Wrong: `ring.Snapshot(params.Limit, "", params.Keyword)` followed by unbounded string formatting; it ignores time/level and has no byte ceiling.
+- Correct: parse once with `controlproto.ParseLogQuery`, call `Ring.Query`, project typed sanitized entries, and marshal-check the complete result before including each next-oldest entry.

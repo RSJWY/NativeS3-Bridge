@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Logging ring, file/history viewer, sensitive-field filtering, and rotation contracts."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Authenticated admin API, service-mode boundaries, and JSON error/session contracts."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Shared Vue SPA routes, Panel/standalone mode routing, logs UI, and typed API rules."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace slog→ring/file→control task→Panel API→Vue data flow and boundary contracts."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Avoid duplicating setup/viewer/filter logic across Panel, Node, and standalone."}
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"Panel/Node-only release targets, E2E gate, redacted evidence, and standalone compatibility boundary."}
+{"file":".trellis/tasks/07-25-panel-node-logging/research/current-audit.md","reason":"Repository-backed audit and scope decisions for this implementation."}

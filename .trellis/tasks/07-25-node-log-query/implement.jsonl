@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Use the ring and sensitive-field contracts for Node query results."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Use authenticated typed task API and safe JSON error behavior."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Follow Panel node component, typed API, loading/error, and mode-routing conventions."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Define and verify the controlproto→task store→frontend payload boundary."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse task orchestration, ring filters, and existing Panel UI patterns."}
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"Keep mTLS E2E and redacted release evidence aligned."}
+{"file":".trellis/tasks/07-25-panel-node-logging/research/current-audit.md","reason":"Repository evidence and ring-only remote scope decision."}
