@@ -439,18 +439,45 @@ func (s *TransportServer) handleTaskResult(conn *AgentConn, env controlproto.Env
 	if err := env.DecodePayload(&result); err != nil {
 		return err
 	}
-	conn.releaseTask(result.TaskID)
-	resultJSON, _ := json.Marshal(result.Result)
-	updates := map[string]any{
-		"state":       string(result.State),
-		"result_json": string(resultJSON),
-		"error":       result.Error,
-		"updated_at":  nowUTC(),
-	}
-	if err := s.deps.DB.Model(&Task{}).Where("task_id = ?", result.TaskID).Updates(updates).Error; err != nil {
+	var task Task
+	if err := s.deps.DB.Where("task_id = ? AND node_id = ?", result.TaskID, conn.NodeID).First(&task).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
 		return err
 	}
-	s.audit("task_result", conn.NodeID, result.TaskID, string(result.State))
+	taskType := controlproto.TaskType(task.Type)
+	if result.Type != "" && result.Type != taskType {
+		return nil
+	}
+	// Only a result that resolves to this connection's persisted task and agrees
+	// with its type acknowledges the in-flight dispatch. A mismatched frame must
+	// not free backpressure capacity while the real task is still running.
+	conn.releaseTask(result.TaskID)
+	state := result.State
+	if state != controlproto.TaskStateSuccess && state != controlproto.TaskStateFailed {
+		state = controlproto.TaskStateFailed
+		result.Error = "node returned a non-terminal task state"
+	}
+	cleanResult := sanitizeTaskResult(taskType, result.Result)
+	resultJSON, _ := json.Marshal(cleanResult)
+	updates := map[string]any{
+		"state":       string(state),
+		"result_json": string(resultJSON),
+		"error":       sanitizeTaskError(taskType, result.Error),
+		"updated_at":  nowUTC(),
+	}
+	updated := s.deps.DB.Model(&Task{}).
+		Where("id = ? AND state IN ?", task.ID, []string{
+			string(controlproto.TaskStatePending), string(controlproto.TaskStateRunning),
+		}).Updates(updates)
+	if updated.Error != nil {
+		return updated.Error
+	}
+	if updated.RowsAffected == 0 {
+		return nil
+	}
+	s.audit("task_result", conn.NodeID, result.TaskID, string(state))
 	return nil
 }
 

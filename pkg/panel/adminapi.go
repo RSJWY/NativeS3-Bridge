@@ -542,8 +542,13 @@ type publishResponse struct {
 }
 
 func (a *AdminAPI) desiredStateRoute(w http.ResponseWriter, r *http.Request, id uint, rest []string) {
+	// /api/admin/nodes/{id}/desired-state         GET  -> published snapshot view (脱敏,只读)
 	// /api/admin/nodes/{id}/desired-state         POST -> publish new version
 	// /api/admin/nodes/{id}/desired-state/push     POST -> push to online node
+	if len(rest) == 0 && r.Method == http.MethodGet {
+		a.getDesiredState(w, r, id)
+		return
+	}
 	if len(rest) == 0 && r.Method == http.MethodPost {
 		a.publishDesiredState(w, r, id)
 		return
@@ -553,6 +558,21 @@ func (a *AdminAPI) desiredStateRoute(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	writeTransportError(w, http.StatusNotFound, "not found")
+}
+
+// getDesiredState 返回已发布快照的脱敏视图。只读,不写审计日志(与既有
+// GET 端点 listNodes/getNode 一致,避免审计表被读操作淹没)。
+// 明文 secret 全程不进内存(PublishedView 跳过 decryptSnapshot)。
+func (a *AdminAPI) getDesiredState(w http.ResponseWriter, _ *http.Request, id uint) {
+	if _, ok := a.loadNode(w, id); !ok {
+		return
+	}
+	view, err := a.desired.PublishedView(id)
+	if err != nil {
+		writeTransportError(w, http.StatusInternalServerError, "query desired state failed")
+		return
+	}
+	writeTransportJSON(w, http.StatusOK, view)
 }
 
 func (a *AdminAPI) publishDesiredState(w http.ResponseWriter, r *http.Request, id uint) {
@@ -620,15 +640,33 @@ type dispatchTaskRequest struct {
 	Params controlproto.TaskParams `json:"params"`
 }
 
+type dispatchTaskResponse struct {
+	TaskID string `json:"task_id"`
+}
+
+type taskResponse struct {
+	TaskID    string                  `json:"task_id"`
+	NodeID    uint                    `json:"node_id"`
+	Type      controlproto.TaskType   `json:"type"`
+	State     controlproto.TaskState  `json:"state"`
+	Result    controlproto.TaskResult `json:"result"`
+	Error     string                  `json:"error,omitempty"`
+	CreatedAt time.Time               `json:"created_at"`
+	UpdatedAt time.Time               `json:"updated_at"`
+}
+
 func (a *AdminAPI) tasksRoute(w http.ResponseWriter, r *http.Request, id uint, rest []string) {
 	// /api/admin/nodes/{id}/tasks            POST -> dispatch
 	// /api/admin/nodes/{id}/tasks/{taskID}   GET  -> result
+	if _, ok := a.loadNode(w, id); !ok {
+		return
+	}
 	if len(rest) == 0 && r.Method == http.MethodPost {
 		a.dispatchTask(w, r, id)
 		return
 	}
 	if len(rest) == 1 && r.Method == http.MethodGet {
-		a.getTask(w, rest[0])
+		a.getTask(w, id, rest[0])
 		return
 	}
 	writeTransportError(w, http.StatusNotFound, "not found")
@@ -645,6 +683,8 @@ func (a *AdminAPI) dispatchTask(w http.ResponseWriter, r *http.Request, id uint)
 		switch {
 		case errors.Is(err, ErrUnsupportedTaskType):
 			writeTransportError(w, http.StatusBadRequest, "unsupported task type")
+		case errors.Is(err, ErrInvalidTaskParams):
+			writeTransportError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, ErrNodeOffline):
 			writeTransportError(w, http.StatusConflict, "node is offline")
 		case errors.Is(err, ErrTooManyInFlight):
@@ -654,16 +694,27 @@ func (a *AdminAPI) dispatchTask(w http.ResponseWriter, r *http.Request, id uint)
 		}
 		return
 	}
-	writeTransportJSON(w, http.StatusAccepted, map[string]any{"task_id": taskID})
+	writeTransportJSON(w, http.StatusAccepted, dispatchTaskResponse{TaskID: taskID})
 }
 
-func (a *AdminAPI) getTask(w http.ResponseWriter, taskID string) {
-	task, err := a.tasks.GetTask(taskID)
+func (a *AdminAPI) getTask(w http.ResponseWriter, nodeID uint, taskID string) {
+	task, err := a.tasks.GetTaskForNode(nodeID, taskID)
 	if err != nil {
 		writeTransportError(w, http.StatusNotFound, "task not found")
 		return
 	}
-	writeTransportJSON(w, http.StatusOK, task)
+	var result controlproto.TaskResult
+	if task.ResultJSON != "" {
+		if err := json.Unmarshal([]byte(task.ResultJSON), &result); err != nil {
+			writeTransportError(w, http.StatusInternalServerError, "decode task result failed")
+			return
+		}
+	}
+	writeTransportJSON(w, http.StatusOK, taskResponse{
+		TaskID: task.TaskID, NodeID: task.NodeID, Type: controlproto.TaskType(task.Type),
+		State: controlproto.TaskState(task.State), Result: result, Error: task.Error,
+		CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
+	})
 }
 
 // --- in-place migration (import) ---

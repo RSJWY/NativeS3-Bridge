@@ -32,6 +32,8 @@
 - Ordinary HTTP PUT Object may include `Content-MD5`, encoded as base64 of the raw 16-byte MD5 digest. Handlers must validate the header format before storage writes and pass the decoded lowercase hex digest through the optional `PutObjectWithOptions` path.
 - When `PutOptions.ExpectedMD5` is non-empty, `FileBackend` must compare it with the computed MD5 after `io.Copy`/`f.Sync`/`Close` and before `os.Rename`. A mismatch must remove the temp file and return `ErrBadDigest`; it must not publish the object or write a sidecar.
 - The final on-disk file must be the original object bytes; no chunking, container format, encoding, or sidecar dependency is allowed for reading the native file.
+- aws-chunked 请求体在到达 `FileBackend` 之前已被 `server.AwsChunked` 中间件解码为原始对象字节。写入路径(普通 `PutObject` 与 multipart `UploadPart`)收到的永远是解码后的字节,不需要也不应当懂 aws-chunked 传输编码。
+- aws-chunked 解码错误(`ErrMalformedChunk` / `ErrSizeMismatch` / `ErrChecksumMismatch`)由 `io.Copy` 从 `awschunked.Reader.Read` 原样冒泡到 `FileBackend`。`FileBackend` 既有的 temp 清理逻辑(`os.Remove(tmp)` on copy/sync/close error)必须保证这些错误路径不留 `.tmp-*` 残留,与 `Content-MD5` 不匹配的清理契约一致。
 - Single-part ETag is the lowercase hex MD5 of the object bytes, returned quoted at HTTP handler boundaries.
 - `GetObject` must return an `io.ReadCloser` and handlers must stream with `io.Copy`; do not load whole objects into memory for downloads.
 - `Range{Start, End}` uses inclusive byte offsets; open-ended ranges have `End < 0` and normalize to the object tail.

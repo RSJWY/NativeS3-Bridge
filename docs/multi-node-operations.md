@@ -152,3 +152,26 @@ bypass mTLS or export plaintext secrets.
 4. Verify a DB-only restore (without the master key) cannot decrypt secrets —
    this proves the two backups are correctly separated.
 5. Verify audit history is present.
+
+---
+
+## 9. Process logs and local rotation
+
+- Panel, Node, and the legacy rollback binary share one logging setup contract:
+  stdout and the newest 2000 in-memory records are always enabled; an optional
+  lumberjack file adds size/backup/age rotation and gzip compression.
+- Prefer `log.dir` for new Panel/Node deployments. It resolves to
+  `<dir>/natives3bridge.log`. Legacy `log.file` remains accepted as a complete
+  path, but the two settings are mutually exclusive.
+- The authenticated Panel `/logs` page reads only the Panel process's ring,
+  active file, and exact lumberjack backup names. It supports level, keyword,
+  limit, plain-history, and gzip-history filtering without accepting arbitrary
+  filesystem paths.
+- Node rotation files remain on each Node host. Raw Node history is not a
+  control-plane file-transfer feature, and the UI does not offer download or
+  delete actions.
+- The Node detail page may dispatch the predefined `log_query` task over mTLS.
+  It reads only the current in-memory ring, applies level/keyword/inclusive
+  RFC3339 time filters before a 500-entry limit, and keeps the serialized result
+  below 256 KiB. Timeout, disconnect, failure, empty, and truncation states are
+  explicit; no shell, live stream, or raw rotated file is exposed.

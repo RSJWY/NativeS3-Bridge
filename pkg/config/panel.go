@@ -88,12 +88,7 @@ func (c *PanelConfig) applyDefaults() {
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
-	if !c.Log.maxSizeSet && c.Log.MaxSizeMB == 0 {
-		c.Log.MaxSizeMB = 100
-	}
-	if !c.Log.maxBackupsSet && c.Log.MaxBackups == 0 {
-		c.Log.MaxBackups = 5
-	}
+	c.Log.applyDefaults()
 	if c.WebAdmin.SessionTTLMinutes == 0 {
 		c.WebAdmin.SessionTTLMinutes = 720
 	}
@@ -149,11 +144,8 @@ func (c *PanelConfig) Validate() error {
 	if strings.TrimSpace(c.Agent.CertFile) == "" || strings.TrimSpace(c.Agent.KeyFile) == "" {
 		return fmt.Errorf("agent.cert_file and agent.key_file are required (node listener server TLS)")
 	}
-	if c.Log.Dir != "" && c.Log.File != "" {
-		return fmt.Errorf("log.dir and log.file are mutually exclusive")
-	}
-	if c.Log.EffectiveFile() != "" && c.Log.MaxSizeMB < 1 {
-		return fmt.Errorf("log.max_size_mb must be at least 1 when file logging is enabled")
+	if err := c.Log.validate(); err != nil {
+		return err
 	}
 	adminTLS := c.EffectiveAdminTLS()
 	if adminTLS.Enabled && (adminTLS.CertFile == "" || adminTLS.KeyFile == "") {

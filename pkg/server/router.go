@@ -54,7 +54,7 @@ func newRouter(backend storage.Backend, multipartStore *storage.MultipartStore, 
 		bucketHandler:    bucketHandler,
 		multipartHandler: multipartHandler,
 		bucketStore:      bucketStore,
-		chain:            []Middleware{Recover, Logging, rateLimitMiddleware, Auth(authenticator, bucketStore.GetACL), quotaMiddleware},
+		chain:            []Middleware{Recover, Logging, rateLimitMiddleware, Auth(authenticator, bucketStore.GetACL), AwsChunked, quotaMiddleware},
 		managed:          managed,
 	}
 	var h http.Handler = http.HandlerFunc(r.dispatch)

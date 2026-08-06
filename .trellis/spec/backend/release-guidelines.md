@@ -132,10 +132,15 @@ jobs:
   produce TLS verification evidence on the Node or Panel side, and leave its S3
   listener alive.
 - The browser gate logs in, uses SPA history navigation for the
-  `/dashboard -> /nodes` guard, requires a same-origin `/api/admin/nodes`
-  request, rejects standalone API paths/non-Panel origins/HTTP `>=400`, and
-  removes its profile. Do not combine ChromeDriver `--silent` with
+  `/dashboard -> /nodes -> /nodes/1 -> /logs` guard, runs one Node log query,
+  requires same-origin `/api/admin/nodes`, `/api/admin/nodes/1/tasks`, and
+  shared `/api/admin/logs` requests, rejects
+  standalone-only API paths/non-Panel origins/HTTP `>=400`, and removes its
+  profile. Do not combine ChromeDriver `--silent` with
   `--log-level`; current drivers reject that combination.
+- The shell adapter authenticates to Panel `/api/admin/logs`, verifies the
+  bounded process-local file/ring response, then dispatches and polls a real
+  structured Node `log_query` over the mTLS agent channel.
 - Docker mode validates both Compose templates, builds the final `panel` and
   `node` targets, gives the Panel container network alias `panel`, runs with the
   invoking UID/GID so mode-600 bind-mounted configs remain readable, and maps
@@ -171,7 +176,8 @@ jobs:
 ### 5. Good/Base/Bad Cases
 
 - Good: both adapters complete registration, sync, SigV4 CRUD, Panel outage,
-  tokenless Node restart, wrong-CA isolation, and browser API/routing evidence.
+  a bounded structured Node ring query, tokenless Node restart, wrong-CA
+  isolation, and browser API/routing evidence for Panel nodes plus both log UIs.
 - Base: a developer without Docker runs the full local adapter with compatible
   Chrome/ChromeDriver; the release runner additionally runs Docker mode.
 - Bad: treating `/healthz` SPA fallback as Panel readiness, reusing a pre-restart
@@ -186,7 +192,9 @@ jobs:
 - `bash -n scripts/test-panel-node-e2e.sh scripts/test-distribution-contract.sh`.
 - `python3 -m py_compile scripts/internal/e2e-browser.py`.
 - Two consecutive full local runs, including ChromeDriver and the positive
-  same-origin `/api/admin/nodes` assertion.
+  same-origin node list/task and Panel logs assertions. The shell adapter must
+  validate structured `log_entries`, `log_source=ring`, the 10-entry request
+  limit, and absence of generated secret/token/password values.
 - Docker mode on a Docker-capable runner, including `docker compose config`,
   both final targets from the repository context, port boundaries,
   reconnect/restart, and wrong-CA checks.

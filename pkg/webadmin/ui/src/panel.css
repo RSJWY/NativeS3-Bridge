@@ -257,6 +257,33 @@
   margin-top: 12px;
 }
 
+.panel-log-query-form {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.5fr) minmax(200px, 1fr) minmax(190px, 0.8fr) minmax(190px, 0.8fr) minmax(90px, 0.4fr);
+  align-items: end;
+  gap: 12px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.panel-log-results {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.panel-log-legacy {
+  display: grid;
+  gap: 8px;
+  padding-top: 14px;
+}
+
+.panel-log-legacy pre {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .panel-section-table {
   margin: 18px -18px -18px;
   border-top: 1px solid var(--border);
@@ -273,7 +300,8 @@
   .panel-resource-form,
   .panel-resource-form-compact,
   .panel-webhook-form,
-  .panel-rate-limit-form {
+  .panel-rate-limit-form,
+  .panel-log-query-form {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -328,6 +356,7 @@
   .panel-resource-form-compact,
   .panel-webhook-form,
   .panel-rate-limit-form,
+  .panel-log-query-form,
   .panel-effective-state,
   .panel-import-lists,
   .node-facts {

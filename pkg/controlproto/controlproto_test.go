@@ -3,7 +3,9 @@ package controlproto
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestEnvelopeRoundTrip(t *testing.T) {
@@ -48,6 +50,72 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(out, hello) {
 		t.Fatalf("payload = %+v, want %+v", out, hello)
+	}
+}
+
+func TestStructuredLogTaskRoundTripAndLegacyCompatibility(t *testing.T) {
+	payload := TaskResultPayload{
+		TaskID: "task-1", Type: TaskLogQuery, State: TaskStateSuccess,
+		Result: TaskResult{
+			LogEntries: []TaskLogEntry{{Time: "2026-07-25T10:00:00Z", Level: "INFO", Msg: "ready", Attrs: map[string]string{"node": "7"}}},
+			LogLines:   []string{"2026-07-25T10:00:00Z INFO ready"}, LogSource: "ring", LogTruncated: true,
+		},
+	}
+	env, err := NewEnvelope(TypeTaskResult, payload.TaskID, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := env.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeEnvelope(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got TaskResultPayload
+	if err := decoded.DecodePayload(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, payload) {
+		t.Fatalf("round trip = %+v, want %+v", got, payload)
+	}
+
+	legacy := []byte(`{"task_id":"old","type":"log_query","state":"success","result":{"log_lines":["old line"]}}`)
+	got = TaskResultPayload{}
+	if err := json.Unmarshal(legacy, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Result.LogEntries) != 0 || len(got.Result.LogLines) != 1 || got.Result.LogLines[0] != "old line" {
+		t.Fatalf("legacy result = %+v", got.Result)
+	}
+}
+
+func TestParseLogQueryNormalizesBounds(t *testing.T) {
+	spec, err := ParseLogQuery(TaskParams{
+		Since: "2026-07-25T10:00:00+08:00", Until: "2026-07-25T03:00:00Z",
+		Level: " error ", Keyword: " media ", Limit: 999,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Limit != MaxLogQueryLimit || spec.Level != "error" || spec.Keyword != "media" {
+		t.Fatalf("spec = %+v", spec)
+	}
+	if spec.Since == nil || !spec.Since.Equal(time.Date(2026, 7, 25, 2, 0, 0, 0, time.UTC)) {
+		t.Fatalf("since = %v", spec.Since)
+	}
+
+	invalid := []TaskParams{
+		{Limit: -1},
+		{Since: "not-time"},
+		{Since: "2026-07-25T11:00:00Z", Until: "2026-07-25T10:00:00Z"},
+		{Keyword: strings.Repeat("x", MaxLogQueryKeywordBytes+1)},
+	}
+	for _, params := range invalid {
+		if _, err := ParseLogQuery(params); err == nil {
+			t.Fatalf("ParseLogQuery(%+v) succeeded", params)
+		}
 	}
 }
 

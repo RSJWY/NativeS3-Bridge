@@ -366,7 +366,7 @@ aws $EP s3api delete-object --bucket mybucket --key docs/readme.txt
 | Tagging | `PUT/GET/DELETE /{bucket}/{key}?tagging` |
 | Metadata | `x-amz-meta-*` 自定义 metadata |
 | Integrity | `Content-MD5` 校验，失败返回 `InvalidDigest` 或 `BadDigest` |
-| Auth | Header SigV4 和 query presigned URL |
+| Auth | Header SigV4 和 query presigned URL;可选 SigV2(`auth.allow_sigv2`,默认关闭) |
 | Anonymous | public-read bucket 的对象级 `GET`/`HEAD` |
 
 不支持或不属于当前目标：
@@ -375,6 +375,17 @@ aws $EP s3api delete-object --bucket mybucket --key docs/readme.txt
 - S3 versioning 的真实版本存储。
 - Object Lock、SSE、Lifecycle、Replication。
 - 匿名列 bucket、匿名写入、匿名删除。
+
+### 签名版本
+
+默认仅接受 Signature Version 4(header 或 query presigned)。旧客户端若只能发 Signature Version 2,可在配置中显式开启:
+
+```yaml
+auth:
+  allow_sigv2: true   # 默认 false
+```
+
+注意:v2 用 HMAC-SHA1、不签请求体、无 region/service scope,安全性明显弱于 v4;v2 + aws-chunked 的 payload 完整性完全依赖 aws-chunked 解码器校验。仅在必须兼容仅支持 v2 的客户端时开启。
 
 ### 预签名 URL
 
@@ -472,6 +483,43 @@ GET /api/admin/auth-settings
 | `GET` | `/api/admin/nodes/{id}/tasks/{taskId}` | 查询任务结果。 |
 | `GET` | `/api/admin/nodes/{id}/certs` | 查看 node 客户端证书。 |
 | `POST` | `/api/admin/nodes/{id}/certs/revoke` | 撤销该节点的全部证书并断开控制面连接。 |
+| `GET` | `/api/admin/logs` | 查看 Panel 自身的内存 ring、当前日志文件和安全枚举的轮转历史。 |
+
+### Panel 日志
+
+登录后可从侧栏进入 `/logs` 查看 Panel 自身日志。页面和
+`GET /api/admin/logs` 共用同一契约，支持级别、关键字、条数和日志文件选择；
+轮转历史包括 lumberjack 生成的普通文件与 gzip 文件。该接口只接受服务端枚举的
+文件 ID，不接受路径，也不提供下载、删除或实时流。
+
+Panel 与 Node 始终同时写 stdout 和最近 2000 条内存 ring。配置 `log.dir` 后还会
+写入 `<dir>/natives3bridge.log` 并按 lumberjack 轮转；旧 `log.file` 完整路径仍兼容，
+但不能和 `log.dir` 同时设置。Docker 部署可使用：
+
+```yaml
+log_level: "info"
+log:
+  dir: "/data/logs"
+  max_size_mb: 100
+  max_backups: 5
+  max_age_days: 14
+  compress: false
+```
+
+Panel `/logs` 只查看 Panel 本机文件。Node 的轮转原始文件留在各 Node 主机，不通过
+控制面传输。
+
+### Node 日志拉取
+
+Node 详情页的“节点日志”通过现有 mTLS 控制面发送预定义 `log_query` 任务，只查询
+该 Node 当前进程的内存 ring。查询支持级别、关键字、RFC3339 时间范围和条数过滤，
+结果最新在前，最多 500 条且序列化结果不超过 256 KiB；页面会显示离线、超时、
+控制面断开、失败、空结果和截断状态。新 Node 返回结构化时间/级别/消息/属性，
+Panel 仍能显示旧 Node 的 `log_lines` 文本结果。
+
+远程查询不会读取或传输 Node 当前/轮转日志文件，不提供实时流、下载、删除或任意
+命令执行。查询关键字不会写入 Panel 的任务参数或审计记录，跨控制面前后都会再次
+过滤 secret、token、Authorization、Cookie 和签名类属性。
 
 创建节点和令牌的 Curl 示例：
 

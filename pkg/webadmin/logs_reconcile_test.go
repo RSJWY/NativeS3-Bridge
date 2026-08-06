@@ -23,14 +23,12 @@ type recordingInvalidator struct{ keys []string }
 func (r *recordingInvalidator) Invalidate(accessKey string) { r.keys = append(r.keys, accessKey) }
 
 func TestLogsAPIRequiresAuthAndFiltersRing(t *testing.T) {
-	gdb := newWebadminTestDB(t)
 	ring := logging.NewRing(10)
 	ring.Append(logging.Entry{Time: time.Now(), Level: "INFO", Message: "startup"})
 	ring.Append(logging.Entry{Time: time.Now(), Level: "ERROR", Message: "bucket failed", Attrs: map[string]any{"bucket": "media"}})
-	api := NewAPI(gdb, nil, nil, APIOptions{LogRing: ring})
 	auth := NewAuth(config.WebAdminConfig{PasswordHash: mustPasswordHash(t), SessionSecret: "test-session-secret", SessionTTLMinutes: 10})
 	mux := http.NewServeMux()
-	mux.Handle("/api/admin/logs", auth.Middleware(http.HandlerFunc(api.Logs)))
+	mux.Handle("/api/admin/logs", auth.Middleware(NewLogsHandler(ring, "")))
 
 	unauthorized := httptest.NewRecorder()
 	mux.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/admin/logs", nil))

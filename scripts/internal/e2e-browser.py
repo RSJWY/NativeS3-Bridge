@@ -34,7 +34,11 @@ FORBIDDEN_API_PREFIXES = (
     "/api/admin/dashboard",
     "/api/admin/credentials",
     "/api/admin/buckets",
-    "/api/admin/logs",
+)
+EXPECTED_API_RESPONSES = (
+    # No pending in-place import is the documented idle state. The typed API
+    # client normalizes this exact GET response to null on Node-detail mount.
+    (404, re.compile(r"^/api/admin/nodes/\d+/import$")),
 )
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 LEGACY_ELEMENT_KEY = "ELEMENT"
@@ -411,6 +415,10 @@ def _origin(url: str) -> tuple[str, str]:
         return "", ""
 
 
+def _is_expected_api_response(status: int, path: str) -> bool:
+    return any(status == expected_status and pattern.fullmatch(path) for expected_status, pattern in EXPECTED_API_RESPONSES)
+
+
 def _assert_network(entries: list[Any], secrets: Iterable[str], panel_url: str | None = None) -> list[str]:
     responses, requests = _extract_network_events(entries)
     failures: list[str] = []
@@ -421,7 +429,7 @@ def _assert_network(entries: list[Any], secrets: Iterable[str], panel_url: str |
             continue
         if expected_origin and _origin(url) != expected_origin:
             failures.append(f"API response used a non-Panel origin {path}")
-        if status >= 400:
+        if status >= 400 and not _is_expected_api_response(status, path):
             failures.append(f"API HTTP {status} {path}")
         if any(path.startswith(prefix) for prefix in FORBIDDEN_API_PREFIXES):
             failures.append(f"forbidden standalone API path {path}")
@@ -553,12 +561,69 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             lambda: expected_name in str(webdriver.execute("return document.body ? document.body.innerText : '';")),
             "created node visible in Panel",
         )
+        webdriver.push_route("/nodes/1")
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: webdriver.current_url().rstrip("/").endswith("/nodes/1"),
+            "Panel node detail route",
+        )
+        keyword_element = _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: webdriver.find("css selector", "#node-log-keyword"),
+            "Node log query form",
+        )
+        webdriver.element_value(keyword_element, "s3 request")
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: webdriver.execute(
+                """
+                const button = Array.from(document.querySelectorAll('button'))
+                  .find((candidate) => candidate.textContent.trim() === '拉取日志');
+                if (!button || button.disabled) return false;
+                button.click();
+                return true;
+                """
+            ),
+            "Node log query action",
+        )
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: "已从远程 ring 返回" in str(
+                webdriver.execute("return document.body ? document.body.innerText : '';")
+            ),
+            "Node log query result",
+        )
+        # Logs are a shared authenticated route.  Visit it explicitly so the
+        # Panel gate proves that the mode-specific navigation and API wiring
+        # agree, while the forbidden list above continues to protect only
+        # standalone-only surfaces.
+        webdriver.push_route("/logs")
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: webdriver.current_url().rstrip("/").endswith("/logs"),
+            "Panel navigation to logs",
+        )
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: webdriver.execute(
+                """
+                const file = document.querySelector('#log-file');
+                const body = document.body ? document.body.innerText : '';
+                return Boolean(file && !body.includes('加载中…'));
+                """
+            ),
+            "Panel logs page",
+        )
         entries = webdriver.logs("performance")
         resource_urls = webdriver.resource_urls()
         if not entries and not resource_urls:
             raise BrowserGateError("ChromeDriver returned no network evidence")
         if not _saw_same_origin_api_path(entries, resource_urls, panel_url, "/api/admin/nodes"):
             raise BrowserGateError("no same-origin /api/admin/nodes request was observed")
+        if not _saw_same_origin_api_path(entries, resource_urls, panel_url, "/api/admin/nodes/1/tasks"):
+            raise BrowserGateError("no same-origin Node task dispatch request was observed")
+        if not _saw_same_origin_api_path(entries, resource_urls, panel_url, "/api/admin/logs"):
+            raise BrowserGateError("no same-origin /api/admin/logs request was observed")
         failures = _assert_network(entries, (args.admin_password, expected_name), panel_url)
         failures.extend(_assert_resource_urls(resource_urls, (args.admin_password, expected_name), panel_url))
         failures = list(dict.fromkeys(failures))
@@ -569,9 +634,13 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             "dashboard_redirect",
             "node_visible",
             "panel_nodes_api",
+            "node_logs_ui",
+            "node_tasks_api",
+            "panel_logs_route",
+            "panel_logs_api",
             "network_contract",
         ]
-        report["route"] = "/nodes"
+        report["route"] = "/logs"
         report["network_events"] = len(entries)
         return report
     except BrowserGateError as exc:

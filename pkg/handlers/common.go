@@ -106,6 +106,8 @@ func errorMessage(code string) string {
 		return "One or more of the specified parts could not be found or had an invalid ETag."
 	case "InvalidPartOrder":
 		return "The list of parts was not in ascending order."
+	case "IncompleteBody":
+		return "The request body terminated unexpectedly, or the provided content length does not match the decoded length."
 	default:
 		return "Internal server error."
 	}

@@ -24,6 +24,16 @@ type Ring struct {
 	full     bool
 }
 
+// QueryOptions bounds and filters a read-only ring snapshot. Time boundaries
+// are inclusive and all filtering happens before the limit is applied.
+type QueryOptions struct {
+	Limit int
+	Level string
+	Query string
+	Since *time.Time
+	Until *time.Time
+}
+
 func NewRing(capacity int) *Ring {
 	if capacity <= 0 {
 		capacity = DefaultRingCapacity
@@ -42,14 +52,21 @@ func (r *Ring) Append(entry Entry) {
 }
 
 func (r *Ring) Snapshot(limit int, level, query string) []Entry {
+	return r.Query(QueryOptions{Limit: limit, Level: level, Query: query})
+}
+
+// Query returns matching entries newest-first. It is safe for concurrent
+// append/query use and returns cloned entries so callers cannot mutate the ring.
+func (r *Ring) Query(options QueryOptions) []Entry {
+	limit := options.Limit
 	if limit <= 0 {
 		limit = 200
 	}
 	if limit > 1000 {
 		limit = 1000
 	}
-	level = strings.ToUpper(strings.TrimSpace(level))
-	query = strings.ToLower(strings.TrimSpace(query))
+	level := strings.ToUpper(strings.TrimSpace(options.Level))
+	query := strings.ToLower(strings.TrimSpace(options.Query))
 
 	r.mu.RLock()
 	count := r.next
@@ -60,6 +77,12 @@ func (r *Ring) Snapshot(limit int, level, query string) []Entry {
 	for offset := 0; offset < count && len(result) < limit; offset++ {
 		index := (r.next - 1 - offset + r.capacity) % r.capacity
 		entry := r.entries[index]
+		if options.Since != nil && entry.Time.Before(*options.Since) {
+			continue
+		}
+		if options.Until != nil && entry.Time.After(*options.Until) {
+			continue
+		}
 		if level != "" && strings.ToUpper(entry.Level) != level {
 			continue
 		}

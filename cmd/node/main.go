@@ -11,13 +11,11 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -31,7 +29,6 @@ import (
 	"github.com/RSJWY/NativeS3-Bridge/pkg/quota"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/server"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
-	"gopkg.in/natefinch/lumberjack.v2"
 	"gorm.io/gorm"
 )
 
@@ -110,7 +107,12 @@ func main() {
 	multipartStore.StartGC(ctx.Done(), cfg.Storage.MultipartGCInterval, cfg.Storage.MultipartTTL)
 
 	credentialStore := auth.NewCredentialStore(gdb, auth.DefaultCredentialCacheTTL)
-	authenticator := auth.NewLocalSigV4Authenticator(credentialStore, cfg.Region)
+	v4Authenticator := auth.NewLocalSigV4Authenticator(credentialStore, cfg.Region)
+	var v2Authenticator auth.Authenticator
+	if cfg.Auth.AllowSigV2 {
+		v2Authenticator = auth.NewLocalSigV2Authenticator(credentialStore)
+	}
+	authenticator := auth.NewMultiSchemeAuthenticator(v4Authenticator, v2Authenticator)
 	hookManager := hooks.NewManager(gdb, hooks.Config{QueueSize: cfg.Hooks.QueueSize, Workers: cfg.Hooks.Workers, MaxRetry: cfg.Hooks.MaxRetry, Timeout: cfg.Hooks.Timeout})
 	hookManager.Start()
 	defer hookManager.Stop()
@@ -229,40 +231,9 @@ func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, inval
 }
 
 func setupSlog(level string, logCfg config.LogConfig) (*loggingpkg.Ring, error) {
-	var slogLevel slog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		slogLevel = slog.LevelDebug
-	case "warn":
-		slogLevel = slog.LevelWarn
-	case "error":
-		slogLevel = slog.LevelError
-	default:
-		slogLevel = slog.LevelInfo
+	runtime, err := loggingpkg.Setup(level, logCfg)
+	if err != nil {
+		return nil, err
 	}
-
-	writers := []io.Writer{os.Stdout}
-	logFile := logCfg.EffectiveFile()
-	if logFile != "" {
-		directory := filepath.Dir(logFile)
-		if err := os.MkdirAll(directory, 0o750); err != nil {
-			return nil, fmt.Errorf("create log directory %q: %w", directory, err)
-		}
-		fileWriter := &lumberjack.Logger{
-			Filename:   logFile,
-			MaxSize:    logCfg.MaxSizeMB,
-			MaxBackups: logCfg.MaxBackups,
-			MaxAge:     logCfg.MaxAgeDays,
-			Compress:   logCfg.Compress,
-			LocalTime:  true,
-		}
-		if _, err := fileWriter.Write(nil); err != nil {
-			return nil, fmt.Errorf("open log file %q: %w", logFile, err)
-		}
-		writers = append(writers, fileWriter)
-	}
-	ring := loggingpkg.NewRing(loggingpkg.DefaultRingCapacity)
-	base := slog.NewTextHandler(io.MultiWriter(writers...), &slog.HandlerOptions{Level: slogLevel})
-	slog.SetDefault(slog.New(loggingpkg.NewRingHandler(base, ring)))
-	return ring, nil
+	return runtime.Ring, nil
 }

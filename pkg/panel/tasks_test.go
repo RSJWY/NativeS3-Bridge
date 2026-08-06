@@ -43,7 +43,8 @@ func TestTaskDispatchAndResult(t *testing.T) {
 
 	// Dispatch a log query task.
 	ctx := context.Background()
-	taskID, err := orch.Dispatch(ctx, node.ID, controlproto.TaskLogQuery, controlproto.TaskParams{Limit: 10}, "admin")
+	keyword := "private-search-sentinel"
+	taskID, err := orch.Dispatch(ctx, node.ID, controlproto.TaskLogQuery, controlproto.TaskParams{Limit: 10, Keyword: keyword}, "admin")
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -60,13 +61,23 @@ func TestTaskDispatchAndResult(t *testing.T) {
 	if taskPayload.TaskID != taskID {
 		t.Fatalf("task_id = %s, want %s", taskPayload.TaskID, taskID)
 	}
+	var persisted Task
+	if err := gdb.Where("task_id = ?", taskID).First(&persisted).Error; err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(persisted.Params, keyword) || !strings.Contains(persisted.Params, `"keyword_provided":true`) {
+		t.Fatalf("persisted params were not redacted: %s", persisted.Params)
+	}
 
 	// Node reports success result.
 	sendEnv(t, ctx, ws, controlproto.TypeTaskResult, taskID, controlproto.TaskResultPayload{
 		TaskID: taskID,
 		Type:   controlproto.TaskLogQuery,
 		State:  controlproto.TaskStateSuccess,
-		Result: controlproto.TaskResult{LogLines: []string{"line1", "line2"}},
+		Result: controlproto.TaskResult{
+			LogEntries: []controlproto.TaskLogEntry{{Time: "2026-07-25T10:00:00Z", Level: "INFO", Msg: "line1"}},
+			LogLines:   []string{"line1", "line2"}, LogSource: "ring",
+		},
 	})
 
 	// Panel persists the result.
@@ -74,6 +85,93 @@ func TestTaskDispatchAndResult(t *testing.T) {
 		task, err := orch.GetTask(taskID)
 		return err == nil && task.State == string(controlproto.TaskStateSuccess)
 	})
+}
+
+func TestTaskTimeoutReleasesSlotAndIgnoresLateResult(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	hub := NewHub()
+	orch := NewTaskOrchestrator(gdb, hub, 40*time.Millisecond)
+	ts := NewTransportServer(TransportDeps{DB: gdb, CA: ca, Hub: hub})
+	node, ws := dialTestNode(t, gdb, ca, hub, ts)
+
+	taskID, err := orch.Dispatch(context.Background(), node.ID, controlproto.TaskLogQuery, controlproto.TaskParams{}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readEnv(t, context.Background(), ws)
+	waitFor(t, func() bool {
+		task, err := orch.GetTask(taskID)
+		return err == nil && task.State == string(controlproto.TaskStateFailed) && strings.Contains(task.Error, "timed out")
+	})
+	conn, ok := hub.Get(node.ID)
+	if !ok {
+		t.Fatal("node disconnected during timeout test")
+	}
+	if conn.inFlightCount() != 0 {
+		t.Fatalf("in-flight count after timeout = %d", conn.inFlightCount())
+	}
+
+	sendEnv(t, context.Background(), ws, controlproto.TypeTaskResult, taskID, controlproto.TaskResultPayload{
+		TaskID: taskID, Type: controlproto.TaskLogQuery, State: controlproto.TaskStateSuccess,
+		Result: controlproto.TaskResult{LogLines: []string{"late"}},
+	})
+	time.Sleep(50 * time.Millisecond)
+	task, err := orch.GetTask(taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State != string(controlproto.TaskStateFailed) || !strings.Contains(task.Error, "timed out") || strings.Contains(task.ResultJSON, "late") {
+		t.Fatalf("late result overwrote timeout: %+v", task)
+	}
+}
+
+func TestTaskResultTypeMismatchDoesNotReleaseSlot(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	hub := NewHub()
+	orch := NewTaskOrchestrator(gdb, hub, 10*time.Second)
+	ts := NewTransportServer(TransportDeps{DB: gdb, CA: ca, Hub: hub})
+	node, ws := dialTestNode(t, gdb, ca, hub, ts)
+
+	taskID, err := orch.Dispatch(context.Background(), node.ID, controlproto.TaskLogQuery, controlproto.TaskParams{}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readEnv(t, context.Background(), ws)
+	conn, ok := hub.Get(node.ID)
+	if !ok {
+		t.Fatal("node disconnected during task result validation test")
+	}
+	if conn.inFlightCount() != 1 {
+		t.Fatalf("in-flight count before result = %d", conn.inFlightCount())
+	}
+
+	sendEnv(t, context.Background(), ws, controlproto.TypeTaskResult, taskID, controlproto.TaskResultPayload{
+		TaskID: taskID, Type: controlproto.TaskStorageScan, State: controlproto.TaskStateSuccess,
+	})
+	time.Sleep(50 * time.Millisecond)
+	task, err := orch.GetTask(taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State != string(controlproto.TaskStateRunning) {
+		t.Fatalf("mismatched result changed task state to %s", task.State)
+	}
+	if conn.inFlightCount() != 1 {
+		t.Fatalf("mismatched result released in-flight slot, count=%d", conn.inFlightCount())
+	}
+
+	sendEnv(t, context.Background(), ws, controlproto.TypeTaskResult, taskID, controlproto.TaskResultPayload{
+		TaskID: taskID, Type: controlproto.TaskLogQuery, State: controlproto.TaskStateSuccess,
+	})
+	waitFor(t, func() bool {
+		task, err := orch.GetTask(taskID)
+		return err == nil && task.State == string(controlproto.TaskStateSuccess)
+	})
+	if conn.inFlightCount() != 0 {
+		t.Fatalf("valid result did not release in-flight slot, count=%d", conn.inFlightCount())
+	}
 }
 
 func TestTaskBackpressureRejectsTooManyInFlight(t *testing.T) {

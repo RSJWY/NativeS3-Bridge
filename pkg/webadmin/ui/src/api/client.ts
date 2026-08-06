@@ -164,6 +164,48 @@ export interface PanelRateLimit {
   effective: PanelRateLimitValues
 }
 
+// ---- 已发布配置快照(脱敏视图)----
+// 与草稿类型刻意分离:快照不含 id/node_id/created_at,且凭证条目不含 secret。
+// 不要复用 PanelBucket/PanelWebhook——它们多出的字段会让 vue-tsc 报错。
+export interface PanelPublishedCredential {
+  access_key: string
+  name?: string
+  bucket?: string
+  status: string
+  quota_bytes: number
+}
+
+export interface PanelPublishedBucket {
+  name: string
+  acl: string
+}
+
+export interface PanelPublishedWebhook {
+  url: string
+  events: string[]
+  enabled: boolean
+}
+
+export interface PanelPublishedRateLimit {
+  anonymous_rps: number
+  anonymous_burst: number
+  trust_forwarded: boolean
+}
+
+export interface PanelPublishedSnapshot {
+  published: boolean
+  version: number
+  content_hash: string
+  schema_version: number
+  republish_needed: boolean
+  updated_by?: string
+  updated_at?: string
+  credentials: PanelPublishedCredential[]
+  buckets: PanelPublishedBucket[]
+  webhooks: PanelPublishedWebhook[]
+  rate_limit?: PanelPublishedRateLimit
+}
+
 export interface PanelImportSummary {
   node_id: number
   credential_count: number
@@ -192,6 +234,41 @@ export interface PanelCertificate {
   Revoked: boolean
   RevokedAt?: string
   CreatedAt: string
+}
+
+export type PanelTaskState = 'pending' | 'running' | 'success' | 'failed' | 'unknown'
+
+export interface PanelTaskLogEntry {
+  time?: string
+  level?: string
+  msg: string
+  attrs?: Record<string, string>
+}
+
+export interface PanelTaskResult {
+  log_entries?: PanelTaskLogEntry[]
+  log_lines?: string[]
+  log_truncated?: boolean
+  log_source?: 'ring'
+}
+
+export interface PanelTask {
+  task_id: string
+  node_id: number
+  type: 'log_query' | 'storage_scan' | 'storage_reconcile_apply'
+  state: PanelTaskState
+  result: PanelTaskResult
+  error?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface PanelLogQueryInput {
+  since?: string
+  until?: string
+  level?: string
+  keyword?: string
+  limit: number
 }
 
 export interface LoginInput {
@@ -423,6 +500,9 @@ export const adminApi = {
   resetNodeRateLimit(id: number) {
     return apiFetch<PanelRateLimit>(`/api/admin/nodes/${id}/rate-limit`, { method: 'DELETE' })
   },
+  getNodeDesiredState(id: number) {
+    return apiFetch<PanelPublishedSnapshot>(`/api/admin/nodes/${id}/desired-state`)
+  },
   async getNodeImport(id: number): Promise<PanelImportSummary | null> {
     try {
       return await apiFetch<PanelImportSummary>(`/api/admin/nodes/${id}/import`)
@@ -451,5 +531,14 @@ export const adminApi = {
   },
   revokeNodeCertificates(id: number) {
     return apiFetch<{ revoked: number }>(`/api/admin/nodes/${id}/certs/revoke`, { method: 'POST' })
+  },
+  dispatchNodeLogQuery(id: number, params: PanelLogQueryInput) {
+    return apiFetch<{ task_id: string }>(`/api/admin/nodes/${id}/tasks`, {
+      method: 'POST',
+      body: JSON.stringify({ type: 'log_query', params })
+    })
+  },
+  getNodeTask(id: number, taskID: string) {
+    return apiFetch<PanelTask>(`/api/admin/nodes/${id}/tasks/${encodeURIComponent(taskID)}`)
   }
 }

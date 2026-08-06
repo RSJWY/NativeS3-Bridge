@@ -810,3 +810,37 @@ Implemented and verified the Panel/Node E2E release gate: local and Docker adapt
 ### Next Steps
 
 - None - task complete
+
+
+## Session 25: Panel 与 Node 日志查询及完整 E2E
+
+**Date**: 2026-07-26
+**Task**: Panel 与 Node 日志查询及完整 E2E
+**Branch**: `main`
+
+### Summary
+
+完成 Panel 自身日志查看与 Node 受限 ring 日志查询的父子任务集成；补齐结构化协议、过滤/限额/脱敏、类型化任务 API、Node 详情 UI、超时与背压竞态保护，并通过全量 Go race、前端构建、分发契约以及带 ChromeDriver 的 local/Docker Panel-Node E2E。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e844b2e` | (see git log) |
+| `80331f6` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

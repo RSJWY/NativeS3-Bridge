@@ -119,17 +119,20 @@ logAuthDenied(w, r, "verify_failed", auth.ErrorCode(err))
 ## Scenario: Rotating File And Admin Ring Logging
 
 ### 1. Scope / Trigger
-- Trigger: changes to `config.LogConfig`, `setupSlog`, `pkg/logging`, or the admin log viewer.
+- Trigger: changes to `config.LogConfig`, `logging.Setup`, command `setupSlog` delegates, `pkg/logging`, or the admin log viewer.
 
 ### 2. Signatures
-- `setupSlog(level string, cfg config.LogConfig) (*logging.Ring, error)`.
+- `logging.Setup(level string, cfg config.LogConfig) (*logging.Runtime, error)`; runtime exposes the always-present `Ring` and effective active `File` path.
+- Command-local `setupSlog(level string, cfg config.LogConfig) (*logging.Ring, error)` may remain only as a thin compatibility delegate.
 - `config.LogConfig.EffectiveFile() string`; `log.dir` resolves to `<dir>/natives3bridge.log`, while legacy `log.file` remains a full path.
 - `GET /api/admin/logs?limit=200&level=&q=&file=<enumerated-id>` under admin session middleware.
 
 ### 3. Contracts
 - Stdout is always enabled; either non-empty `log.dir` or legacy `log.file` adds lumberjack rotation; the in-memory ring always stores the newest 2000 enabled records.
-- `log.dir` and `log.file` are mutually exclusive. New deployments use `log.dir`; only `EffectiveFile` may derive the active path passed to `setupSlog` and webadmin.
+- Panel, Node, and legacy standalone must call the same `logging.Setup` implementation; command helpers must not reimplement level parsing, file creation, or lumberjack options.
+- `log.dir` and `log.file` are mutually exclusive. New deployments use `log.dir`; only `EffectiveFile` may derive the active path passed to logging setup and webadmin.
 - `log.max_size_mb` defaults to 100, `max_backups` to 5, `max_age_days` to 0, and `compress` to false. Explicit `max_backups: 0` is preserved.
+- Setup creates/validates the active file with append semantics before serving, but must not rotate or truncate an already-oversized file merely because the process started. The first real record may trigger normal lumberjack rotation.
 - The API lists only the active basename and exact lumberjack timestamp backups (including `.gz`), rejects symlinks/non-regular files, and sorts current first then history newest-first.
 - `file` is an enumerated basename, never a path. Explicit selection is revalidated against a fresh allowlist; malformed IDs return 400, missing/cleaned files return 404, and read/decompression failures return 500 without ring fallback.
 - With no `file`, the API reads the active file and preserves the legacy ring fallback with `warning`. Responses add `files` and optional `selected_file` while preserving `source`, `file_enabled`, `limit`, `entries`, and `warning`.
@@ -138,7 +141,7 @@ logAuthDenied(w, r, "verify_failed", auth.ErrorCode(err))
 
 ### 4. Validation & Error Matrix
 - Both `log.dir` and `log.file` set -> config load error; enabled file logging with `max_size_mb < 1`, negative backups, or negative age -> config load error.
-- Log directory/file cannot be created -> startup error.
+- Log directory/file cannot be created -> startup error; an existing oversized active file remains unchanged until a real log write.
 - Missing admin session -> 401; non-GET -> 405; limit is clamped to 1..1000 with 200 default.
 - Absolute/traversal/separator file ID -> 400; unmatched or removed ID -> 404; corrupt gzip -> 500.
 
@@ -146,10 +149,11 @@ logAuthDenied(w, r, "verify_failed", auth.ErrorCode(err))
 - Good: `/state/logs/natives3bridge.log` writes stdout + rotating file + ring.
 - Good: selecting `natives3bridge-2026-07-12T10-00-00.000.log.gz` reads filtered history without exposing the directory.
 - Base: both path fields empty keeps stdout + ring; legacy `log.file` keeps its basename-specific history.
+- Bad: using an empty lumberjack write as the startup file check, because it can rotate an already-oversized file before the service writes a real record.
 - Bad: joining an untrusted `file` query directly to the log directory, following a matching symlink, silently falling back after an explicit historical selection, or returning secret attrs.
 
 ### 6. Tests Required
-- Assert directory and legacy effective paths, mutual exclusion, explicit zero backups, invalid rotation values, active file writes, ring wrap/filter/concurrency, API 401, default file tail, and ring fallback.
+- Assert shared Panel/Node/standalone setup delegates, stdout + file + ring output, directory permissions, directory and legacy effective paths, mutual exclusion, explicit zero backups, invalid rotation values, active file writes, no startup rotation for an oversized active file, ring wrap/filter/concurrency, API 401, default file tail, and ring fallback.
 - Assert exact lumberjack discovery/order, plain and gzip history filters, traversal/absolute/separator/unmatched/symlink rejection, removed history 404, and corrupt gzip 500 without fallback.
 - `lumberjack.Logger` prunes files beyond `MaxBackups` in its background mill
   goroutine. Rotation-limit tests must poll with a bounded deadline until the
@@ -157,9 +161,47 @@ logAuthDenied(w, r, "verify_failed", auth.ErrorCode(err))
 
 ### 7. Wrong vs Correct
 - Wrong: `slog.NewTextHandler(file, ...)`, which removes stdout and ring.
+- Wrong: `fileWriter.Write(nil)` as a startup probe; lumberjack may rotate an existing oversized file.
 - Wrong: `os.Open(filepath.Join(logDir, r.URL.Query().Get("file")))`, which turns the admin endpoint into an arbitrary file reader.
 - Wrong: asserting `len(backups) == MaxBackups` immediately after a write that
   triggers rotation, before lumberjack's asynchronous mill has pruned old files.
-- Correct: wrap a stdout/effective-file `io.MultiWriter` handler with `logging.NewRingHandler`; enumerate exact regular backup basenames and open only the matched server-side record.
+- Correct: create/check the active path with `O_CREATE|O_APPEND`, then wrap a stdout/effective-file `io.MultiWriter` handler with `logging.NewRingHandler`; enumerate exact regular backup basenames and open only the matched server-side record.
 - Correct: poll the backup glob with a short bounded deadline and assert the
   final count after asynchronous pruning completes.
+
+## Scenario: Bounded Node Ring Log Query
+
+### 1. Scope / Trigger
+- Trigger: changes to `controlproto.TaskLogQuery`, `logging.Ring.Query`, Node task execution, or remote log result projection.
+
+### 2. Signatures
+- `controlproto.ParseLogQuery(TaskParams) (LogQuerySpec, error)`.
+- `(*logging.Ring).Query(logging.QueryOptions) []logging.Entry`.
+- `TaskParams{Since, Until, Level, Limit, Keyword}` and `TaskResult{LogEntries, LogLines, LogTruncated, LogSource}`.
+- `TaskLogEntry{Time, Level, Msg, Attrs map[string]string}`.
+
+### 3. Contracts
+- The protocol owner validates and normalizes both Panel and Node inputs: default 200, maximum 500, keyword maximum 256 bytes, RFC3339Nano-compatible boundaries, and `since <= until`.
+- Ring filtering is inclusive at both time boundaries, case-insensitive for level/keyword, applied before limiting, and returns newest entries first.
+- Remote queries read only the current Node in-memory ring. They never open the Node active file or rotated history.
+- New Nodes return structured entries plus bounded legacy `log_lines`; new Panels prefer structured entries and retain text fallback for old Nodes.
+- The complete serialized `TaskResult` is at most 256 KiB. Count, field, attribute, or byte truncation sets `log_truncated`; `log_source` is forced to `ring`.
+- Attribute values cross the wire only as strings. Sensitive keys are filtered by the shared case-insensitive policy both on the Node projection and Panel ingestion boundary.
+
+### 4. Validation & Error Matrix
+- Negative limit, oversized keyword/level, invalid time, or reversed range -> failed task / HTTP 400 with a safe error that does not echo input.
+- Missing Node ring -> failed task `log ring is not configured`.
+- Count or byte ceiling reached -> success with the newest bounded subset and `log_truncated=true`.
+- Cancelled query context -> failed task `log query cancelled`.
+
+### 5. Good/Base/Bad Cases
+- Good: `level=ERROR&q=media` with inclusive time bounds returns structured sanitized ring entries newest-first.
+- Base: no filters uses 200 entries; an old Node returning only `log_lines` remains renderable.
+- Bad: reading a Node log filename from task params, returning arbitrary attr values, sending more than 500 entries/256 KiB, or exposing an arbitrary command field.
+
+### 6. Tests Required
+- Protocol round-trip/legacy decode, normalized parameter/error cases, inclusive ring time filtering, count and serialized-byte caps, UTF-8 field truncation, repeated sensitive-key filtering, context cancellation, and real Panel↔Node mTLS query.
+
+### 7. Wrong vs Correct
+- Wrong: `ring.Snapshot(params.Limit, "", params.Keyword)` followed by unbounded string formatting; it ignores time/level and has no byte ceiling.
+- Correct: parse once with `controlproto.ParseLogQuery`, call `Ring.Query`, project typed sanitized entries, and marshal-check the complete result before including each next-oldest entry.

@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/logging"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/webadmin"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/webadmin/ui"
 )
@@ -37,6 +38,8 @@ type AdminServerDeps struct {
 	Transport *TransportServer
 	Migration *MigrationCoordinator
 	Audit     *Auditor
+	LogRing   *logging.Ring
+	LogFile   string
 }
 
 // NewAdminServer builds the admin HTTP server. It wires the reused webadmin auth
@@ -54,6 +57,7 @@ func NewAdminServer(deps AdminServerDeps) (*AdminServer, error) {
 	mux.HandleFunc("/api/admin/auth-settings", authenticator.AuthSettings)
 	mux.HandleFunc("/api/admin/login", authenticator.Login)
 	mux.Handle("/api/admin/logout", authenticator.Middleware(http.HandlerFunc(authenticator.Logout)))
+	mux.Handle("/api/admin/logs", authenticator.Middleware(webadmin.NewLogsHandler(deps.LogRing, deps.LogFile)))
 
 	// Panel REST API behind auth middleware.
 	adminAPI.Routes(mux, authenticator.Middleware)

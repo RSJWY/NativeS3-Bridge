@@ -30,4 +30,5 @@ const (
 	CodeInvalidAccessKeyID    = "InvalidAccessKeyId"
 	CodeSignatureDoesNotMatch = "SignatureDoesNotMatch"
 	CodeRequestTimeTooSkewed  = "RequestTimeTooSkewed"
+	CodeInvalidRequest        = "InvalidRequest"
 )

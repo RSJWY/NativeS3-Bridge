@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Check rotation, history selection, ring fallback, and sensitive attr behavior."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Check session protection and Panel/standalone route contracts."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Check typed logs response, route mode, and selected-file error states."}
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"Check no standalone release target regression and required gates."}
+{"file":".trellis/tasks/07-25-panel-node-logging/research/current-audit.md","reason":"Validate audit anchors and compatibility decisions."}

@@ -265,10 +265,11 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 
 ### 2. Signatures
 - `GET /api/admin/logs?limit=&level=&q=&file=<enumerated-id>`.
+- `NewLogsViewer(logRing *logging.Ring, logFile string) *LogsViewer` / `NewLogsHandler(...) http.Handler`.
 - `POST /api/admin/buckets/{name}/reconcile`, body `{"apply": false|true}`.
 
 ### 3. Contracts
-- Both routes exist only behind admin session middleware, never public ops or S3 routers.
+- The reusable logs handler is mounted by both standalone and Panel admin servers behind their existing session middleware; it owns only a ring and effective active file path. Reconcile remains standalone-only and authenticated. Neither route is public ops or S3 surface.
 - Logs preserve `source`, `file_enabled`, `limit`, `entries`, and optional `warning`, and add `files` plus optional `selected_file` (`id`, `name`, `size`, `modified_at`, `current`, `compressed`).
 - Omitted `file` reads the configured active file and may fall back to the ring. Explicit `file` must be a freshly enumerated basename and never falls back to another source on failure.
 - Only the active basename and exact lumberjack timestamp backups are exposed; gzip history is decompressed server-side and uses the same level/query/limit filters.
@@ -285,7 +286,7 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 - Bad: client log paths, silent fallback for explicit history, symlink-backed log records, applying stale browser totals, returning secrets, or mounting routes publicly.
 
 ### 6. Tests Required
-- Backend: auth, methods, current/ring compatibility, file metadata/order, plain/gzip filters, unsafe IDs, symlinks, cleaned-file/corrupt-gzip errors, dry-run immutability, apply side effects, invalidation, and sanitized errors.
+- Backend: standalone and Panel auth, Panel ring/file injection, methods, current/ring compatibility, file metadata/order, plain/gzip filters, unsafe IDs, symlinks, cleaned-file/corrupt-gzip errors, dry-run immutability, apply side effects, invalidation, and sanitized errors.
 - Frontend: type-check/Vite build and browser checks for `/logs`, report, and confirmation.
 
 ### 7. Wrong vs Correct
@@ -298,7 +299,7 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 
 ### 1. Scope / Trigger
 
-- Trigger: serving `pkg/webadmin/ui` from a backend whose admin API is not the standalone `/dashboard`, `/credentials`, `/buckets`, and `/logs` surface.
+- Trigger: serving `pkg/webadmin/ui` from standalone and Panel backends that share auth and `/logs` but otherwise expose different admin API surfaces.
 - Goal: prevent a shared embedded SPA from mounting pages whose API routes do not exist on the current service.
 
 ### 2. Signatures
@@ -312,6 +313,7 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 - `auth-settings` always includes `service_mode`, exactly `standalone` or `panel`.
 - `NewAuth` defaults to `standalone` for backward compatibility.
 - Panel admin servers construct auth with `ServiceModePanel`; mode is never inferred from request failures.
+- `/logs` is a shared authenticated route. Panel navigation labels it `Panel 日志`; standalone keeps `日志`. Dashboard, credential, and bucket pages remain standalone-only, while node pages remain Panel-only.
 - The field is additive and non-sensitive; password hashes, captcha secrets, session keys, and one-time tokens remain excluded.
 
 ### 4. Validation & Error Matrix
@@ -322,14 +324,14 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 
 ### 5. Good/Base/Bad Cases
 
-- Good: Panel `auth-settings` returns `panel`, followed by `/api/admin/nodes*` requests only.
+- Good: Panel `auth-settings` returns `panel`, followed only by `/api/admin/nodes*` and `/api/admin/logs` requests.
 - Base: older clients ignore the additive field without breaking login.
-- Bad: embed the standalone SPA in Panel and treat repeated `/dashboard`, `/buckets`, or `/logs` 404 responses as a proxy problem.
+- Bad: embed the standalone SPA in Panel and treat repeated `/dashboard` or `/buckets` 404 responses as a proxy problem; `/logs` must exist before Panel navigation exposes it.
 
 ### 6. Tests Required
 
 - Unit test the default `standalone` and explicit `panel` response values.
-- Panel admin-server test authenticates, asserts `/api/admin/nodes` succeeds, and asserts a standalone-only route is not registered.
+- Panel admin-server test asserts unauthenticated `/api/admin/logs` returns 401, authenticates, proves `/api/admin/nodes` and `/api/admin/logs` succeed, and asserts a standalone-only route is not registered.
 - Browser smoke records network responses after login and fails if the UI requests an API from the other service mode.
 
 ### 7. Wrong vs Correct
@@ -345,3 +347,42 @@ Correct:
 ```go
 authenticator := webadmin.NewAuthForServiceMode(webCfg, webadmin.ServiceModePanel, tlsEnabled)
 ```
+
+## Scenario: Typed Panel Node Task API
+
+### 1. Scope / Trigger
+- Trigger: changes to `/api/admin/nodes/{id}/tasks*`, `TaskOrchestrator`, or control-plane task result persistence.
+
+### 2. Signatures
+- `POST /api/admin/nodes/{id}/tasks` with `{"type":"log_query","params":TaskParams}` -> `202 {"task_id":"..."}`.
+- `GET /api/admin/nodes/{id}/tasks/{taskID}` -> typed `{task_id,node_id,type,state,result,error,created_at,updated_at}`.
+- `TaskOrchestrator.GetTaskForNode(nodeID, taskID)`.
+
+### 3. Contracts
+- Both routes remain behind Panel admin session middleware and node existence checks. GET is scoped by both path node ID and task ID.
+- Log-query validation runs before persistence/dispatch. Persisted log params omit the raw keyword and retain only `keyword_provided` plus non-secret filters.
+- Results are decoded from the internal JSON column into `controlproto.TaskResult`; persistence field names, raw params, and creator identity are not returned.
+- Dispatch is online-only and limited by the existing per-connection window. A timeout conditionally changes only pending/running tasks to failed and releases the slot.
+- Disconnect conditionally changes pending/running tasks to unknown. A result racing after timeout/disconnect cannot overwrite a terminal state.
+- Only a result resolved by both the authenticated connection's node ID and persisted task ID, with an empty legacy type or the matching persisted task type, releases the in-flight slot. Unknown or type-mismatched frames are ignored without weakening backpressure.
+- Panel re-bounds and re-redacts log results before persistence; task/audit records store only safe type/state/node identifiers and bounded output.
+
+### 4. Validation & Error Matrix
+- Invalid typed params/unsupported task -> 400; missing node/task or wrong-node task lookup -> 404; offline node -> 409; saturated node -> 429.
+- Pending/running -> poll; success/failed/unknown -> terminal. Timeout -> failed with safe timeout text; late result -> ignored.
+- Unknown-node/task or mismatched-type result frame -> ignored; the real task remains pending/running and its in-flight slot remains reserved until a valid result, disconnect, or timeout.
+- Corrupt persisted result JSON -> sanitized 500, never the raw JSON.
+
+### 5. Good/Base/Bad Cases
+- Good: dispatch an online Node query, poll a typed structured result, and observe no keyword in `tasks.params` or audit rows.
+- Base: old Node text-only result is returned in typed `result.log_lines`.
+- Bad: `GET /nodes/2/tasks/<node-1-task>`, returning the GORM `Task` model directly, releasing a slot before validating the result's node/task/type, or unconditionally updating a timed-out task from a late frame.
+
+### 6. Tests Required
+- Invalid/offline/backpressure dispatch, redacted params, node-scoped lookup, typed structured/legacy response, timeout slot release, disconnect unknown, mismatched-type result retaining its slot, timeout/result race, oversized/sensitive result ingestion, and existing storage-task regression.
+
+### 7. Wrong vs Correct
+- Wrong: `GetTask(taskID)` from a node-scoped route followed by `writeJSON(task)`.
+- Wrong: call `conn.releaseTask(result.TaskID)` before resolving the node-scoped persisted task and validating `result.Type`.
+- Correct: `GetTaskForNode(nodeID, taskID)`, decode only the bounded typed result, and project an explicit response DTO.
+- Correct: resolve `(conn.NodeID, result.TaskID)`, accept an empty legacy type or the persisted type, then release the slot and conditionally persist a terminal result.
