@@ -43,6 +43,10 @@ type ClientConfig struct {
 	NodeID   int64
 	Identity Identity
 
+	// Region 是节点本地配置的 S3 签名区域,随每次 hello 上报给 Panel 供展示。
+	// 它不参与任何控制面决策:Panel 不会据此下发配置,区域仍由节点 yaml 决定。
+	Region string
+
 	HeartbeatInterval time.Duration
 	DialTimeout       time.Duration
 	MinBackoff        time.Duration
@@ -176,6 +180,7 @@ func (c *Client) handshake(ctx context.Context, ws *websocket.Conn) error {
 		AppliedVersion:  meta.AppliedVersion,
 		ContentHash:     localHash,
 		Capabilities:    []string{controlproto.CapabilityAuthoritativeConfigV1},
+		Region:          c.cfg.Region,
 	}
 	if err := c.sendMessage(ctx, ws, controlproto.TypeHello, "", hello); err != nil {
 		return fmt.Errorf("send hello: %w", err)

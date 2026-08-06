@@ -133,6 +133,7 @@ func TestAgentHandshakeAndDesiredStatePush(t *testing.T) {
 		NodeID:          "1",
 		AppliedVersion:  1,
 		Capabilities:    []string{controlproto.CapabilityAuthoritativeConfigV1},
+		Region:          "ap-southeast-2",
 	})
 
 	// Expect hello_ack with needs_sync=true, desired_version=2.
@@ -176,6 +177,15 @@ func TestAgentHandshakeAndDesiredStatePush(t *testing.T) {
 		}
 		return st.AppliedVersion == 2 && st.SyncState == SyncStateSynced
 	})
+
+	// hello 里自报的区域随握手落库,供 Panel 只读展示。
+	var st NodeState
+	if err := gdb.Where("node_id = ?", node.ID).First(&st).Error; err != nil {
+		t.Fatalf("load node state: %v", err)
+	}
+	if st.Region != "ap-southeast-2" {
+		t.Fatalf("reported region = %q, want ap-southeast-2", st.Region)
+	}
 }
 
 func TestAgentRejectsUnknownCert(t *testing.T) {

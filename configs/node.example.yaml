@@ -25,6 +25,9 @@ auth:
   # 无 region/service scope,安全性明显弱于 v4。仅在必须兼容仅支持 v2 的客户端时显式开启。
   allow_sigv2: false
 
+# S3 签名区域,由本节点自己决定。它会在每次控制面握手时上报给 Panel 展示,
+# 但 Panel 不会下发或覆盖该值——改区域只能改这里并重启节点。
+# 注意:改动会让按旧区域签名的客户端立即校验失败。
 region: "us-east-1"
 log_level: "info"
 log:

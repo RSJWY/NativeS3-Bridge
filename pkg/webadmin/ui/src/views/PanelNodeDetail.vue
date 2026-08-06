@@ -17,7 +17,7 @@
         <div class="panel-section-heading">
           <div>
             <h2>运行状态</h2>
-            <p class="muted">连接、生命周期和配置版本状态。</p>
+            <p class="muted">连接、生命周期、区域和配置版本状态。</p>
           </div>
           <div class="actions-cell">
             <button v-if="node.status !== 'retired'" class="secondary-button" type="button" :disabled="actionLoading" @click="setNodeStatus(node.status === 'active' ? 'disabled' : 'active')">
@@ -30,6 +30,7 @@
           <div><dt>连接</dt><dd>{{ node.online ? '在线' : '离线' }}</dd></div>
           <div><dt>生命周期</dt><dd>{{ nodeStatusLabel(node.status) }}</dd></div>
           <div><dt>同步状态</dt><dd>{{ syncStateLabel(node.sync_state) }}</dd></div>
+          <div><dt>区域</dt><dd :title="regionHint">{{ node.region || '未上报' }}</dd></div>
           <div><dt>草稿</dt><dd>{{ node.publish_required ? '需要重新发布' : node.draft_dirty ? '有未发布变更' : '无未发布变更' }}</dd></div>
           <div><dt>已发布版本</dt><dd>{{ node.desired_version || '—' }}</dd></div>
           <div><dt>已应用版本</dt><dd>{{ node.applied_version || '—' }}</dd></div>
@@ -144,6 +145,13 @@ const error = ref('')
 const certificateError = ref('')
 const actionMessage = ref('')
 const activeCertificateCount = computed(() => certificates.value.filter((certificate) => !certificate.Revoked).length)
+// 区域由节点在握手时自报,Panel 只展示不下发。为空说明节点从未连接过,或其 agent
+// 版本尚不上报该字段——不代表节点没有区域配置,所以提示语要显式区分这两种含义。
+const regionHint = computed(() =>
+  node.value?.region
+    ? '节点在控制面握手时自报的本地 S3 签名区域，由节点配置文件决定，Panel 不会下发。'
+    : '节点尚未上报区域：可能从未连接过控制面，或其 agent 版本较旧。这不代表节点没有区域配置。'
+)
 
 onMounted(() => {
   if (!Number.isSafeInteger(nodeID) || nodeID <= 0) {

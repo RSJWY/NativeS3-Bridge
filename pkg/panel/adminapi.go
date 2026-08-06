@@ -72,8 +72,11 @@ type nodeResponse struct {
 	LastError       string     `json:"last_error,omitempty"`
 	DraftDirty      bool       `json:"draft_dirty"`
 	PublishRequired bool       `json:"publish_required"`
-	LastHeartbeat   *time.Time `json:"last_heartbeat,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
+	// Region 是节点自报的本地 S3 签名区域,只读观测值。空串表示节点尚未连接过,
+	// 或其 agent 版本不上报该字段——不能理解为"节点没有区域"。
+	Region        string     `json:"region,omitempty"`
+	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 type createNodeRequest struct {
@@ -852,6 +855,7 @@ func (a *AdminAPI) nodeToResponse(n Node) nodeResponse {
 		resp.AppliedVersion = st.AppliedVersion
 		resp.SyncState = st.SyncState
 		resp.LastError = st.LastError
+		resp.Region = st.Region
 		resp.LastHeartbeat = st.LastHeartbeat
 	}
 	var desired DesiredConfig

@@ -69,6 +69,7 @@ type HelloPayload struct {
     AppliedVersion int64    `json:"applied_version"`
     ContentHash    string   `json:"content_hash"`
     Capabilities   []string `json:"capabilities,omitempty"`
+    Region         string   `json:"region,omitempty"`  // 节点自报,纯观测,Panel 不下发
 }
 
 type DesiredStatePayload struct {
@@ -129,6 +130,8 @@ type AckPayload struct {
 - A failed apply ACK preserves the previously observed applied version/hash and records only a sanitized error.
 - A `synced` ACK is trusted only when both version and hash match the current published row. A mismatch is recorded as `drift`, not `synced`.
 - NodeState create/update uses one portable `INSERT ... ON CONFLICT(node_id) DO UPDATE` operation. SQLite `BUSY`/`LOCKED` errors use typed primary result codes with bounded, context-aware retry; never classify retryability from an error-message substring.
+- The node's S3 signing region is node-owned configuration (`node.yaml` `region`), reported to the Panel in every `hello` as pure observation. The Panel stores it in `NodeState.Region`, exposes it read-only via `nodeResponse.region`, and must never publish or push it: region is not part of `DesiredState`.
+- Region is a per-hello observation, not accumulated state. Every hello overwrites `NodeState.Region`, including with an empty value when the node's agent does not report it. An empty region means "not reported" (never connected, or older agent), not "the node has no region"; the UI must say so. Reported region is untrusted free text: trim, strip control characters, and truncate to the column width before storing.
 
 #### Node apply and runtime state
 
@@ -200,7 +203,7 @@ type AckPayload struct {
 - Draft API tests cover auth, existing-node requirement, node isolation, strict JSON, validation, duplicate conflicts, credential/bucket binding, secret redaction, disabled webhook persistence, and audit redaction.
 - Concurrency tests race duplicate webhook creates and bucket-delete against credential-create; final rows must satisfy the same invariants as serialized requests.
 - Import tests cover read-only request, pending summary redaction, already-managed detection for every resource class, overlapping request/confirm/abort behavior, and transaction rollback.
-- Transport tests cover optional capability decoding, new/new reconnect auto-push, old-node gate, connection replacement, failed ACK preservation, and mismatched synced ACK -> drift.
+- Transport tests cover optional capability decoding, new/new reconnect auto-push, old-node gate, connection replacement, failed ACK preservation, mismatched synced ACK -> drift, and reported-region persistence including the downgrade-to-empty case.
 - Node response tests cover offline publish `synced -> waiting`, exact matching state remaining synced, failed/drift evidence preservation, no desired target, and legacy/unpushable target behavior.
 - NodeState persistence tests hold a real SQLite write lock to prove typed busy retries occur, prove cancellation stops backoff, and stress replacement disconnect plus failed ACK races repeatedly.
 - Executor tests cover invalid hash/reference rejection, version regression, preflight directory cleanup, retained-data guard, full transaction rollback, readback hash mismatch rollback, `AgentMeta`, cache invalidation, webhook replacement, and rate-limit persistence/runtime update.

@@ -95,8 +95,11 @@ type NodeState struct {
 	SyncState      string `gorm:"size:16;not null;default:waiting"`
 	ContentHash    string `gorm:"size:64"`
 	LastError      string `gorm:"size:512"`
-	LastHeartbeat  *time.Time
-	UpdatedAt      time.Time
+	// Region 是节点在 hello 里自报的本地 S3 签名区域,只观测不权威:Panel 永远
+	// 不写回节点,区域仍由节点 yaml 决定。旧节点不上报该字段,值保持空串。
+	Region        string `gorm:"size:64"`
+	LastHeartbeat *time.Time
+	UpdatedAt     time.Time
 }
 
 // NodeCredential stores an S3 credential owned by the panel. The secret key is

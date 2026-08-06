@@ -42,6 +42,7 @@
               <th>连接</th>
               <th>状态</th>
               <th>同步</th>
+              <th>区域</th>
               <th>版本</th>
               <th>最近心跳</th>
               <th></th>
@@ -49,10 +50,10 @@
           </thead>
           <tbody>
             <tr v-if="loading" class="state-row">
-              <td colspan="7">加载中…</td>
+              <td colspan="8">加载中…</td>
             </tr>
             <tr v-else-if="nodes.length === 0" class="state-row">
-              <td colspan="7">暂无节点，请先创建逻辑节点。</td>
+              <td colspan="8">暂无节点，请先创建逻辑节点。</td>
             </tr>
             <tr v-for="node in nodes" :key="node.id">
               <td>
@@ -68,6 +69,7 @@
                 <span :class="['status-badge', nodeStatusClass(node.status)]">{{ nodeStatusLabel(node.status) }}</span>
               </td>
               <td>{{ syncStateLabel(node.sync_state) }}</td>
+              <td>{{ node.region || '—' }}</td>
               <td>{{ node.applied_version }} / {{ node.desired_version }}</td>
               <td>{{ formatDate(node.last_heartbeat) }}</td>
               <td><RouterLink class="secondary-button panel-link-button" :to="`/nodes/${node.id}`">管理</RouterLink></td>

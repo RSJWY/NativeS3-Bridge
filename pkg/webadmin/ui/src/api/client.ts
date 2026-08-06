@@ -112,6 +112,8 @@ export interface PanelNode {
   last_error?: string
   draft_dirty: boolean
   publish_required: boolean
+  /** 节点自报的本地 S3 签名区域。缺失表示未上报（节点未连接过，或 agent 版本较旧）。 */
+  region?: string
   last_heartbeat?: string
   created_at: string
 }

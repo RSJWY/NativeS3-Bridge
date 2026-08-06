@@ -30,6 +30,8 @@ const (
 	writeTimeout             = 10 * time.Second
 	nodeStateMaxBusyRetries  = 5
 	nodeStateBusyRetryDelay  = 5 * time.Millisecond
+	// maxReportedRegionBytes 与 NodeState.Region 的列宽一致。
+	maxReportedRegionBytes = 64
 )
 
 var ErrAuthoritativeConfigCapabilityRequired = errors.New("agent upgrade required for authoritative config")
@@ -308,7 +310,7 @@ func (s *TransportServer) handshake(ctx context.Context, conn *AgentConn) error 
 	}
 
 	// Record the applied version the node reported.
-	s.updateAppliedVersion(conn.NodeID, hello.AppliedVersion, hello.ContentHash)
+	s.recordHelloObservation(conn.NodeID, hello.AppliedVersion, hello.ContentHash, hello.Region)
 	if desiredVersion > 0 && !conn.Supports(controlproto.CapabilityAuthoritativeConfigV1) {
 		s.recordSyncFailure(conn.NodeID, "agent upgrade required: authoritative config capability is missing")
 	} else if snapshotErr != nil {
@@ -572,12 +574,33 @@ func (s *TransportServer) touchHeartbeat(nodeID uint, appliedVersion int64) {
 	})
 }
 
-func (s *TransportServer) updateAppliedVersion(nodeID uint, version int64, hash string) {
+// recordHelloObservation 落库节点在 hello 里自报的观测量。region 一并写入(包括
+// 空串):节点降级到不上报 region 的旧版本时,展示为"未上报"比留着上一次连接的
+// 旧值更诚实——Panel 不知道当前 agent 实际在用哪个区域。
+func (s *TransportServer) recordHelloObservation(nodeID uint, version int64, hash, region string) {
 	_ = s.upsertNodeState(nodeID, map[string]any{
 		"applied_version": version,
 		"content_hash":    hash,
+		"region":          sanitizeReportedRegion(region),
 		"updated_at":      nowUTC(),
 	})
+}
+
+// sanitizeReportedRegion 归一化节点自报的 region。值来自节点本地 yaml,虽然经过
+// mTLS 通道但仍是"节点说了算"的自由文本,且会直接进管理端页面:去掉首尾空白与
+// 控制字符,并截断到列宽 64,避免脏值撑坏展示或写库失败。
+func sanitizeReportedRegion(region string) string {
+	region = strings.TrimSpace(region)
+	region = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, region)
+	if len(region) > maxReportedRegionBytes {
+		region = region[:maxReportedRegionBytes]
+	}
+	return region
 }
 
 // upsertNodeState creates or updates the single node_status row for nodeID.
@@ -655,6 +678,9 @@ func applyStateUpdates(row *NodeState, updates map[string]any) {
 	}
 	if v, ok := updates["content_hash"].(string); ok {
 		row.ContentHash = v
+	}
+	if v, ok := updates["region"].(string); ok {
+		row.Region = v
 	}
 	if v, ok := updates["last_error"].(string); ok {
 		row.LastError = v

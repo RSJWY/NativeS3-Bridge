@@ -14,6 +14,9 @@ import (
 // HelloPayload is sent by the node as the first frame after the mTLS WebSocket
 // handshake. It advertises the node identity and the state the node has already
 // applied so the panel can decide whether reconciliation is required.
+// Region 是节点本地 yaml 里的 S3 签名区域(node 侧 cfg.Region),纯观测字段:
+// Panel 只展示节点自报的值,不做权威下发——区域仍归节点配置所有。omitempty
+// 保证旧节点(不发送该字段)照常握手,Panel 侧表现为"未上报"。
 type HelloPayload struct {
 	ProtocolVersion int      `json:"protocol_version"`
 	NodeID          string   `json:"node_id"`
@@ -21,6 +24,7 @@ type HelloPayload struct {
 	AppliedVersion  int64    `json:"applied_version"`
 	ContentHash     string   `json:"content_hash"`
 	Capabilities    []string `json:"capabilities,omitempty"`
+	Region          string   `json:"region,omitempty"`
 }
 
 const CapabilityAuthoritativeConfigV1 = "authoritative_config_v1"

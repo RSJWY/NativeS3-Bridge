@@ -220,6 +220,7 @@ func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, inval
 			AgentURL:          cfg.Panel.AgentURL,
 			NodeID:            cfg.Panel.NodeID,
 			Identity:          identity,
+			Region:            cfg.Region,
 			HeartbeatInterval: cfg.Panel.HeartbeatInterval,
 		}, gdb, executor, runner)
 
