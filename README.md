@@ -366,7 +366,7 @@ aws $EP s3api delete-object --bucket mybucket --key docs/readme.txt
 | Tagging | `PUT/GET/DELETE /{bucket}/{key}?tagging` |
 | Metadata | `x-amz-meta-*` 自定义 metadata |
 | Integrity | `Content-MD5` 校验，失败返回 `InvalidDigest` 或 `BadDigest` |
-| Auth | Header SigV4 和 query presigned URL |
+| Auth | Header SigV4 和 query presigned URL;可选 SigV2(`auth.allow_sigv2`,默认关闭) |
 | Anonymous | public-read bucket 的对象级 `GET`/`HEAD` |
 
 不支持或不属于当前目标：
@@ -375,6 +375,17 @@ aws $EP s3api delete-object --bucket mybucket --key docs/readme.txt
 - S3 versioning 的真实版本存储。
 - Object Lock、SSE、Lifecycle、Replication。
 - 匿名列 bucket、匿名写入、匿名删除。
+
+### 签名版本
+
+默认仅接受 Signature Version 4(header 或 query presigned)。旧客户端若只能发 Signature Version 2,可在配置中显式开启:
+
+```yaml
+auth:
+  allow_sigv2: true   # 默认 false
+```
+
+注意:v2 用 HMAC-SHA1、不签请求体、无 region/service scope,安全性明显弱于 v4;v2 + aws-chunked 的 payload 完整性完全依赖 aws-chunked 解码器校验。仅在必须兼容仅支持 v2 的客户端时开启。
 
 ### 预签名 URL
 

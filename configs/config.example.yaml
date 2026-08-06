@@ -64,6 +64,12 @@ rate_limit:
   anonymous_burst: 20
   trust_forwarded: false
 
+auth:
+  # 允许 S3 Signature Version 2 请求。默认 false:v2 用 HMAC-SHA1、不签请求体、
+  # 无 region/service scope,安全性明显弱于 v4;v2 + aws-chunked 的 payload 完整性
+  # 完全依赖 aws-chunked 解码器。仅在必须兼容仅支持 v2 的客户端时显式开启。
+  allow_sigv2: false
+
 region: "us-east-1"
 log_level: "info"
 log:

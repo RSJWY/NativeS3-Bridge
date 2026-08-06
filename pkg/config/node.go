@@ -24,6 +24,7 @@ type NodeConfig struct {
 	Storage  StorageConfig     `yaml:"storage"`
 	Database DatabaseConfig    `yaml:"database"`
 	Panel    PanelClientConfig `yaml:"panel"`
+	Auth     AuthConfig        `yaml:"auth"`
 	Region   string            `yaml:"region"`
 	LogLevel string            `yaml:"log_level"`
 	Log      LogConfig         `yaml:"log"`

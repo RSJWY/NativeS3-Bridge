@@ -19,9 +19,19 @@ type Config struct {
 	Hooks     HooksConfig     `yaml:"hooks"`
 	WebAdmin  WebAdminConfig  `yaml:"webadmin"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	Auth      AuthConfig      `yaml:"auth"`
 	Region    string          `yaml:"region"`
 	LogLevel  string          `yaml:"log_level"`
 	Log       LogConfig       `yaml:"log"`
+}
+
+// AuthConfig 控制 S3 签名认证行为。
+type AuthConfig struct {
+	// AllowSigV2 允许接受 S3 Signature Version 2 请求。默认 false:
+	// v2 用 HMAC-SHA1、不签请求体、无 region/service scope,安全性明显弱于 v4,
+	// 且 v2 + aws-chunked 的 payload 完整性完全依赖 aws-chunked 解码器。
+	// 仅在必须兼容仅支持 v2 的客户端时显式开启。
+	AllowSigV2 bool `yaml:"allow_sigv2"`
 }
 
 type LogConfig struct {

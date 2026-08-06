@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/config"
@@ -1086,4 +1087,91 @@ func requireJSONLogEntry(t *testing.T, logBuf *bytes.Buffer, message string) map
 	}
 	t.Fatalf("log entry %q not found: %s", message, logBuf.String())
 	return nil
+}
+
+// ---- v2 签名 PUT 端到端(走完整中间件链,真实 v2 验签)----
+
+// TestRouterSigV2SignedPutEndToEnd 验证 v2 签名的 PUT 能走完整中间件链并落盘。
+// 真实 MultiSchemeAuthenticator(v4 + v2 开启),不是 stub/fixed authenticator。
+func TestRouterSigV2SignedPutEndToEnd(t *testing.T) {
+	gdb := newServerTestDB(t)
+	cred := dbpkg.Credential{AccessKey: "V2E2E", SecretKey: "V2SECRET", Status: "enabled"}
+	if err := gdb.Create(&cred).Error; err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	dataRoot := t.TempDir()
+	backend, err := storage.NewFileBackend(dataRoot)
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, dataRoot, storage.DefaultBucketACLCacheTTL)
+	if err := bucketStore.Create("test-bucket"); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	credentialStore := auth.NewCredentialStore(gdb, auth.DefaultCredentialCacheTTL)
+	v4 := auth.NewLocalSigV4Authenticator(credentialStore, "us-east-1")
+	v2 := auth.NewLocalSigV2Authenticator(credentialStore)
+	authenticator := auth.NewMultiSchemeAuthenticator(v4, v2)
+	router := NewRouter(backend, nil, bucketStore, authenticator, func(uint, int64, quota.Op) error { return nil }, nil, config.RateLimitConfig{})
+
+	payload := "v2-signed-payload"
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket/v2.txt", strings.NewReader(payload))
+	req.ContentLength = int64(len(payload))
+	req.Header.Set("x-amz-date", time.Now().UTC().Format("2006-01-02T15:04:05Z"))
+	req.Header.Set("Content-Type", "text/plain")
+	// v2 签名:用真实 secret 签当前请求
+	sts := auth.StringToSignV2(req, "")
+	req.Header.Set("Authorization", "AWS "+cred.AccessKey+":"+auth.SignStringV2(cred.SecretKey, sts))
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	rc, _, err := backend.GetObject("test-bucket", "v2.txt", nil)
+	if err != nil {
+		t.Fatalf("get stored object: %v", err)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read stored object: %v", err)
+	}
+	if string(body) != payload {
+		t.Fatalf("stored bytes = %q, want %q", body, payload)
+	}
+}
+
+// TestRouterSigV2DisabledReturnsInvalidRequest 验证 v2 关闭时(装配 nil)返回 InvalidRequest。
+func TestRouterSigV2DisabledReturnsInvalidRequest(t *testing.T) {
+	gdb := newServerTestDB(t)
+	cred := dbpkg.Credential{AccessKey: "V2OFF", SecretKey: "V2SECRET", Status: "enabled"}
+	if err := gdb.Create(&cred).Error; err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	dataRoot := t.TempDir()
+	backend, err := storage.NewFileBackend(dataRoot)
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	bucketStore := storage.NewBucketStore(gdb, dataRoot, storage.DefaultBucketACLCacheTTL)
+	credentialStore := auth.NewCredentialStore(gdb, auth.DefaultCredentialCacheTTL)
+	v4 := auth.NewLocalSigV4Authenticator(credentialStore, "us-east-1")
+	// v2 为 nil = 关闭
+	authenticator := auth.NewMultiSchemeAuthenticator(v4, nil)
+	router := NewRouter(backend, nil, bucketStore, authenticator, func(uint, int64, quota.Op) error { return nil }, nil, config.RateLimitConfig{})
+
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket/v2.txt", strings.NewReader("x"))
+	req.Header.Set("Authorization", "AWS "+cred.AccessKey+":whatever==")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "InvalidRequest") {
+		t.Fatalf("body = %s, want InvalidRequest", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "SignatureDoesNotMatch") {
+		t.Fatalf("body must not be SignatureDoesNotMatch when v2 disabled; got %s", rr.Body.String())
+	}
 }

@@ -107,7 +107,12 @@ func main() {
 	multipartStore.StartGC(ctx.Done(), cfg.Storage.MultipartGCInterval, cfg.Storage.MultipartTTL)
 
 	credentialStore := auth.NewCredentialStore(gdb, auth.DefaultCredentialCacheTTL)
-	authenticator := auth.NewLocalSigV4Authenticator(credentialStore, cfg.Region)
+	v4Authenticator := auth.NewLocalSigV4Authenticator(credentialStore, cfg.Region)
+	var v2Authenticator auth.Authenticator
+	if cfg.Auth.AllowSigV2 {
+		v2Authenticator = auth.NewLocalSigV2Authenticator(credentialStore)
+	}
+	authenticator := auth.NewMultiSchemeAuthenticator(v4Authenticator, v2Authenticator)
 	hookManager := hooks.NewManager(gdb, hooks.Config{QueueSize: cfg.Hooks.QueueSize, Workers: cfg.Hooks.Workers, MaxRetry: cfg.Hooks.MaxRetry, Timeout: cfg.Hooks.Timeout})
 	hookManager.Start()
 	defer hookManager.Stop()

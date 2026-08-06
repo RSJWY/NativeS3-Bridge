@@ -19,6 +19,13 @@
 - `func (s *CredentialStore) Get(accessKey string) (*db.Credential, error)`
 - `func (s *CredentialStore) Invalidate(accessKey string)`
 - `func NewLocalSigV4Authenticator(store *CredentialStore, region string) *LocalSigV4Authenticator`
+- `func NewLocalSigV2Authenticator(store *CredentialStore) *LocalSigV2Authenticator`
+- `func NewMultiSchemeAuthenticator(v4, v2 Authenticator) *MultiSchemeAuthenticator`(v2 为 nil 表示禁用)
+- `func ParseV2Authorization(header string) (ParsedV2Authorization, error)`
+- `func StringToSignV2(r *http.Request, expires string) string`
+- `func CanonicalizedAmzHeadersV2(h http.Header) string`
+- `func CanonicalizedResourceV2(r *http.Request) string`(RawPath 优先,EscapedPath 回落)
+- `func SignStringV2(secret, stringToSign string) string`
 - `func Check(id *auth.Identity, incoming int64) error`
 - `func Commit(gdb *gorm.DB, credID uint, deltaBytes int64, op Op) error`
 - Startup seed flags: `--seed-access-key`, `--seed-secret-key`, `--seed-quota-bytes`.
@@ -26,7 +33,19 @@
 
 ### 3. Contracts
 
-- Only header-based `Authorization: AWS4-HMAC-SHA256 ...` is accepted in this layer. Query presigned URL validation belongs to the presigned task.
+- 请求按签名形态由 `MultiSchemeAuthenticator` 分派,v4 严格优先于 v2:
+  1. `Authorization` 以 `AWS4-HMAC-SHA256 ` 开头 → v4;
+  2. `HasPresignQuery(r)` 为真 → v4 预签名;
+  3. `Authorization` 以 `AWS `(带空格)开头(且非 `AWS4-`)→ v2;
+  4. 查询串同时含 `AWSAccessKeyId`、`Expires`、`Signature` → v2 预签名;
+  5. 其余 → 交回 v4 的既有路径。
+  **注意:`AWS4-HMAC-SHA256` 本身也以 `AWS` 开头,判 v2 必须用带空格的 `HasPrefix(h, "AWS ")` 且已被第 1 条拦截在前。** v4 与 v2 预签名的查询参数名不重叠,判定互斥。
+- SigV2 默认关闭(`auth.allow_sigv2`,bool 零值即 false),由配置显式开启。关闭时 v2 形态请求返回 `InvalidRequest` 而非 `SignatureDoesNotMatch`,便于运维区分"被禁用"与"签名算错"。
+- SigV2 `StringToSign` = `HTTP-Verb\n + Content-MD5\n + Content-Type\n + Date\n + CanonicalizedAmzHeaders + CanonicalizedResource`;签名 = `Base64(HMAC-SHA1(SecretKey, StringToSign))`;比较恒定时间。
+- SigV2 `CanonicalizedResource` 的路径取值**优先 `r.URL.RawPath`,为空回落 `r.URL.EscapedPath()`,绝不用已解码的 `r.URL.Path`**——含中文/括号/空格的 key 编码往返不一致会导致验签失败(GitHub issue #3 的核心)。子资源白名单(acl/lifecycle/location/logging/notification/partNumber/policy/requestPayment/torrent/uploadId/uploads/versionId/versioning/versions/website/cors/delete/tagging 与 `response-*` 前缀)按名字典序追加;非白名单参数不参与签名。
+- SigV2 `CanonicalizedAmzHeaders`:收集所有 `x-amz-*` 头,名称小写、字典序、同名逗号合并、值折叠空白(复用 `normalizeHeaderValue`)、每条以 `\n` 结尾。`x-amz-date` 也纳入(此时 StringToSign 的 Date 行置空);未知 `x-amz-*` 头(如 boto3≥1.36 的 `x-amz-checksum-crc32`、`x-amz-sdk-checksum-algorithm`)按规范纳入,不得拒绝。
+- SigV2 时间:`x-amz-date` 优先,否则 `Date` 头;RFC1123 与 ISO8601 都支持;时钟偏移 ±15 分钟同 v4。v2 预签名的 `Expires` 是绝对 Unix 时间戳,过期 → `AccessDenied`。
+- SigV2 的安全弱点(已知限制):用 HMAC-SHA1、不签请求体、无 region/service scope;v2 + aws-chunked 的 payload 完整性完全依赖 aws-chunked 解码器校验(v2 不签 `x-amz-content-sha256`)。
 - SigV4 canonical request helpers must remain pure and reusable: canonical URI/query/headers, signed headers, string-to-sign, signing key derivation, and constant-time signature comparison.
 - Reverse proxies must preserve the exact client HTTP method and Host used by SigV4. For Nginx S3 locations, disable generic proxy caching and set `proxy_cache_convert_head off`; converting signed HEAD requests to upstream GET requests causes `SignatureDoesNotMatch`.
 - `X-Amz-Date` clock skew is limited to plus or minus 15 minutes and returns `RequestTimeTooSkewed` on violation.
@@ -38,6 +57,9 @@
 - `Commit` runs in one GORM transaction: update `credentials.used_bytes` with a portable `CASE WHEN` expression and upsert `request_stats` via `clause.OnConflict` on `(credential_id, day)`.
 - `OpPut` increments `used_bytes`, `put_count`, and `bytes_in`; `OpGet` increments `get_count` and `bytes_out` only after successful stream copy; `OpDelete` decrements `used_bytes` to a floor of zero and increments `delete_count` after successful delete.
 - `Commit` failures after successful object operations are logged and do not change the object response.
+- aws-chunked 请求体由 `server.AwsChunked` 中间件在 Auth 之后、quotaMiddleware 之前解码。判定条件:`x-amz-content-sha256` 属于 `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` / `STREAMING-UNSIGNED-PAYLOAD-TRAILER` / `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` 之一,或 `Content-Encoding` 含 `aws-chunked`(大小写不敏感、逗号分隔取值)。命中后 `r.Body` 被替换为解码器,`r.ContentLength` 覆写为 `x-amz-decoded-content-length`,并从 `Content-Encoding` 移除 `aws-chunked` 这一个值(保留其余如 gzip)。
+- 配额预检、`quotaLimitReadCloser`、`used_bytes`、`request_stats.bytes_in` 全部以解码后的真实对象字节数为准。`quotaLimitReadCloser` 只能包裹解码后的流;不得用解码后长度去截断未解码的流(否则会误报 `QuotaExceeded`)。
+- `chunk-signature=` 不验证(已知限制)。头部 SigV4 签名保证请求头完整性;分块签名缺失只影响 body 完整性,风险等级低于数据损坏。trailer 中 `x-amz-checksum-crc32` / `crc32c` / `sha1` / `sha256` 在能识别时校验,不匹配返回 `BadDigest`;无法识别的算法名忽略。
 
 ### 4. Validation & Error Matrix
 
@@ -47,11 +69,17 @@
 - Disabled credential -> HTTP 403 `AccessDenied` XML.
 - Clock skew over 15 minutes -> HTTP 403 `RequestTimeTooSkewed` XML.
 - Signature mismatch -> HTTP 403 `SignatureDoesNotMatch` XML.
+- SigV2 形态但 `auth.allow_sigv2` 关闭 -> HTTP 403 `InvalidRequest` XML(**不得**返回 `SignatureDoesNotMatch`)。
+- SigV2 预签名 `Expires` 过期 -> HTTP 403 `AccessDenied` XML。
 - Reverse proxy changes signed HEAD to upstream GET -> HTTP 403 `SignatureDoesNotMatch`; both proxy and application logs must record HEAD after correction.
 - Quota exceeded -> HTTP 403 `QuotaExceeded` XML.
 - Unknown PUT content length -> HTTP 400 `InvalidArgument` XML.
 - Multipart complete quota exceeded -> HTTP 403 `QuotaExceeded` XML; temporary multipart upload data is aborted/removed and `used_bytes` is unchanged.
 - Invalid quota operation -> `Commit` returns `ErrInvalidOp` and callers log it.
+- aws-chunked 分块框架格式错误(长度行非法、缺少 CRLF、chunk 长度与实际不符) -> HTTP 400 `IncompleteBody` XML,**不得**返回 `QuotaExceeded`。
+- aws-chunked 解码后长度与 `x-amz-decoded-content-length` 不一致 -> HTTP 400 `IncompleteBody` XML。
+- aws-chunked trailer 校验和不匹配 -> HTTP 400 `BadDigest` XML,且不留下对象、sidecar 或 `.tmp-*` 残留。
+- `x-amz-decoded-content-length` 缺失或非法 -> HTTP 400 `InvalidArgument` XML(缺失时传 -1 给解码器,不校验总长)。
 
 ### 5. Good/Base/Bad Cases
 
@@ -64,6 +92,9 @@
 - Bad: computing `UsedBytes + incoming > QuotaBytes` directly, which can overflow for large signed integers.
 - Bad: incrementing GET `bytes_out` before `io.Copy` succeeds.
 - Bad: applying quota to every `UploadPart`, because failed or aborted multipart uploads would consume permanent credential capacity.
+- Bad: 用 `x-amz-decoded-content-length`(解码后长度)去截断未解码的 aws-chunked 流,导致读到分块框架部分时误报 `QuotaExceeded`(GitHub issue #2 的真实根因)。
+- Bad: 判宽 aws-chunked 条件(例如只看 `Content-Encoding` 存在),把普通 PUT 全部损坏。
+- Bad: 把 `aws-chunked` 值留在 `Content-Encoding` 头里,使它被存进 sidecar 当对象元数据。
 
 ### 6. Tests Required
 
