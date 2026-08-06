@@ -237,6 +237,8 @@ elif mode == "synced":
     ok = bool(obj.get("online")) and obj.get("sync_state") == "synced"
     ok = ok and bool(obj.get("last_heartbeat"))
     ok = ok and isinstance(desired, int) and desired > 0 and desired == applied
+    # region 由节点在 hello 里上报,必须与 node 配置中的 region 一致。
+    ok = ok and obj.get("region") == "us-east-1"
 else:
     ok = False
 raise SystemExit(0 if ok else 1)
