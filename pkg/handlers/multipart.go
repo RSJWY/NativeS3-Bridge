@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/awschunked"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/hooks"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/quota"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
@@ -268,6 +269,10 @@ func writeMultipartStorageError(w http.ResponseWriter, err error, resource strin
 		WriteS3Error(w, "InvalidPart", http.StatusBadRequest, resource)
 	case errors.Is(err, storage.ErrMultipartStorageLimit):
 		WriteS3Error(w, "QuotaExceeded", http.StatusForbidden, resource)
+	case errors.Is(err, awschunked.ErrMalformedChunk), errors.Is(err, awschunked.ErrSizeMismatch):
+		WriteS3Error(w, "IncompleteBody", http.StatusBadRequest, resource)
+	case errors.Is(err, awschunked.ErrChecksumMismatch):
+		WriteS3Error(w, "BadDigest", http.StatusBadRequest, resource)
 	default:
 		writeStorageError(w, err, resource)
 	}

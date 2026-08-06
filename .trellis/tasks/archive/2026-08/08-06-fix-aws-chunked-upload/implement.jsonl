@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/auth-quota-guidelines.md", "reason": "配额核算与 SigV4 契约；本任务需增补 aws-chunked 长度口径与错误矩阵"}
+{"file": ".trellis/spec/backend/storage-guidelines.md", "reason": "写入路径与 .tmp-* 清理契约；解码错误不得留残留"}

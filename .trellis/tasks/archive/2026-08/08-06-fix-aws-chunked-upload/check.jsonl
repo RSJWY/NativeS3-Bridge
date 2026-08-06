@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/auth-quota-guidelines.md", "reason": "验收：配额以解码后长度为准、框架错误不得报 QuotaExceeded"}
+{"file": ".trellis/spec/backend/storage-guidelines.md", "reason": "验收：对象字节与 ETag 不变、无 .tmp-* 残留"}

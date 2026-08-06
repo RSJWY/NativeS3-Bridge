@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/awschunked"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/hooks"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/quota"
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
@@ -470,6 +471,10 @@ func writeStorageError(w http.ResponseWriter, err error, resource string) {
 		WriteS3Error(w, "InvalidDigest", http.StatusBadRequest, resource)
 	case errors.Is(err, storage.ErrBucketNotEmpty):
 		WriteS3Error(w, "BucketNotEmpty", http.StatusConflict, resource)
+	case errors.Is(err, awschunked.ErrMalformedChunk), errors.Is(err, awschunked.ErrSizeMismatch):
+		WriteS3Error(w, "IncompleteBody", http.StatusBadRequest, resource)
+	case errors.Is(err, awschunked.ErrChecksumMismatch):
+		WriteS3Error(w, "BadDigest", http.StatusBadRequest, resource)
 	case errors.Is(err, quota.ErrQuotaExceeded):
 		WriteS3Error(w, "QuotaExceeded", http.StatusForbidden, resource)
 	default:
