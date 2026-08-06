@@ -164,6 +164,48 @@ export interface PanelRateLimit {
   effective: PanelRateLimitValues
 }
 
+// ---- 已发布配置快照(脱敏视图)----
+// 与草稿类型刻意分离:快照不含 id/node_id/created_at,且凭证条目不含 secret。
+// 不要复用 PanelBucket/PanelWebhook——它们多出的字段会让 vue-tsc 报错。
+export interface PanelPublishedCredential {
+  access_key: string
+  name?: string
+  bucket?: string
+  status: string
+  quota_bytes: number
+}
+
+export interface PanelPublishedBucket {
+  name: string
+  acl: string
+}
+
+export interface PanelPublishedWebhook {
+  url: string
+  events: string[]
+  enabled: boolean
+}
+
+export interface PanelPublishedRateLimit {
+  anonymous_rps: number
+  anonymous_burst: number
+  trust_forwarded: boolean
+}
+
+export interface PanelPublishedSnapshot {
+  published: boolean
+  version: number
+  content_hash: string
+  schema_version: number
+  republish_needed: boolean
+  updated_by?: string
+  updated_at?: string
+  credentials: PanelPublishedCredential[]
+  buckets: PanelPublishedBucket[]
+  webhooks: PanelPublishedWebhook[]
+  rate_limit?: PanelPublishedRateLimit
+}
+
 export interface PanelImportSummary {
   node_id: number
   credential_count: number
@@ -457,6 +499,9 @@ export const adminApi = {
   },
   resetNodeRateLimit(id: number) {
     return apiFetch<PanelRateLimit>(`/api/admin/nodes/${id}/rate-limit`, { method: 'DELETE' })
+  },
+  getNodeDesiredState(id: number) {
+    return apiFetch<PanelPublishedSnapshot>(`/api/admin/nodes/${id}/desired-state`)
   },
   async getNodeImport(id: number): Promise<PanelImportSummary | null> {
     try {

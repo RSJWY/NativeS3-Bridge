@@ -31,6 +31,7 @@ PATCH      /api/admin/nodes/{id}/webhooks/{webhookID}
 DELETE     /api/admin/nodes/{id}/webhooks/{webhookID}
 
 GET|PUT|DELETE /api/admin/nodes/{id}/rate-limit
+GET        /api/admin/nodes/{id}/desired-state
 POST       /api/admin/nodes/{id}/desired-state
 POST       /api/admin/nodes/{id}/desired-state/push
 
@@ -46,6 +47,7 @@ func (a *DesiredStateAuthority) Publish(nodeID uint, updatedBy string) (version 
 func (a *DesiredStateAuthority) PublishTx(tx *gorm.DB, nodeID uint, updatedBy string) (version int64, hash string, err error)
 func (a *DesiredStateAuthority) BuildPushable(nodeID uint) (controlproto.DesiredStatePayload, error)
 func (a *DesiredStateAuthority) DraftStatus(nodeID uint) (dirty bool, publishRequired bool, err error)
+func (a *DesiredStateAuthority) PublishedView(nodeID uint) (PublishedSnapshotView, error)  // 脱敏只读视图,不解密 secret
 
 func (m *MigrationCoordinator) RequestImport(ctx context.Context, hub *Hub, nodeID uint) (ImportSummary, error)
 func (m *MigrationCoordinator) PendingSummary(nodeID uint) (ImportSummary, bool)
@@ -107,6 +109,17 @@ type AckPayload struct {
 - A legacy snapshot without the supported `schema_version` is unrecoverable because the original secrets were masked. Return `ErrDesiredSnapshotRepublishRequired` and fail closed; never rebuild an old version from current draft rows.
 - `DraftStatus` compares canonical encrypted draft JSON with the published snapshot. No published row means `draft_dirty=true`, even for an empty draft, so an administrator can explicitly publish an empty authoritative baseline.
 
+#### Published read view (desensitized)
+
+- `GET /api/admin/nodes/{id}/desired-state` returns `PublishedSnapshotView`, a read-only desensitized view of the last published snapshot. It is the only place the panel surfaces the whole published configuration at once.
+- **`PublishedView` must construct the view directly from `persistedDesiredSnapshot` and must NOT call `decryptSnapshot`.** Plaintext secrets never enter memory; desensitization is a structural guarantee (the `PublishedCredentialView` type has no `secret_key` / `secret_key_cipher` field), not "remember to delete a field."
+- **Never marshal `controlproto.DesiredState` or `persistedDesiredSnapshot` into the HTTP response.** `controlproto.DesiredCredential.SecretKey` has no `omitempty` and would write the plaintext secret into the response body.
+- The read path does NOT recompute or verify the content hash. Integrity remains the push path's responsibility (`BuildPushable`). The response carries the stored `content_hash` so an admin can compare it against the node's reported hash by hand.
+- Webhook `events` (a comma-separated string in `controlproto.DesiredWebhook`) is split into a `string[]` in the view, matching the draft API surface.
+- All slices are `[]T{}` (never nil) so the JSON never emits `null`.
+- Read-only query does not write an audit log, consistent with existing GET endpoints (`listNodes`, `getNode`, `listCredentials`). Auditing reads would drown the audit table.
+
+
 #### Delivery, reconnect, and observed state
 
 - New nodes advertise optional `authoritative_config_v1`. New Panels may keep an old node connected for health/observation but must reject authoritative pushes and record an actionable upgrade error when the capability is absent.
@@ -160,6 +173,10 @@ type AckPayload struct {
 - Anonymous object access to a bucket without a public managed ACL row -> S3 `403 AccessDenied`, including retained directories whose declaration was removed.
 - Managed direct bucket create/delete or cross-scope COPY with a bucket-bound credential -> S3 `403 AccessDenied`.
 - ACK says `synced` but version/hash differs from published state -> Panel records `drift` and does not present the node as synced.
+- `GET /desired-state` with no `desired_configs` row -> HTTP `200`, `published=false`, slices are `[]` not `null` (normal "node exists but nothing published yet" state, not an error).
+- `GET /desired-state` on a legacy/undecodable snapshot -> HTTP `200`, `published=true, republish_needed=true`, empty content slices; never backfills from draft, never returns 500.
+- `GET /desired-state` on unknown node id -> HTTP `404`.
+- `GET /desired-state` response body must never contain `secret_key`, `secret_key_cipher`, any plaintext secret, or the ciphertext string. Automated desensitization test is required.
 
 ### 5. Good/Base/Bad Cases
 
@@ -174,6 +191,8 @@ type AckPayload struct {
 - Bad: authorizing COPY only against the destination URL; the source is a separate read authorization boundary.
 - Bad: checking webhook duplicates or bucket bindings without holding the per-node draft lock through the subsequent write.
 - Bad: deleting or exposing a retained native directory merely because its Panel declaration changed.
+- Bad: marshaling `controlproto.DesiredState` into the `GET /desired-state` response. `DesiredCredential.SecretKey` has no `omitempty`, so it leaks the plaintext secret. Use `PublishedSnapshotView` / `PublishedCredentialView` (no secret fields) instead.
+- Bad: calling `decryptSnapshot` on the read path "to be helpful"--it pulls plaintext secrets into memory for a view that does not need them, and it couples a read to the master key (breaking inspection when the key is missing).
 
 ### 6. Tests Required
 

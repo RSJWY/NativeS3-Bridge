@@ -542,8 +542,13 @@ type publishResponse struct {
 }
 
 func (a *AdminAPI) desiredStateRoute(w http.ResponseWriter, r *http.Request, id uint, rest []string) {
+	// /api/admin/nodes/{id}/desired-state         GET  -> published snapshot view (脱敏,只读)
 	// /api/admin/nodes/{id}/desired-state         POST -> publish new version
 	// /api/admin/nodes/{id}/desired-state/push     POST -> push to online node
+	if len(rest) == 0 && r.Method == http.MethodGet {
+		a.getDesiredState(w, r, id)
+		return
+	}
 	if len(rest) == 0 && r.Method == http.MethodPost {
 		a.publishDesiredState(w, r, id)
 		return
@@ -553,6 +558,21 @@ func (a *AdminAPI) desiredStateRoute(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	writeTransportError(w, http.StatusNotFound, "not found")
+}
+
+// getDesiredState 返回已发布快照的脱敏视图。只读,不写审计日志(与既有
+// GET 端点 listNodes/getNode 一致,避免审计表被读操作淹没)。
+// 明文 secret 全程不进内存(PublishedView 跳过 decryptSnapshot)。
+func (a *AdminAPI) getDesiredState(w http.ResponseWriter, _ *http.Request, id uint) {
+	if _, ok := a.loadNode(w, id); !ok {
+		return
+	}
+	view, err := a.desired.PublishedView(id)
+	if err != nil {
+		writeTransportError(w, http.StatusInternalServerError, "query desired state failed")
+		return
+	}
+	writeTransportJSON(w, http.StatusOK, view)
 }
 
 func (a *AdminAPI) publishDesiredState(w http.ResponseWriter, r *http.Request, id uint) {

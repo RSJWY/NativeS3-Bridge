@@ -236,10 +236,11 @@ Correct:
 ### 2. Signatures
 
 - Node status: `PanelNode.draft_dirty`, `publish_required`, `desired_version`, `applied_version`, `sync_state`, and optional `last_error`.
-- Typed resources: `PanelBucket`, `PanelCredential`, `PanelCreatedCredential`, `PanelWebhook`, `PanelRateLimit`, `PanelImportSummary`, and `PanelPublishResult`.
-- Client methods: `list/create/update/deleteNodeBucket`, `list/create/update/delete/rotateNodeCredential`, `list/create/update/deleteNodeWebhook`, `get/update/resetNodeRateLimit`, `get/request/confirm/abortNodeImport`, `publishNodeDesiredState`, and `pushNodeDesiredState`.
+- Typed resources: `PanelBucket`, `PanelCredential`, `PanelCreatedCredential`, `PanelWebhook`, `PanelRateLimit`, `PanelImportSummary`, `PanelPublishResult`, and `PanelPublishedSnapshot` with `PanelPublishedCredential` / `PanelPublishedBucket` / `PanelPublishedWebhook` / `PanelPublishedRateLimit`.
+- Client methods: `list/create/update/deleteNodeBucket`, `list/create/update/delete/rotateNodeCredential`, `list/create/update/deleteNodeWebhook`, `get/update/resetNodeRateLimit`, `get/request/confirm/abortNodeImport`, `publishNodeDesiredState`, `pushNodeDesiredState`, and `getNodeDesiredState`.
 - Focused components:
   - `PanelNodeImportSection.vue`
+  - `PanelNodeConfigSection.vue`
   - `PanelNodeBucketsSection.vue`
   - `PanelNodeCredentialsSection.vue`
   - `PanelNodeWebhooksSection.vue`
@@ -260,6 +261,8 @@ Correct:
 - Import is a visible state machine: request online node -> review redacted summary -> confirm or abort. Confirm copy states that no authoritative rows are written before confirmation.
 - `ApiError.status` is preserved for UI decisions. Pending import `404` is normalized to `null`; `409` and `504` receive specific, visible messages.
 - Every path component such as access key or bucket name uses `encodeURIComponent`. All async event handlers catch and display failures; no unhandled promise rejection is acceptable.
+- `PanelNodeConfigSection.vue` is a **read-only** section that renders the desensitized published snapshot from `getNodeDesiredState(id)`. It has no `changed` emit. Its heading copy must state it is the published snapshot and **must not claim to be the node's currently-effective configuration**--the panel only knows version/hash, not node-actual content; saying otherwise misleads drift debugging. It must cover loading/error, no-publish empty state, `republish_needed` legacy state, and per-subresource empty copy (no buckets/credentials/webhooks/rate-limit).
+- The published view uses dedicated `PanelPublished*` types, not `PanelBucket`/`PanelWebhook`: the snapshot has no `id`/`node_id`/`created_at`, and reusing the draft types is a `vue-tsc` error by design (type-level guard against field drift).
 
 ### 4. Validation & Error Matrix
 
@@ -282,6 +285,7 @@ Correct:
 - Bad: changing a draft and labeling “push” as though it sends those edits.
 - Bad: storing secret/token values in localStorage, parent/global state, route state, or a reusable API cache.
 - Bad: saying a bucket is hidden immediately after deleting its draft declaration.
+- Bad: labeling the `PanelNodeConfigSection` view as "节点当前生效配置" (node's currently-effective config). It is the published snapshot only; in `waiting`/`failed`/`drift` states the node may differ.
 
 ### 6. Tests Required
 

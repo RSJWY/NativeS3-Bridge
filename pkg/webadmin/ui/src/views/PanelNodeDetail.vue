@@ -72,6 +72,7 @@
       </section>
 
       <PanelNodeImportSection :node-id="nodeID" :online="node.online" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" @changed="refreshNode" @confirmed="handleImportConfirmed" />
+      <PanelNodeConfigSection :node-id="nodeID" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" />
       <PanelNodeBucketsSection :node-id="nodeID" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" @changed="handleDraftChanged" />
       <PanelNodeCredentialsSection :node-id="nodeID" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" @changed="handleDraftChanged" />
       <PanelNodeWebhooksSection :node-id="nodeID" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" @changed="handleDraftChanged" />
@@ -121,6 +122,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { adminApi, type PanelCertificate, type PanelNode, type PanelPublishResult, type PanelRegistrationToken } from '../api/client'
 import PanelNodeBucketsSection from '../components/panel/PanelNodeBucketsSection.vue'
+import PanelNodeConfigSection from '../components/panel/PanelNodeConfigSection.vue'
 import PanelNodeCredentialsSection from '../components/panel/PanelNodeCredentialsSection.vue'
 import PanelNodeImportSection from '../components/panel/PanelNodeImportSection.vue'
 import PanelNodeLogsSection from '../components/panel/PanelNodeLogsSection.vue'

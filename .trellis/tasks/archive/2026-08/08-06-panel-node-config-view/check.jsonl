@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/panel-authoritative-config-guidelines.md", "reason": "验收：响应无 secret_key/secret_key_cipher，publish/push 零变化"}
+{"file": ".trellis/spec/frontend/webadmin-ui-guidelines.md", "reason": "验收：区域状态齐全、文案不声称节点实况"}
