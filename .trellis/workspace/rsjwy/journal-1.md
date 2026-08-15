@@ -877,3 +877,37 @@ Planned, implemented, and verified the Panel node health dashboard with authenti
 ### Next Steps
 
 - None - task complete
+
+
+## Session 27: Complete node telemetry foundation
+
+**Date**: 2026-08-15
+**Task**: Complete node telemetry foundation
+**Branch**: `main`
+
+### Summary
+
+Implemented and hardened node storage telemetry end to end: persistent counters, optional heartbeats, Panel aggregation/dashboard, mutation-rebuild locking, durable fail-closed invalidation, exact byte/object and stale browser E2E coverage. Full Go tests, race checks, vet/build, UI build, and local Panel/Node ChromeDriver gate passed.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ae26bdd` | (see git log) |
+| `5b1a460` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
