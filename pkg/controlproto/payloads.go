@@ -79,6 +79,9 @@ func (h HeartbeatPayload) Telemetry() (HeartbeatTelemetry, bool) {
 	if h.UsedBytesTotal == nil || h.ObjectCount == nil {
 		return HeartbeatTelemetry{}, false
 	}
+	if *h.UsedBytesTotal < 0 || *h.ObjectCount < 0 {
+		return HeartbeatTelemetry{}, false
+	}
 	observed := strings.TrimSpace(h.ObservedAt)
 	if observed == "" {
 		return HeartbeatTelemetry{}, false

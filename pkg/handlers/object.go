@@ -61,6 +61,10 @@ func NewObjectHandlerWithHooks(backend storage.Backend, commit UsageCommitter, e
 }
 
 func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	// The node-wide telemetry gate prevents a rebuild scan from overlapping
+	// native writes; the key shard keeps same-key head/write/accounting atomic.
+	unlock := lockTelemetryObject(h.telemetry, bucket, key)
+	defer unlock()
 	reservation, replacedBytes, replaced, ok := h.reserveDeclaredWrite(w, r, bucket, key)
 	if !ok {
 		return
@@ -225,6 +229,8 @@ func (h *ObjectHandler) Head(w http.ResponseWriter, r *http.Request, bucket, key
 }
 
 func (h *ObjectHandler) Delete(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	unlock := lockTelemetryObject(h.telemetry, bucket, key)
+	defer unlock()
 	deletedSize := int64(0)
 	deleted := false
 	info, headErr := h.backend.HeadObject(bucket, key)

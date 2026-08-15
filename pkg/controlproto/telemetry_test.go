@@ -73,6 +73,8 @@ func TestHeartbeatTelemetryPartialOrMalformedIsUnavailable(t *testing.T) {
 		{"missing observed_at", `{"applied_version":1,"used_bytes_total":10,"object_count":3}`},
 		{"empty observed_at", `{"applied_version":1,"used_bytes_total":10,"object_count":3,"observed_at":""}`},
 		{"malformed observed_at", `{"applied_version":1,"used_bytes_total":10,"object_count":3,"observed_at":"yesterday"}`},
+		{"negative bytes", `{"applied_version":1,"used_bytes_total":-1,"object_count":3,"observed_at":"2026-08-15T12:00:00Z"}`},
+		{"negative count", `{"applied_version":1,"used_bytes_total":10,"object_count":-1,"observed_at":"2026-08-15T12:00:00Z"}`},
 		{"non-numeric bytes", `{"applied_version":1,"used_bytes_total":"10","object_count":3,"observed_at":"2026-08-15T12:00:00Z"}`},
 	}
 	for _, tc := range cases {

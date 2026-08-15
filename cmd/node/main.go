@@ -124,14 +124,14 @@ func main() {
 	// 节点级存储遥测:计数器注入 S3 处理器,基线扫描在开始接受流量之前同步
 	// 完成一次(已有 native 文件获得真实初值,且不与在线写入产生扫描竞态)。
 	// 基线失败不阻塞 S3 服务:遥测保持"不可用",等待显式 reconcile 重建。
-	telemetryRecorder := nodeagent.NewStorageTelemetryRecorder(gdb)
+	telemetryRecorder := nodeagent.NewStorageTelemetryRecorder(gdb, cfg.Storage.DataRoot)
 	s3Server.SetTelemetryRecorder(telemetryRecorder)
-	if err := nodeagent.EnsureStorageTelemetryBaseline(gdb, cfg.Storage.DataRoot, cfg.Storage.MetadataSuffix); err != nil {
+	if err := telemetryRecorder.EnsureStorageTelemetryBaseline(cfg.Storage.DataRoot, cfg.Storage.MetadataSuffix); err != nil {
 		slog.Error("storage telemetry baseline failed; telemetry stays unavailable until rebuild", "error", err)
 	}
 
 	// Control-plane agent: registration (first boot) + mTLS client loop.
-	agentDone := startAgent(ctx, cfg, gdb, credentialStore, bucketStore, hookManager, rateLimitController, logRing)
+	agentDone := startAgent(ctx, cfg, gdb, credentialStore, bucketStore, hookManager, rateLimitController, logRing, telemetryRecorder)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- s3Server.Run(ctx) }()
@@ -182,7 +182,7 @@ func probeS3Listener(cfg *config.NodeConfig) error {
 // certificate exists yet) and runs the control-plane client loop in the
 // background. It returns a channel closed when the agent loop exits. Agent
 // failures never stop the S3 data plane (safety net A).
-func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, invalidator nodeagent.CredentialInvalidator, bucketInvalidator nodeagent.BucketInvalidator, hookReplacer nodeagent.WebhookReplacer, rateLimitUpdater nodeagent.RateLimitUpdater, logRing *loggingpkg.Ring) <-chan struct{} {
+func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, invalidator nodeagent.CredentialInvalidator, bucketInvalidator nodeagent.BucketInvalidator, hookReplacer nodeagent.WebhookReplacer, rateLimitUpdater nodeagent.RateLimitUpdater, logRing *loggingpkg.Ring, telemetryRecorder *nodeagent.StorageTelemetryRecorder) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -224,6 +224,7 @@ func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, inval
 			DataRoot:              cfg.Storage.DataRoot,
 		})
 		runner := nodeagent.NewLocalTaskRunner(gdb, logRing, cfg.Storage.DataRoot, cfg.Storage.MetadataSuffix, invalidator)
+		runner.SetTelemetryRecorder(telemetryRecorder)
 		client := nodeagent.NewClient(nodeagent.ClientConfig{
 			AgentURL:          cfg.Panel.AgentURL,
 			NodeID:            cfg.Panel.NodeID,
@@ -231,6 +232,7 @@ func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, inval
 			Region:            cfg.Region,
 			HeartbeatInterval: cfg.Panel.HeartbeatInterval,
 		}, gdb, executor, runner)
+		client.SetTelemetryRecorder(telemetryRecorder)
 
 		if err := client.Run(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("control-plane agent stopped", "error", err)

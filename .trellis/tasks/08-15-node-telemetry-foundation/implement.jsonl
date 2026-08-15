@@ -1,0 +1,5 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Telemetry crosses Node storage/accounting, control protocol, Panel persistence/API, and Vue UI; use the boundary checklist for nullable fields, timestamps, and aggregation semantics."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Defines additive migration, GORM model, SQLite, and persistence/test conventions for Node and Panel state tables."}
+{"file":".trellis/spec/backend/storage-guidelines.md","reason":"Defines native object, sidecar, reconciliation, and exclusion rules that the startup baseline must reuse."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Defines authenticated Panel admin API response, route, and sensitive-data conventions."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Defines typed API client, Panel/standalone route isolation, dashboard loading/error states, and UI regression requirements."}

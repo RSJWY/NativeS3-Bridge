@@ -6,6 +6,10 @@ package handlers
 // 失败的存储变更绝不调用它。实现方负责把失败记账显式标记为遥测不可用,
 // 而不是伪造 0;standalone 构造路径保持 nil,行为不变。
 type TelemetryRecorder interface {
+	// BeginMutation keeps a storage mutation and its telemetry accounting in
+	// one shared critical section. Rebuilds take the exclusive side of the same
+	// gate, so a filesystem scan can never overlap native object changes.
+	BeginMutation() func()
 	RecordMutation(deltaBytes, deltaObjects int64)
 }
 

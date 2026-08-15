@@ -73,10 +73,11 @@ func (c *ClientConfig) applyDefaults() {
 // maintains heartbeats. All control-plane failures are non-fatal to the S3 data
 // plane; the client simply reconnects with backoff.
 type Client struct {
-	cfg      ClientConfig
-	db       *gorm.DB
-	executor *Executor
-	runner   TaskRunner
+	cfg       ClientConfig
+	db        *gorm.DB
+	executor  *Executor
+	runner    TaskRunner
+	telemetry *StorageTelemetryRecorder
 
 	writeMu sync.Mutex
 	ws      *websocket.Conn
@@ -94,6 +95,12 @@ type TaskRunner interface {
 func NewClient(cfg ClientConfig, gdb *gorm.DB, executor *Executor, runner TaskRunner) *Client {
 	cfg.applyDefaults()
 	return &Client{cfg: cfg, db: gdb, executor: executor, runner: runner}
+}
+
+// SetTelemetryRecorder wires the recorder shared with the S3 handlers and task
+// runner, including its in-memory fail-closed latch.
+func (c *Client) SetTelemetryRecorder(recorder *StorageTelemetryRecorder) {
+	c.telemetry = recorder
 }
 
 // Run connects and services the control plane until ctx is cancelled, retrying
@@ -398,6 +405,9 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 			// 遥测快照是单行数据库读(不可用时字段全部省略);心跳路径
 			// 绝不触发文件系统扫描。
 			payload := HeartbeatTelemetrySnapshot(c.db)
+			if c.telemetry != nil {
+				payload = c.telemetry.HeartbeatTelemetrySnapshot()
+			}
 			payload.AppliedVersion = meta.AppliedVersion
 			if err := c.sendMessage(ctx, ws, controlproto.TypeHeartbeat, "", payload); err != nil {
 				slog.Debug("heartbeat send failed", "error", err)

@@ -80,6 +80,8 @@ func (h *MultipartHandler) UploadPart(w http.ResponseWriter, r *http.Request, bu
 }
 
 func (h *MultipartHandler) Complete(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	unlock := lockTelemetryObject(h.telemetry, bucket, key)
+	defer unlock()
 	var req completeMultipartUploadRequest
 	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)

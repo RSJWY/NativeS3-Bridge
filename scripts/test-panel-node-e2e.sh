@@ -720,6 +720,110 @@ for name in ("E2E_SECRET_KEY", "E2E_REGISTRATION_TOKEN", "E2E_ADMIN_PASSWORD"):
 PY
 }
 
+assert_panel_telemetry_reflects_s3_mutations() {
+	local survivor_src="$1"
+	local summary="$TMP_DIR/telemetry-summary.json"
+	local expected_bytes
+	expected_bytes="$(wc -c <"$survivor_src" | tr -d '[:space:]')"
+	local deadline=$((SECONDS + TIMEOUT))
+	# 节点心跳间隔 1s,过期阈值 1s*3。空闲健康节点的 observed_at 由心跳持续
+	# 刷新,summary 中节点 1 必须稳定为 valid 并贡献对象数。
+	while ((SECONDS < deadline)); do
+		api_request GET /api/admin/dashboard/summary
+		if [[ "$API_STATUS" == 200 ]]; then
+			cp "$API_BODY" "$summary"
+			if python3 - "$summary" "$expected_bytes" <<'PY'
+import json, sys
+obj = json.load(open(sys.argv[1], encoding="utf-8"))
+t = obj.get("telemetry") or {}
+nodes = t.get("nodes") or []
+row = next((n for n in nodes if n.get("node_id") == 1), None)
+if row is None or row.get("status") != "valid":
+    raise SystemExit(2)
+oc = row.get("object_count")
+if oc != 1 or row.get("used_bytes") != int(sys.argv[2]) or t.get("object_count") != 1 or t.get("used_bytes_total") != int(sys.argv[2]):
+    raise SystemExit(3)
+PY
+			then break; fi
+		fi
+		sleep 0.3
+	done
+	if [[ "$API_STATUS" != 200 ]]; then
+		fail "Panel dashboard summary returned HTTP ${API_STATUS:-000}"
+	fi
+	local status oc used
+	status="$(python3 -c "import json;print(next((n for n in (json.load(open('$summary'))['telemetry']['nodes']) if n['node_id']==1),{}).get('status'))")"
+	oc="$(python3 -c "import json;print(next((n for n in (json.load(open('$summary'))['telemetry']['nodes']) if n['node_id']==1),{}).get('object_count'))")"
+	used="$(python3 -c "import json;print(next((n for n in (json.load(open('$summary'))['telemetry']['nodes']) if n['node_id']==1),{}).get('used_bytes'))")"
+	[[ "$status" == "valid" ]] || fail "Panel telemetry for node 1 is '$status', want valid"
+	[[ "$oc" == "1" ]] || fail "Panel telemetry object_count for node 1 is '$oc', want 1 after survivor PUT"
+	[[ "$used" == "$expected_bytes" ]] || fail "Panel telemetry used_bytes for node 1 is '$used', want $expected_bytes"
+	record 'Panel dashboard summary reflects live node telemetry (valid + used_bytes + object_count)'
+
+	# 删除唯一存活对象后,容量与对象数都必须回落到 0(而非失效),证明计数
+	# 随 S3 变更增量推进、空闲刷新没把节点判过期。
+	s3_expect 204 DELETE "/$BUCKET_NAME/e2e/survivor.txt" "$TMP_DIR/survivor-delete.out"
+	deadline=$((SECONDS + TIMEOUT))
+	while ((SECONDS < deadline)); do
+		api_request GET /api/admin/dashboard/summary
+		[[ "$API_STATUS" == 200 ]] || fail "Panel dashboard summary returned HTTP ${API_STATUS:-000}"
+		cp "$API_BODY" "$summary"
+		if python3 - "$summary" <<'PY'
+import json, sys
+obj = json.load(open(sys.argv[1], encoding="utf-8"))
+t = obj.get("telemetry", {})
+nodes = t.get("nodes") or []
+row = next((n for n in nodes if n.get("node_id") == 1), None)
+status = (row or {}).get("status")
+oc = (row or {}).get("object_count")
+used = (row or {}).get("used_bytes")
+if status != "valid" or oc != 0 or used != 0:
+    raise SystemExit(2)
+if t.get("object_count") != 0 or t.get("used_bytes_total") != 0:
+    raise SystemExit(3)
+PY
+		then break; fi
+		sleep 0.3
+	done
+	if [[ "$API_STATUS" != 200 ]]; then
+		fail "Panel dashboard summary returned HTTP ${API_STATUS:-000}"
+	fi
+	oc="$(python3 -c "import json;print(next((n for n in (json.load(open('$summary'))['telemetry']['nodes']) if n['node_id']==1),{}).get('object_count'))")"
+	used="$(python3 -c "import json;print(next((n for n in (json.load(open('$summary'))['telemetry']['nodes']) if n['node_id']==1),{}).get('used_bytes'))")"
+	[[ "$oc" == "0" && "$used" == "0" ]] || fail "Panel telemetry after DELETE is ${used} bytes/${oc} objects, want 0/0"
+	record 'Panel telemetry tracks S3 DELETE capacity and object count back to zero'
+
+	# 恢复一个 survivor 对象,保证后续 Panel outage/restart 断言可复用。
+	printf 'survives panel and node restart\n' >"$survivor_src"
+	s3_expect 200 PUT "/$BUCKET_NAME/e2e/survivor.txt" "$TMP_DIR/survivor-restore.out" "$survivor_src"
+	record 'Panel telemetry tracks S3 DELETE then PUT (object_count 1 -> 0 -> 1)'
+}
+
+assert_panel_telemetry_stale() {
+	local summary="$TMP_DIR/telemetry-stale-summary.json"
+	local deadline=$((SECONDS + TIMEOUT))
+	while ((SECONDS < deadline)); do
+		api_request GET /api/admin/dashboard/summary
+		if [[ "$API_STATUS" == 200 ]]; then
+			cp "$API_BODY" "$summary"
+			if python3 - "$summary" <<'PY'
+import json, sys
+obj = json.load(open(sys.argv[1], encoding="utf-8"))
+t = obj.get("telemetry", {})
+row = next((n for n in (t.get("nodes") or []) if n.get("node_id") == 1), None)
+if (row or {}).get("status") != "stale" or t.get("valid_nodes") != 0 or (t.get("stale_nodes") or 0) < 1:
+    raise SystemExit(2)
+PY
+			then
+				record 'Panel dashboard marks stopped node telemetry stale and excludes it from totals'
+				return 0
+			fi
+		fi
+		sleep 0.3
+	done
+	fail 'Panel dashboard did not expose stale telemetry for the stopped node'
+}
+
 query_node_logs() {
 	local request_file="$TMP_DIR/node-log-query.json" task_id deadline=$((SECONDS + TIMEOUT)) state
 	printf '%s\n' '{"type":"log_query","params":{"level":"INFO","keyword":"s3 request","limit":10}}' >"$request_file"
@@ -749,16 +853,28 @@ run_browser_gate() {
 		record 'browser gate skipped by request'
 		return 0
 	fi
-	local browser_report="$TMP_DIR/browser-report.json"
-	E2E_ADMIN_PASSWORD="$ADMIN_PASSWORD" python3 scripts/internal/e2e-browser.py \
-		--panel-url "$PANEL_ADMIN_URL" \
-		--expected-node-name "$NODE_NAME" \
-		--timeout "$TIMEOUT" \
-		--report "$browser_report" \
+	local expected_status="${1:-valid}"
+	local telemetry_only="${2:-0}"
+	local browser_report="$TMP_DIR/browser-report-${expected_status}.json"
+	local browser_args=(
+		--panel-url "$PANEL_ADMIN_URL"
+		--expected-node-name "$NODE_NAME"
+		--expected-telemetry-status "$expected_status"
+		--timeout "$TIMEOUT"
+		--report "$browser_report"
+	)
+	if [[ "$telemetry_only" == 1 ]]; then
+		browser_args+=(--telemetry-only)
+	fi
+	E2E_ADMIN_PASSWORD="$ADMIN_PASSWORD" python3 scripts/internal/e2e-browser.py "${browser_args[@]}" \
 		>"$TMP_DIR/browser.stdout" 2>"$TMP_DIR/browser.stderr" || {
 			fail "browser gate failed: $(redact_text <"$TMP_DIR/browser.stderr" 2>/dev/null || true)"
 		}
-	record 'ChromeDriver Panel /panel-dashboard -> /nodes -> /logs and API boundary assertions'
+	if [[ "$telemetry_only" == 1 ]]; then
+		record "ChromeDriver Panel telemetry status assertion ($expected_status)"
+	else
+		record 'ChromeDriver Panel /panel-dashboard -> /nodes -> /logs and API boundary assertions'
+	fi
 }
 
 main() {
@@ -861,6 +977,9 @@ main() {
 	printf 'survives panel and node restart\n' >"$survivor_src"
 	s3_expect 200 PUT "/$BUCKET_NAME/e2e/survivor.txt" "$TMP_DIR/survivor-put.out" "$survivor_src"
 	record 'SigV4 bucket confirmation and object PUT/HEAD/GET/DELETE byte checks'
+
+	assert_panel_telemetry_reflects_s3_mutations "$survivor_src"
+
 	query_node_logs
 
 	# Panel outage: Node keeps serving its S3 listener and reconnects after the
@@ -887,6 +1006,8 @@ main() {
 	local key_before key_after
 	key_before="$(sha256sum "$TMP_DIR/node-data/pki/node.key" | awk '{print $1}')"
 	stop_node
+	assert_panel_telemetry_stale
+	run_browser_gate stale 1
 	write_configs ''
 	start_node
 	wait_s3 "$NODE_S3_URL" node-after-restart
@@ -917,7 +1038,7 @@ main() {
 	stop_wrong_node
 	s3_expect 204 DELETE "/$BUCKET_NAME/e2e/survivor.txt" "$TMP_DIR/survivor-delete.out"
 
-	run_browser_gate
+	run_browser_gate valid
 	record 'registration response-loss replay: pkg/nodeagent package regression evidence runs in quality gate'
 	record 'PASS: Panel -> Node release gate complete'
 	printf 'panel-node-e2e passed (%s mode)\n' "$MODE"

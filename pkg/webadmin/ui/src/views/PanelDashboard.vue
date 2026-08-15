@@ -66,7 +66,7 @@
     <section class="panel">
       <h2>节点存储遥测</h2>
       <div class="table-scroll">
-        <table class="data-table panel-attention-table">
+        <table class="data-table panel-attention-table panel-telemetry-table">
           <thead>
             <tr>
               <th>节点</th>

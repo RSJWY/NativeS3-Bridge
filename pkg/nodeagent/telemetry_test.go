@@ -1,6 +1,7 @@
 package nodeagent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -122,17 +123,128 @@ func TestStorageTelemetryInvalidNotRevivedByMutations(t *testing.T) {
 	}
 }
 
-func TestStorageTelemetryNegativeDeltasClampToZero(t *testing.T) {
+// 负数或溢出代表计数不再可靠:截断仅保留可读行内容,必须显式失效,
+// 绝不能带着 Valid 把 0 当成观测值上报。
+func TestStorageTelemetryNegativeDeltaInvalidates(t *testing.T) {
 	gdb := setupTelemetryDB(t)
 	rec := NewStorageTelemetryRecorder(gdb)
-	rec.RecordMutation(-50, -2)
+	if err := RebuildStorageTelemetry(gdb, t.TempDir(), ""); err != nil {
+		t.Fatal(err)
+	}
+	rec.RecordMutation(20, 2)
+	rec.RecordMutation(-50, -3)
 
 	var row StorageTelemetry
 	if err := gdb.First(&row, StorageTelemetryID).Error; err != nil {
 		t.Fatal(err)
 	}
+	if row.Valid {
+		t.Fatal("negative delta must invalidate telemetry")
+	}
 	if row.UsedBytesTotal != 0 || row.ObjectCount != 0 {
 		t.Fatalf("counters = %d/%d, want clamped 0/0", row.UsedBytesTotal, row.ObjectCount)
+	}
+	if _, ok, _ := LoadStorageTelemetry(gdb); ok {
+		t.Fatal("invalidated telemetry must not load as available")
+	}
+}
+
+// 整数溢出同样失效:字节计数回绕后不再是观测值。
+func TestStorageTelemetryOverflowInvalidates(t *testing.T) {
+	gdb := setupTelemetryDB(t)
+	rec := NewStorageTelemetryRecorder(gdb)
+	if err := RebuildStorageTelemetry(gdb, t.TempDir(), ""); err != nil {
+		t.Fatal(err)
+	}
+	var row StorageTelemetry
+	if err := gdb.First(&row, StorageTelemetryID).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 把基线推到接近 int64 上界再叠加正增量。
+	gdb.Model(&StorageTelemetry{}).Where("id = ?", StorageTelemetryID).
+		Update("used_bytes_total", int64(1)<<62)
+	rec.RecordMutation((int64(1)<<62)+10, 0)
+	if err := gdb.First(&row, StorageTelemetryID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Valid {
+		t.Fatal("overflow must invalidate telemetry")
+	}
+}
+
+// 在线 reconcile 与 S3 写入必须由同一个 recorder 串行化。变更门闩从文件
+// 写入前一直持有到增量落库后,所以重建不能在两者之间扫描并重复计数。
+func TestStorageTelemetryRebuildWaitsForMutationAccounting(t *testing.T) {
+	gdb := setupTelemetryDB(t)
+	root := t.TempDir()
+	bucket := filepath.Join(root, "bucket-a")
+	if err := os.MkdirAll(bucket, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := NewStorageTelemetryRecorder(gdb, root)
+	if err := rec.RebuildStorageTelemetry(root, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	endMutation := rec.BeginMutation()
+	if err := os.WriteFile(filepath.Join(bucket, "late-object"), []byte("1234567"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec.RecordMutation(7, 1)
+	done := make(chan error, 1)
+	go func() { done <- rec.RebuildStorageTelemetry(root, "") }()
+	select {
+	case err := <-done:
+		t.Fatalf("rebuild completed while mutation guard was held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	endMutation()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	telemetry, ok, err := LoadStorageTelemetry(gdb)
+	if err != nil || !ok {
+		t.Fatalf("telemetry unavailable: ok=%v err=%v", ok, err)
+	}
+	if telemetry.UsedBytesTotal != 7 || telemetry.ObjectCount != 1 {
+		t.Fatalf("mutation was double counted: got %d/%d, want 7/1",
+			telemetry.UsedBytesTotal, telemetry.ObjectCount)
+	}
+}
+
+// 持久化失效标记优先于数据库中的旧 Valid 行。节点重启后仍省略遥测,
+// 直到同步基线重建成功并清除标记。
+func TestStorageTelemetryInvalidMarkerSurvivesRestart(t *testing.T) {
+	gdb := setupTelemetryDB(t)
+	root := t.TempDir()
+	rec := NewStorageTelemetryRecorder(gdb, root)
+	if err := rec.RebuildStorageTelemetry(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec.Invalidate("simulated accounting failure")
+	if _, err := os.Stat(telemetryInvalidMarkerPath(root)); err != nil {
+		t.Fatalf("invalidation must persist marker: %v", err)
+	}
+	// Simulate a stale/failed DB invalidation write: the durable marker must
+	// still win over a row that says Valid=true after restart.
+	if err := gdb.Model(&StorageTelemetry{}).Where("id = ?", StorageTelemetryID).
+		Update("valid", true).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewStorageTelemetryRecorder(gdb, root)
+	payload := restarted.HeartbeatTelemetrySnapshot()
+	if payload.UsedBytesTotal != nil || payload.ObjectCount != nil || payload.ObservedAt != "" {
+		t.Fatalf("invalid marker must suppress stale DB telemetry: %+v", payload)
+	}
+	if err := restarted.EnsureStorageTelemetryBaseline(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(telemetryInvalidMarkerPath(root)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("successful rebuild must clear invalid marker, stat err=%v", err)
+	}
+	if _, ok := restarted.HeartbeatTelemetrySnapshot().Telemetry(); !ok {
+		t.Fatal("successful rebuild must restore heartbeat telemetry")
 	}
 }
 
@@ -270,5 +382,36 @@ func TestHeartbeatTelemetrySnapshotFields(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339Nano, payload.ObservedAt); err != nil {
 		t.Fatalf("observed_at must be RFC3339: %v", err)
+	}
+}
+
+// 空闲健康节点的心跳必须推进 observed_at:否则 Panel 用它判断过期,最后一次
+// 存储变更超过阈值后,没有任何写入的健康节点会被误判为遥测过期。
+func TestHeartbeatTelemetrySnapshotRefreshesIdleObservedAt(t *testing.T) {
+	gdb := setupTelemetryDB(t)
+	if err := RebuildStorageTelemetry(gdb, t.TempDir(), ""); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().UTC().Add(-10 * time.Minute)
+	if err := gdb.Model(&StorageTelemetry{}).Where("id = ?", StorageTelemetryID).
+		Updates(map[string]any{"observed_at": stale, "updated_at": stale}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	before := time.Now().UTC()
+	payload := HeartbeatTelemetrySnapshot(gdb)
+	observed, err := time.Parse(time.RFC3339Nano, payload.ObservedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Before(before) {
+		t.Fatalf("heartbeat must refresh observed_at, got %v before %v", observed, before)
+	}
+	var row StorageTelemetry
+	if err := gdb.First(&row, StorageTelemetryID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.ObservedAt.Before(before) {
+		t.Fatalf("refreshed observed_at must persist, got %v", row.ObservedAt)
 	}
 }

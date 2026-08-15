@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/auth"
@@ -18,6 +19,8 @@ import (
 type telemetryRecorderFake struct {
 	mutations [][2]int64
 }
+
+func (f *telemetryRecorderFake) BeginMutation() func() { return func() {} }
 
 func (f *telemetryRecorderFake) RecordMutation(deltaBytes, deltaObjects int64) {
 	f.mutations = append(f.mutations, [2]int64{deltaBytes, deltaObjects})
@@ -200,6 +203,38 @@ func TestTelemetryBatchDeleteMixesExistingAndMissing(t *testing.T) {
 	gotBytes, gotObjects := recorder.total()
 	if gotBytes != -4 || gotObjects != -2 {
 		t.Fatalf("batch delete deltas = %d bytes / %d objects, want -4 / -2", gotBytes, gotObjects)
+	}
+}
+
+// 并发 PUT 同一 key:磁盘上最终只有一个对象,对象数增量合计必须恰好 +1。
+// 回归防护:分片锁让 head -> 写入 -> 记账对同一 key 原子。
+func TestTelemetryConcurrentPutSameKeyCountsOnce(t *testing.T) {
+	h, recorder, backend := newTelemetryTestHandler(t)
+	const writers = 8
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, rr := authedPut("race.txt", "body")
+			h.Put(rr, req, "test-bucket", "race.txt")
+			if rr.Code != http.StatusOK {
+				t.Errorf("concurrent put = %d", rr.Code)
+			}
+		}()
+	}
+	wg.Wait()
+
+	_, objects := recorder.total()
+	if objects != 1 {
+		t.Fatalf("same-key concurrent put object delta = %d, want 1", objects)
+	}
+	listing, err := backend.ListObjects("test-bucket", "", "", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listing.Objects) != 1 {
+		t.Fatalf("disk objects = %d, want 1", len(listing.Objects))
 	}
 }
 

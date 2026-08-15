@@ -33,6 +33,8 @@ func CopySourceBucket(r *http.Request) (string, error) {
 // the x-amz-copy-source header; metadata is copied from the source unless
 // x-amz-metadata-directive is REPLACE.
 func (h *ObjectHandler) Copy(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	unlock := lockTelemetryObject(h.telemetry, bucket, key)
+	defer unlock()
 	srcBucket, srcKey, err := parseCopySource(r.Header.Get("x-amz-copy-source"))
 	if err != nil {
 		WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
@@ -184,30 +186,42 @@ func (h *ObjectHandler) DeleteObjects(w http.ResponseWriter, r *http.Request, bu
 		}
 		// Capture size/existence before deletion so quota usage and node
 		// telemetry can be decremented.
-		var deletedSize int64
-		deleted := false
-		if info, headErr := h.backend.HeadObject(bucket, obj.Key); headErr == nil {
-			deletedSize = info.Size
-			deleted = true
-		} else if !errors.Is(headErr, storage.ErrNoSuchKey) {
-			result.Errors = append(result.Errors, deleteError{Key: obj.Key, Code: deleteErrorCode(headErr), Message: "delete failed"})
+		if h.telemetry != nil {
+			// Each key mutation holds both the rebuild gate and its key shard.
+			unlock := lockTelemetryObject(h.telemetry, bucket, obj.Key)
+			h.deleteOne(r, bucket, obj.Key, req.Quiet, &result)
+			unlock()
 			continue
 		}
-		if err := h.backend.DeleteObject(bucket, obj.Key); err != nil {
-			result.Errors = append(result.Errors, deleteError{Key: obj.Key, Code: deleteErrorCode(err), Message: "delete failed"})
-			continue
-		}
-		// 逐个对象推进节点级计数:只有真正删除已存在对象才扣减。
-		recordTelemetry(h.telemetry, -deletedSize, telemetryDeleteObjectDelta(deleted))
-		if deletedSize > 0 {
-			h.commitUsage(r, -deletedSize, quota.OpDelete)
-			h.emitObjectEvent(r, hooks.ObjectDeleted, bucket, obj.Key, storage.ObjectInfo{Key: obj.Key, Size: deletedSize})
-		}
-		if !req.Quiet {
-			result.Deleted = append(result.Deleted, deletedObject{Key: obj.Key})
-		}
+		h.deleteOne(r, bucket, obj.Key, req.Quiet, &result)
 	}
 	WriteXML(w, http.StatusOK, result)
+}
+
+// deleteOne 执行单个对象的 head -> 删除 -> 记账,结果写入 result。
+func (h *ObjectHandler) deleteOne(r *http.Request, bucket, key string, quiet bool, result *deleteResult) {
+	var deletedSize int64
+	deleted := false
+	if info, headErr := h.backend.HeadObject(bucket, key); headErr == nil {
+		deletedSize = info.Size
+		deleted = true
+	} else if !errors.Is(headErr, storage.ErrNoSuchKey) {
+		result.Errors = append(result.Errors, deleteError{Key: key, Code: deleteErrorCode(headErr), Message: "delete failed"})
+		return
+	}
+	if err := h.backend.DeleteObject(bucket, key); err != nil {
+		result.Errors = append(result.Errors, deleteError{Key: key, Code: deleteErrorCode(err), Message: "delete failed"})
+		return
+	}
+	// 逐个对象推进节点级计数:只有真正删除已存在对象才扣减。
+	recordTelemetry(h.telemetry, -deletedSize, telemetryDeleteObjectDelta(deleted))
+	if deletedSize > 0 {
+		h.commitUsage(r, -deletedSize, quota.OpDelete)
+		h.emitObjectEvent(r, hooks.ObjectDeleted, bucket, key, storage.ObjectInfo{Key: key, Size: deletedSize})
+	}
+	if !quiet {
+		result.Deleted = append(result.Deleted, deletedObject{Key: key})
+	}
 }
 
 func parseCopySource(header string) (bucket, key string, err error) {

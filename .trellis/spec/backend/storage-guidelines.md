@@ -262,3 +262,59 @@ etag, err := store.UploadPart(uploadID, partNumber, r.Body)
 ### 7. Wrong vs Correct
 - Wrong: infer objects from a database table or sidecars.
 - Correct: walk the native bucket directory with `ListObjects` exclusions because disk is the object truth source.
+
+## Scenario: Managed Node Storage Telemetry Accounting
+
+### 1. Scope / Trigger
+- Trigger: changes to managed Node PUT/Copy/Delete/Multipart success paths, node-level storage counters, heartbeat telemetry, or full telemetry rebuild/reconcile behavior.
+
+### 2. Signatures
+- `handlers.TelemetryRecorder.BeginMutation() func()`.
+- `handlers.TelemetryRecorder.RecordMutation(deltaBytes, deltaObjects int64)`.
+- `(*nodeagent.StorageTelemetryRecorder).RebuildStorageTelemetry(dataRoot, metadataSuffix string) error`.
+- `(*nodeagent.StorageTelemetryRecorder).HeartbeatTelemetrySnapshot() controlproto.HeartbeatPayload`.
+
+### 3. Contracts
+- One recorder instance is shared by the managed S3 handlers, heartbeat client, and local task runner. Standalone mode keeps the dependency nil.
+- Each object mutation holds the recorder's shared mutation guard from before the target existence/size read through native storage commit and counter persistence. Same-key mutations are additionally serialized across ordinary PUT, Copy, Delete, batch Delete, and Multipart Complete.
+- A full baseline/rebuild holds the exclusive mutation guard across `ScanDataRoot` and singleton-row persistence. Do not replace this with scan-start/scan-end epochs: a file can commit after the scan observes it but before its counter update advances the epoch, causing double counting.
+- Singleton counter read-modify-write operations are serialized in-process before entering a portable GORM transaction; do not depend on a database-specific row-lock clause.
+- Rebuild writes `.natives3-telemetry-invalid` under `data_root` before scanning and clears it only after a valid row is persisted. The in-memory invalid latch and marker suppress heartbeat telemetry even when the DB invalidation write fails or the process exits during rebuild.
+- Heartbeats read only the singleton row, refresh `observed_at` for an otherwise valid idle node, and omit all telemetry fields when the counter is missing, negative, invalid, or marker-latched. Missing telemetry is never encoded as zero.
+
+### 4. Validation & Error Matrix
+- Native mutation succeeds, counter update fails -> keep the S3 success, set the in-memory latch, persist the invalid marker, best-effort set `Valid=false`, and omit telemetry until rebuild.
+- Counter becomes negative or overflows -> clamp stored diagnostic values if needed, mark invalid, and omit telemetry.
+- Baseline scan/persist/marker-clear fails -> return an error and leave telemetry invalid; startup may continue serving S3 without telemetry.
+- Invalid marker exists after restart -> ignore a stale DB `Valid=true` row and force synchronous rebuild before reporting telemetry.
+- Complete non-negative counters plus RFC3339 observation -> report them, including legitimate `0/0`.
+
+### 5. Good/Base/Bad Cases
+- Good: concurrent same-key PUTs leave one native object and a net object delta of exactly `+1`; an overlapping reconcile waits until storage and counter state agree.
+- Base: an empty data root produces an explicit valid `0 bytes / 0 objects` snapshot.
+- Bad: scanning every heartbeat, summing credential quota rows, allowing rebuild to overlap a storage commit, or reviving an invalid row with a later increment.
+
+### 6. Tests Required
+- Unit tests cover PUT/overwrite/Copy/Delete/batch Delete/Multipart Complete, zero-byte objects, failed operations, same-key concurrency, negative/overflow invalidation, marker restart recovery, scan exclusions, and idle observation refresh.
+- A deterministic concurrency regression must hold `BeginMutation`, commit a file and counter delta, start rebuild, assert rebuild blocks, release the guard, and verify the final total is not doubled.
+- Run relevant packages with `go test -race`; full acceptance must verify exact bytes/object totals plus valid/stale dashboard states through the Panel API and ChromeDriver.
+
+### 7. Wrong vs Correct
+Wrong:
+
+```go
+startEpoch := loadEpoch()
+report := storage.ScanDataRoot(root, suffix)
+if loadEpoch() == startEpoch {
+    saveBaseline(report)
+}
+```
+
+Correct:
+
+```go
+recorder.mutationGate.Lock()
+defer recorder.mutationGate.Unlock()
+report := storage.ScanDataRoot(root, suffix)
+saveBaseline(report)
+```

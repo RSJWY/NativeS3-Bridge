@@ -1,0 +1,5 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Quality review must verify the complete telemetry data flow and reject implicit zero/null/date conversions at layer boundaries."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Quality review must verify additive migrations, nullable legacy compatibility, and no unsafe database backup or schema changes."}
+{"file":".trellis/spec/backend/storage-guidelines.md","reason":"Quality review must verify startup baseline counts exactly native objects and excludes sidecars, multipart data, and database files."}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"Quality review must verify auth/method handling, stable JSON, and absence of secrets or high-cardinality fields in the summary API."}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"Quality review must verify typed Panel UI states, standalone isolation, explicit missing/stale rendering, and build/browser checks."}

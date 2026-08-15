@@ -73,6 +73,17 @@ def _parse_args() -> argparse.Namespace:
         help="Node display name that must be visible in the Panel node list",
     )
     parser.add_argument(
+        "--expected-telemetry-status",
+        choices=("valid", "stale", "missing"),
+        default="valid",
+        help="Expected telemetry badge for the named node (default: valid)",
+    )
+    parser.add_argument(
+        "--telemetry-only",
+        action="store_true",
+        help="Stop after the dashboard telemetry assertion",
+    )
+    parser.add_argument(
         "--chromedriver",
         default=default_driver,
         help="ChromeDriver executable or command (auto-detected when omitted)",
@@ -549,9 +560,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             lambda: "需要关注的节点" in str(webdriver.execute("return document.body ? document.body.innerText : '';")),
             "Panel dashboard content",
         )
-        # Telemetry section: cards plus per-node rows must render.  A freshly
-        # registered node reports a valid zero snapshot (baseline scan), so the
-        # row badge is either 有效 or 未上报 -- never a fabricated value.
+        # Telemetry section: cards plus the named node's exact status must render.
         _wait_until(
             time.monotonic() + args.timeout,
             lambda: all(
@@ -560,14 +569,47 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "Panel dashboard telemetry section",
         )
+        telemetry_labels = {
+            "valid": "有效",
+            "stale": "已过期",
+            "missing": "未上报 / 不可用",
+        }
+        expected_telemetry_label = telemetry_labels[args.expected_telemetry_status]
+        expected_name = args.expected_node_name
         _wait_until(
             time.monotonic() + args.timeout,
-            lambda: any(
-                marker in str(webdriver.execute("return document.body ? document.body.innerText : '';"))
-                for marker in ("有效", "未上报 / 不可用")
+            lambda: bool(
+                webdriver.execute(
+                    """
+                    const [name, status] = arguments;
+                    return Array.from(document.querySelectorAll('.panel-telemetry-table tbody tr'))
+                      .some((row) => row.innerText.includes(name) && row.innerText.includes(status));
+                    """,
+                    [expected_name, expected_telemetry_label],
+                )
             ),
-            "Panel dashboard telemetry status",
+            f"Panel dashboard telemetry status {args.expected_telemetry_status}",
         )
+        if args.telemetry_only:
+            entries = webdriver.logs("performance")
+            resource_urls = webdriver.resource_urls()
+            if not _saw_same_origin_api_path(entries, resource_urls, panel_url, "/api/admin/dashboard/summary"):
+                raise BrowserGateError("no same-origin /api/admin/dashboard/summary request was observed")
+            failures = _assert_network(entries, (args.admin_password, expected_name), panel_url)
+            failures.extend(_assert_resource_urls(resource_urls, (args.admin_password, expected_name), panel_url))
+            failures = list(dict.fromkeys(failures))
+            if failures:
+                raise BrowserGateError("; ".join(failures))
+            report["checks"] = [
+                "login",
+                "dashboard_redirect",
+                "panel_dashboard_telemetry",
+                "panel_dashboard_summary_api",
+            ]
+            report["telemetry_status"] = args.expected_telemetry_status
+            report["route"] = "/panel-dashboard"
+            report["network_events"] = len(entries)
+            return report
         # Explicitly request the standalone dashboard route.  Panel mode must
         # redirect it back to the node list rather than loading standalone data.
         # Use the SPA's own history boundary after login.  A full WebDriver
@@ -588,7 +630,6 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             lambda: webdriver.current_url().rstrip("/").endswith("/nodes"),
             "Panel navigation to node list",
         )
-        expected_name = args.expected_node_name
         _wait_until(
             time.monotonic() + args.timeout,
             lambda: expected_name in str(webdriver.execute("return document.body ? document.body.innerText : '';")),

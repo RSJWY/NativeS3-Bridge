@@ -36,6 +36,14 @@ type LocalTaskRunner struct {
 	dataRoot       string
 	metadataSuffix string
 	invalidator    CredentialInvalidator
+	telemetry      *StorageTelemetryRecorder
+}
+
+// SetTelemetryRecorder wires the node-wide recorder shared with the S3 data
+// plane. Reconcile then uses its exclusive rebuild gate and durable invalid
+// marker instead of creating a disconnected recorder.
+func (r *LocalTaskRunner) SetTelemetryRecorder(recorder *StorageTelemetryRecorder) {
+	r.telemetry = recorder
 }
 
 // NewLocalTaskRunner builds a task runner over node-local resources.
@@ -257,9 +265,16 @@ func (r *LocalTaskRunner) runStorageScan(task controlproto.TaskPayload, base con
 		}
 		// 显式 reconcile 是节点遥测的修复入口:apply 成功后用同一套排除规则
 		// 重建全量计数器,修复外部改盘或记账失效造成的偏差。重建失败时遥测
-		// 保持不可用(Rebuild 内部已标记),reconcile 本身的结果不受影响。
-		if err := RebuildStorageTelemetry(r.db, r.dataRoot, r.metadataSuffix); err != nil {
-			slog.Warn("rebuild storage telemetry after reconcile failed", "error", err)
+		// 保持不可用(Rebuild 内部已标记),reconcile 本身的结果不受影响;
+		// 共享 recorder 会在重建期间独占数据面变更门闩,避免扫描与记账交错。
+		var rebuildErr error
+		if r.telemetry != nil {
+			rebuildErr = r.telemetry.RebuildStorageTelemetry(r.dataRoot, r.metadataSuffix)
+		} else {
+			rebuildErr = RebuildStorageTelemetry(r.db, r.dataRoot, r.metadataSuffix)
+		}
+		if rebuildErr != nil {
+			slog.Warn("rebuild storage telemetry after reconcile failed", "error", rebuildErr)
 		}
 	}
 
