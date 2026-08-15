@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -253,6 +254,12 @@ func (r *LocalTaskRunner) runStorageScan(task controlproto.TaskPayload, base con
 			for _, cred := range credentials {
 				r.invalidator.Invalidate(cred.AccessKey)
 			}
+		}
+		// 显式 reconcile 是节点遥测的修复入口:apply 成功后用同一套排除规则
+		// 重建全量计数器,修复外部改盘或记账失效造成的偏差。重建失败时遥测
+		// 保持不可用(Rebuild 内部已标记),reconcile 本身的结果不受影响。
+		if err := RebuildStorageTelemetry(r.db, r.dataRoot, r.metadataSuffix); err != nil {
+			slog.Warn("rebuild storage telemetry after reconcile failed", "error", err)
 		}
 	}
 

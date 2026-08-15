@@ -54,7 +54,7 @@ type ManagedRateLimit struct {
 	UpdatedAt      time.Time
 }
 
-var stateModels = []any{&AgentMeta{}, &AppliedTask{}, &ManagedRateLimit{}}
+var stateModels = []any{&AgentMeta{}, &AppliedTask{}, &ManagedRateLimit{}, &StorageTelemetry{}}
 
 var stateExpectedTables = []struct {
 	name  string
@@ -63,6 +63,7 @@ var stateExpectedTables = []struct {
 	{name: "agent_meta", model: &AgentMeta{}},
 	{name: "applied_tasks", model: &AppliedTask{}},
 	{name: "managed_rate_limits", model: &ManagedRateLimit{}},
+	{name: "storage_telemetry", model: &StorageTelemetry{}},
 }
 
 func LoadManagedRateLimit(gdb *gorm.DB) (config.RateLimitConfig, bool, error) {

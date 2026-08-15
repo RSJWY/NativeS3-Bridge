@@ -47,8 +47,36 @@ type dashboardAttentionNode struct {
 type dashboardSummaryResponse struct {
 	Totals         dashboardTotals          `json:"totals"`
 	Health         dashboardHealth          `json:"health"`
+	Telemetry      dashboardTelemetry       `json:"telemetry"`
 	AttentionNodes []dashboardAttentionNode `json:"attention_nodes"`
 	GeneratedAt    time.Time                `json:"generated_at"`
+}
+
+// 节点遥测状态:有效 / 未上报(旧 agent 或字段不完整) / 已过期。
+const (
+	telemetryStatusValid   = "valid"
+	telemetryStatusMissing = "missing"
+	telemetryStatusStale   = "stale"
+)
+
+type dashboardTelemetry struct {
+	UsedBytesTotal int64                    `json:"used_bytes_total"`
+	ObjectCount    int64                    `json:"object_count"`
+	ValidNodes     int                      `json:"valid_nodes"`
+	MissingNodes   int                      `json:"missing_nodes"`
+	StaleNodes     int                      `json:"stale_nodes"`
+	Nodes          []dashboardNodeTelemetry `json:"nodes"`
+}
+
+// dashboardNodeTelemetry 是单个节点的最新遥测摘要。值为 null 表示该节点
+// 未上报完整遥测,前端必须显示"未上报/不可用",绝不能显示 0。
+type dashboardNodeTelemetry struct {
+	NodeID      uint       `json:"node_id"`
+	DisplayName string     `json:"display_name"`
+	UsedBytes   *int64     `json:"used_bytes"`
+	ObjectCount *int64     `json:"object_count"`
+	ObservedAt  *time.Time `json:"observed_at"`
+	Status      string     `json:"status"`
 }
 
 // Severity 顺序:同步失败/漂移 > 离线 > 待同步/待发布。
@@ -78,9 +106,24 @@ func (a *AdminAPI) DashboardSummary(w http.ResponseWriter, r *http.Request) {
 		writeTransportError(w, http.StatusInternalServerError, "query nodes failed")
 		return
 	}
+	// 一次性载入所有 NodeState,避免逐节点查询;遥测与心跳口径共用这一份行。
+	states := make(map[uint]*NodeState, len(nodes))
+	if len(nodes) > 0 {
+		var nodeStates []NodeState
+		if err := a.db.Find(&nodeStates).Error; err != nil {
+			writeTransportError(w, http.StatusInternalServerError, "query node states failed")
+			return
+		}
+		for i := range nodeStates {
+			states[nodeStates[i].NodeID] = &nodeStates[i]
+		}
+	}
+	generated := nowUTC()
+	telemetryExpiry := a.effectiveTelemetryExpiry()
 	resp := dashboardSummaryResponse{
 		AttentionNodes: make([]dashboardAttentionNode, 0, len(nodes)),
-		GeneratedAt:    nowUTC(),
+		Telemetry:      dashboardTelemetry{Nodes: make([]dashboardNodeTelemetry, 0, len(nodes))},
+		GeneratedAt:    generated,
 	}
 	for _, n := range nodes {
 		resp.Totals.Nodes++
@@ -124,9 +167,47 @@ func (a *AdminAPI) DashboardSummary(w http.ResponseWriter, r *http.Request) {
 				LastHeartbeat: state.LastHeartbeat, Severity: attentionSeverity(state),
 			})
 		}
+		// 节点遥测摘要:缺失/过期节点不贡献总量,也不被记成 0。
+		entry, contributes := nodeTelemetrySummary(n, states[n.ID], generated, telemetryExpiry)
+		switch {
+		case contributes:
+			resp.Telemetry.UsedBytesTotal += *entry.UsedBytes
+			resp.Telemetry.ObjectCount += *entry.ObjectCount
+			resp.Telemetry.ValidNodes++
+		case entry.Status == telemetryStatusStale:
+			resp.Telemetry.StaleNodes++
+		default:
+			resp.Telemetry.MissingNodes++
+		}
+		resp.Telemetry.Nodes = append(resp.Telemetry.Nodes, entry)
 	}
 	sortAttentionNodes(resp.AttentionNodes)
 	writeTransportJSON(w, http.StatusOK, resp)
+}
+
+// nodeTelemetrySummary 把单个节点的 NodeState 遥测列归类为 valid/missing/stale。
+// contributes=true 表示这是"有效且未过期"的观测,应当计入总量;UsedBytes/
+// ObjectCount 为 nil 时表示未上报,由前端显示"未上报/不可用"。
+func nodeTelemetrySummary(n Node, state *NodeState, generated time.Time, expiry time.Duration) (dashboardNodeTelemetry, bool) {
+	entry := dashboardNodeTelemetry{NodeID: n.ID, DisplayName: n.DisplayName, Status: telemetryStatusMissing}
+	if state == nil {
+		return entry, false
+	}
+	entry.UsedBytes = state.UsedBytesTotal
+	entry.ObjectCount = state.ObjectCount
+	entry.ObservedAt = state.TelemetryObservedAt
+	// 当前不可用(旧版心跳覆盖过)或从未上报过完整快照:一律 missing。
+	if !state.TelemetryValid || state.UsedBytesTotal == nil || state.ObjectCount == nil ||
+		state.TelemetryObservedAt == nil || state.TelemetryObservedAt.IsZero() {
+		return entry, false
+	}
+	// 过期判断与离线判定同口径:观测时间超出阈值即不再代表当前状态。
+	if state.TelemetryObservedAt.Before(generated.Add(-expiry)) {
+		entry.Status = telemetryStatusStale
+		return entry, false
+	}
+	entry.Status = telemetryStatusValid
+	return entry, true
 }
 
 // attentionSeverity 只对已进入需要关注集合的节点分级:同步失败/漂移最高,

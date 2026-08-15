@@ -33,6 +33,21 @@
         <strong>{{ loading && !summary ? '…' : (summary?.totals.attention ?? 0) }}</strong>
         <p class="summary-note">同步失败 / 漂移 / 待发布</p>
       </div>
+      <div class="summary-card">
+        <span>总使用容量</span>
+        <strong>{{ loading && !summary ? '…' : formatBytes(summary?.telemetry.used_bytes_total ?? 0) }}</strong>
+        <p class="summary-note">仅含遥测有效且未过期的节点</p>
+      </div>
+      <div class="summary-card">
+        <span>对象总数</span>
+        <strong>{{ loading && !summary ? '…' : formatNumber(summary?.telemetry.object_count ?? 0) }}</strong>
+        <p class="summary-note">仅含遥测有效且未过期的节点</p>
+      </div>
+      <div class="summary-card">
+        <span>遥测有效节点</span>
+        <strong>{{ loading && !summary ? '…' : (summary?.telemetry.valid_nodes ?? 0) }}</strong>
+        <p class="summary-note">未上报 {{ summary?.telemetry.missing_nodes ?? 0 }} · 已过期 {{ summary?.telemetry.stale_nodes ?? 0 }}</p>
+      </div>
     </section>
 
     <section class="panel">
@@ -46,6 +61,52 @@
         </li>
       </ul>
       <p class="table-help">分布只统计非退役节点；区域仅作参考，不参与健康判定。</p>
+    </section>
+
+    <section class="panel">
+      <h2>节点存储遥测</h2>
+      <div class="table-scroll">
+        <table class="data-table panel-attention-table">
+          <thead>
+            <tr>
+              <th>节点</th>
+              <th>遥测状态</th>
+              <th>使用容量</th>
+              <th>对象数</th>
+              <th>观测时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="loading && !summary" class="state-row">
+              <td colspan="5">加载中…</td>
+            </tr>
+            <tr v-else-if="(summary?.totals.nodes ?? 0) === 0" class="state-row">
+              <td colspan="5">暂无节点。</td>
+            </tr>
+            <tr v-for="node in telemetryNodes" :key="node.node_id">
+              <td>
+                <strong>{{ node.display_name }}</strong>
+                <p class="table-help">ID {{ node.node_id }}</p>
+              </td>
+              <td>
+                <span :class="['status-badge', telemetryBadgeClass(node.status)]">{{ telemetryStatusLabel(node.status) }}</span>
+              </td>
+              <td>
+                <template v-if="node.status === 'valid'">{{ formatBytes(node.used_bytes ?? 0) }}</template>
+                <span v-else-if="node.status === 'stale'" class="muted">{{ node.used_bytes === null ? '未上报 / 不可用' : formatBytes(node.used_bytes) }}</span>
+                <span v-else class="muted">未上报 / 不可用</span>
+              </td>
+              <td>
+                <template v-if="node.status === 'valid'">{{ formatNumber(node.object_count ?? 0) }}</template>
+                <span v-else-if="node.status === 'stale'" class="muted">{{ node.object_count === null ? '未上报 / 不可用' : formatNumber(node.object_count) }}</span>
+                <span v-else class="muted">未上报 / 不可用</span>
+              </td>
+              <td>{{ formatDate(node.observed_at ?? undefined) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="table-help">未上报/已过期的节点不计入总量；容量为节点自报观测，不是实时统计。</p>
     </section>
 
     <section class="panel">
@@ -108,11 +169,14 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { formatBytes } from '../utils/format'
 import {
   adminApi,
   type PanelDashboardAttentionNode,
   type PanelDashboardSeverity,
-  type PanelDashboardSummary
+  type PanelDashboardSummary,
+  type PanelNodeTelemetry,
+  type PanelTelemetryStatus
 } from '../api/client'
 
 const summary = ref<PanelDashboardSummary | null>(null)
@@ -120,6 +184,26 @@ const loading = ref(false)
 const error = ref('')
 
 const attentionNodes = computed<PanelDashboardAttentionNode[]>(() => summary.value?.attention_nodes ?? [])
+const telemetryNodes = computed<PanelNodeTelemetry[]>(() => summary.value?.telemetry.nodes ?? [])
+
+function telemetryStatusLabel(status: PanelTelemetryStatus) {
+  const labels: Record<PanelTelemetryStatus, string> = {
+    valid: '有效',
+    missing: '未上报',
+    stale: '已过期'
+  }
+  return labels[status]
+}
+
+function telemetryBadgeClass(status: PanelTelemetryStatus) {
+  if (status === 'valid') return 'status-enabled'
+  if (status === 'stale') return 'status-disabled'
+  return 'status-neutral'
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat().format(value)
+}
 
 const healthRows = computed(() => [
   { label: '在线', count: summary.value?.totals.online ?? 0, badgeClass: 'status-enabled' },

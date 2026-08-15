@@ -216,22 +216,29 @@ func (s *MultipartStore) CompleteSize(uploadID string, parts []CompletedPart) (i
 }
 
 func (s *MultipartStore) ExistingObjectSize(uploadID string) (int64, error) {
+	size, _, err := s.ExistingObject(uploadID)
+	return size, err
+}
+
+// ExistingObject 返回 multipart 目标对象当前的大小与是否已存在。两者必须一起
+// 返回:零字节的已存在对象与"不存在"都是 size=0,但节点遥测的对象数语义不同。
+func (s *MultipartStore) ExistingObject(uploadID string) (size int64, exists bool, err error) {
 	manifest, err := s.readManifest(uploadID)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	target, err := ResolveObjectPath(s.root, manifest.Bucket, manifest.Key)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	info, err := os.Stat(target)
 	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
+		return 0, false, nil
 	}
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return info.Size(), nil
+	return info.Size(), true, nil
 }
 
 func (s *MultipartStore) Complete(uploadID string, parts []CompletedPart) (ObjectInfo, error) {

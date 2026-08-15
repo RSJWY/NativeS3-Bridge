@@ -368,7 +368,7 @@ func (s *TransportServer) handleHeartbeat(ctx context.Context, conn *AgentConn, 
 	if err := env.DecodePayload(&hb); err != nil {
 		return err
 	}
-	s.touchHeartbeat(conn.NodeID, hb.AppliedVersion)
+	s.touchHeartbeat(conn.NodeID, hb)
 	return conn.sendMessage(ctx, controlproto.TypeHeartbeatAck, env.ID, controlproto.HeartbeatAckPayload{
 		ServerTime: nowUTC().Format(time.RFC3339),
 	})
@@ -564,14 +564,27 @@ func (s *TransportServer) setOnline(nodeID uint, online bool) {
 	_ = s.upsertNodeState(nodeID, updates)
 }
 
-func (s *TransportServer) touchHeartbeat(nodeID uint, appliedVersion int64) {
+func (s *TransportServer) touchHeartbeat(nodeID uint, hb controlproto.HeartbeatPayload) {
 	now := nowUTC()
-	_ = s.upsertNodeState(nodeID, map[string]any{
+	updates := map[string]any{
 		"online":          true,
-		"applied_version": appliedVersion,
+		"applied_version": hb.AppliedVersion,
 		"last_heartbeat":  &now,
 		"updated_at":      now,
-	})
+	}
+	if telemetry, ok := hb.Telemetry(); ok {
+		// 完整有效快照:持久化实际值与节点观测时间(不是 Panel 收包时间)。
+		updates["used_bytes_total"] = &telemetry.UsedBytesTotal
+		updates["object_count"] = &telemetry.ObjectCount
+		observed := telemetry.ObservedAt
+		updates["telemetry_observed_at"] = &observed
+		updates["telemetry_valid"] = true
+	} else {
+		// 旧版/字段不完整的心跳:当前观测不可用,不能把旧值伪装成当前观测。
+		// 保留旧列值供排查,但 Valid=false 使聚合口径把它排除。
+		updates["telemetry_valid"] = false
+	}
+	_ = s.upsertNodeState(nodeID, updates)
 }
 
 // recordHelloObservation 落库节点在 hello 里自报的观测量。region 一并写入(包括
@@ -687,6 +700,18 @@ func applyStateUpdates(row *NodeState, updates map[string]any) {
 	}
 	if v, ok := updates["last_heartbeat"].(*time.Time); ok {
 		row.LastHeartbeat = v
+	}
+	if v, ok := updates["used_bytes_total"].(*int64); ok {
+		row.UsedBytesTotal = v
+	}
+	if v, ok := updates["object_count"].(*int64); ok {
+		row.ObjectCount = v
+	}
+	if v, ok := updates["telemetry_observed_at"].(*time.Time); ok {
+		row.TelemetryObservedAt = v
+	}
+	if v, ok := updates["telemetry_valid"].(bool); ok {
+		row.TelemetryValid = v
 	}
 }
 

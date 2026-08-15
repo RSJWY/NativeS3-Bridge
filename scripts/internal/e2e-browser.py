@@ -549,6 +549,25 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             lambda: "需要关注的节点" in str(webdriver.execute("return document.body ? document.body.innerText : '';")),
             "Panel dashboard content",
         )
+        # Telemetry section: cards plus per-node rows must render.  A freshly
+        # registered node reports a valid zero snapshot (baseline scan), so the
+        # row badge is either 有效 or 未上报 -- never a fabricated value.
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: all(
+                marker in str(webdriver.execute("return document.body ? document.body.innerText : '';"))
+                for marker in ("总使用容量", "节点存储遥测")
+            ),
+            "Panel dashboard telemetry section",
+        )
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: any(
+                marker in str(webdriver.execute("return document.body ? document.body.innerText : '';"))
+                for marker in ("有效", "未上报 / 不可用")
+            ),
+            "Panel dashboard telemetry status",
+        )
         # Explicitly request the standalone dashboard route.  Panel mode must
         # redirect it back to the node list rather than loading standalone data.
         # Use the SPA's own history boundary after login.  A full WebDriver
@@ -649,6 +668,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             "login",
             "dashboard_redirect",
             "panel_dashboard_content",
+            "panel_dashboard_telemetry",
             "panel_dashboard_summary_api",
             "node_visible",
             "panel_nodes_api",

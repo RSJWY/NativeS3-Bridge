@@ -52,6 +52,8 @@ func NewAdminServer(deps AdminServerDeps) (*AdminServer, error) {
 
 	mux := http.NewServeMux()
 	adminAPI := NewAdminAPI(deps.DB, deps.Hub, deps.Creds, deps.Desired, deps.Tasks, deps.Transport, deps.Migration, deps.Audit)
+	// 遥测过期口径与离线判定一致:heartbeat_interval * offline_multiplier。
+	adminAPI.SetTelemetryExpiry(deps.Config.HeartbeatInterval * time.Duration(deps.Config.OfflineMultiplier))
 
 	// Auth endpoints (login/logout/settings) reuse the webadmin handlers.
 	mux.HandleFunc("/api/admin/auth-settings", authenticator.AuthSettings)

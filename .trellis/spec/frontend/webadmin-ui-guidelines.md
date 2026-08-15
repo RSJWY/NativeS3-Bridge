@@ -188,6 +188,7 @@ adminApi.logs({ file: selectedFileID, limit, level, q }) // ID came from respons
 - Route redirects and sidebar navigation use the shared runtime helpers; components do not implement private mode checks.
 - Panel pages call only typed `/api/admin/nodes*` methods, the Panel node-health summary `/api/admin/dashboard/summary`, plus the shared typed `/api/admin/logs` client through `apiFetch`. The summary path exists on both backends with mode-specific shapes: standalone returns credential/quota totals, Panel returns node health aggregates; `usage-ranking` and `request-trend` are standalone-only and 404 on Panel.
 - Panel login lands on `/panel-dashboard` (`serviceHomePath()`); the Panel dashboard renders totals, health distribution, and the attention list only from the summary response and must not rebuild metrics from per-node requests.
+- The same summary response also carries the node storage telemetry block (`telemetry`). Missing telemetry is `null` in JSON and must render as `未上报 / 不可用`; `stale` nodes show `已过期` and are never summed into totals. Telemetry values come only from the summary - no per-node requests, no polling, no charts.
 - `Logs.vue` uses runtime mode only for title/description/search copy. File selection, filters, error handling, endpoint, and payload stay shared; Panel navigation text is `Panel 日志` and standalone remains `日志`.
 - One-time registration tokens and credential secrets remain component-local and are cleared when their result modal closes.
 

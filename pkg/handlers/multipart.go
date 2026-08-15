@@ -22,6 +22,8 @@ type MultipartHandler struct {
 	commit UsageCommitter
 	quota  QuotaManager
 	hooks  EventEmitter
+	// telemetry 维护节点级存储计数(可选依赖,仅 managed 节点注入)。
+	telemetry TelemetryRecorder
 }
 
 func NewMultipartHandler(store *storage.MultipartStore, commit UsageCommitter) *MultipartHandler {
@@ -34,6 +36,12 @@ func NewMultipartHandlerWithHooks(store *storage.MultipartStore, commit UsageCom
 
 func NewMultipartHandlerWithQuotaManager(store *storage.MultipartStore, manager QuotaManager, emitter EventEmitter) *MultipartHandler {
 	return &MultipartHandler{store: store, quota: manager, hooks: emitter}
+}
+
+// SetTelemetryRecorder 注入节点级遥测计数器(仅 managed 节点;standalone 保持
+// nil,所有记账调用是 nil 安全的)。必须在开始服务前调用。
+func (h *MultipartHandler) SetTelemetryRecorder(recorder TelemetryRecorder) {
+	h.telemetry = recorder
 }
 
 func (h *MultipartHandler) Create(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -98,7 +106,7 @@ func (h *MultipartHandler) Complete(w http.ResponseWriter, r *http.Request, buck
 	}
 	var reservation *quota.Reservation
 	settled := false
-	replacedBytes, err := h.store.ExistingObjectSize(uploadID)
+	replacedBytes, replaced, err := h.store.ExistingObject(uploadID)
 	if err != nil {
 		writeMultipartStorageError(w, err, r.URL.Path)
 		return
@@ -137,6 +145,8 @@ func (h *MultipartHandler) Complete(w http.ResponseWriter, r *http.Request, buck
 		writeMultipartStorageError(w, err, r.URL.Path)
 		return
 	}
+	// 对象已合并落盘:节点级计数按大小差与是否覆盖推进。
+	recordTelemetry(h.telemetry, info.Size-replacedBytes, telemetryPutObjectDelta(replaced))
 	if reservation != nil {
 		if err := h.quota.Settle(reservation, info.Size, replacedBytes, quota.OpPut); err != nil {
 			settled = true

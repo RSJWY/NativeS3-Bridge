@@ -34,21 +34,30 @@ type Router struct {
 }
 
 func NewRouter(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, commit handlers.UsageCommitter, emitter handlers.EventEmitter, rateLimit config.RateLimitConfig) http.Handler {
-	return newRouter(backend, multipartStore, bucketStore, authenticator, handlers.NewObjectHandlerWithHooks(backend, commit, emitter), handlers.NewMultipartHandlerWithHooks(multipartStore, commit, emitter), handlers.NewBucketHandler(backend, bucketStore), AnonRateLimit(rateLimit), Quota, false)
+	_, h := newRouter(backend, multipartStore, bucketStore, authenticator, handlers.NewObjectHandlerWithHooks(backend, commit, emitter), handlers.NewMultipartHandlerWithHooks(multipartStore, commit, emitter), handlers.NewBucketHandler(backend, bucketStore), AnonRateLimit(rateLimit), Quota, false)
+	return h
 }
 
 func NewRouterWithQuotaManager(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, manager handlers.QuotaManager, boundCredentialChecker func(string) (bool, error), emitter handlers.EventEmitter, rateLimit config.RateLimitConfig) http.Handler {
-	return newRouter(backend, multipartStore, bucketStore, authenticator, handlers.NewObjectHandlerWithQuotaManager(backend, manager, emitter), handlers.NewMultipartHandlerWithQuotaManager(multipartStore, manager, emitter), handlers.NewBucketHandlerWithCredentialChecker(backend, bucketStore, boundCredentialChecker), AnonRateLimit(rateLimit), QuotaWithReservations, false)
+	_, h := newRouter(backend, multipartStore, bucketStore, authenticator, handlers.NewObjectHandlerWithQuotaManager(backend, manager, emitter), handlers.NewMultipartHandlerWithQuotaManager(multipartStore, manager, emitter), handlers.NewBucketHandlerWithCredentialChecker(backend, bucketStore, boundCredentialChecker), AnonRateLimit(rateLimit), QuotaWithReservations, false)
+	return h
 }
 
 func NewManagedRouterWithQuotaManager(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, manager handlers.QuotaManager, emitter handlers.EventEmitter, rateLimit *RateLimitController) http.Handler {
+	_, h := NewManagedRouterWithQuotaManagerParts(backend, multipartStore, bucketStore, authenticator, manager, emitter, rateLimit)
+	return h
+}
+
+// NewManagedRouterWithQuotaManagerParts 返回 managed 路由的 Router 与套好
+// 中间件的 handler;Router 供启动前注入遥测计数器等可选依赖。
+func NewManagedRouterWithQuotaManagerParts(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, manager handlers.QuotaManager, emitter handlers.EventEmitter, rateLimit *RateLimitController) (*Router, http.Handler) {
 	return newRouter(backend, multipartStore, bucketStore, authenticator,
 		handlers.NewObjectHandlerWithQuotaManager(backend, manager, emitter),
 		handlers.NewMultipartHandlerWithQuotaManager(multipartStore, manager, emitter),
 		handlers.NewManagedBucketHandler(backend, bucketStore), rateLimit.Middleware(), QuotaWithReservations, true)
 }
 
-func newRouter(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, objectHandler *handlers.ObjectHandler, multipartHandler *handlers.MultipartHandler, bucketHandler *handlers.BucketHandler, rateLimitMiddleware Middleware, quotaMiddleware Middleware, managed bool) http.Handler {
+func newRouter(backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, objectHandler *handlers.ObjectHandler, multipartHandler *handlers.MultipartHandler, bucketHandler *handlers.BucketHandler, rateLimitMiddleware Middleware, quotaMiddleware Middleware, managed bool) (*Router, http.Handler) {
 	r := &Router{
 		objectHandler:    objectHandler,
 		bucketHandler:    bucketHandler,
@@ -57,11 +66,22 @@ func newRouter(backend storage.Backend, multipartStore *storage.MultipartStore, 
 		chain:            []Middleware{Recover, Logging, rateLimitMiddleware, Auth(authenticator, bucketStore.GetACL), AwsChunked, quotaMiddleware},
 		managed:          managed,
 	}
+	return r, r.handler()
+}
+
+// handler 把 dispatch 套上中间件链,得到最终可服务的 http.Handler。
+func (r *Router) handler() http.Handler {
 	var h http.Handler = http.HandlerFunc(r.dispatch)
 	for i := len(r.chain) - 1; i >= 0; i-- {
 		h = r.chain[i](h)
 	}
 	return h
+}
+
+// SetTelemetryRecorder 把节点级遥测计数器下发到对象/分片处理器。
+func (r *Router) SetTelemetryRecorder(recorder handlers.TelemetryRecorder) {
+	r.objectHandler.SetTelemetryRecorder(recorder)
+	r.multipartHandler.SetTelemetryRecorder(recorder)
 }
 
 func AnonRateLimit(cfg config.RateLimitConfig) Middleware {

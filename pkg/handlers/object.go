@@ -34,10 +34,18 @@ type ObjectHandler struct {
 	commit  UsageCommitter
 	quota   QuotaManager
 	hooks   EventEmitter
+	// telemetry 维护节点级存储计数(可选依赖,仅 managed 节点注入)。
+	telemetry TelemetryRecorder
 }
 
 func NewObjectHandlerWithQuotaManager(backend storage.Backend, manager QuotaManager, emitter EventEmitter) *ObjectHandler {
 	return &ObjectHandler{backend: backend, quota: manager, hooks: emitter}
+}
+
+// SetTelemetryRecorder 注入节点级遥测计数器(仅 managed 节点;standalone 保持
+// nil,所有记账调用是 nil 安全的)。必须在开始服务前调用。
+func (h *ObjectHandler) SetTelemetryRecorder(recorder TelemetryRecorder) {
+	h.telemetry = recorder
 }
 
 type EventEmitter interface {
@@ -53,7 +61,7 @@ func NewObjectHandlerWithHooks(backend storage.Backend, commit UsageCommitter, e
 }
 
 func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	reservation, replacedBytes, ok := h.reserveDeclaredWrite(w, r, bucket, key)
+	reservation, replacedBytes, replaced, ok := h.reserveDeclaredWrite(w, r, bucket, key)
 	if !ok {
 		return
 	}
@@ -89,6 +97,9 @@ func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key 
 		writeStorageError(w, err, r.URL.Path)
 		return
 	}
+	// 原生存储已提交:节点级计数按实际写入推进(覆盖记大小差,零大小新对象
+	// 仍 +1)。即使后续配额结算失败,对象已经存在,不能漏记。
+	recordTelemetry(h.telemetry, info.Size-replacedBytes, telemetryPutObjectDelta(replaced))
 	if reservation != nil {
 		if err := h.quota.Settle(reservation, info.Size, replacedBytes, quota.OpPut); err != nil {
 			settled = true
@@ -106,26 +117,33 @@ func (h *ObjectHandler) Put(w http.ResponseWriter, r *http.Request, bucket, key 
 	h.emitObjectEvent(r, hooks.ObjectCreated, bucket, key, info)
 }
 
-func (h *ObjectHandler) reserveDeclaredWrite(w http.ResponseWriter, r *http.Request, bucket, key string) (*quota.Reservation, int64, bool) {
+// reserveDeclaredWrite 预留配额并返回被覆盖对象的旧大小与是否已存在。无配额
+// 管理器时跳过预留,但遥测计数器仍需要覆盖信息,此时单独补一次 Head。
+func (h *ObjectHandler) reserveDeclaredWrite(w http.ResponseWriter, r *http.Request, bucket, key string) (*quota.Reservation, int64, bool, bool) {
 	if h.quota == nil {
-		return nil, 0, true
+		// standalone 路径不做预留;只有注入了遥测计数器才需要覆盖信息。
+		if h.telemetry == nil {
+			return nil, 0, false, true
+		}
+		replaced, replacedSize, ok := h.headExisting(w, r, bucket, key)
+		if !ok {
+			return nil, 0, false, false
+		}
+		return nil, replacedSize, replaced, true
 	}
 	id, ok := auth.IdentityFromContext(r.Context())
 	if !ok || id == nil || auth.IsAnonymous(id) {
 		WriteS3Error(w, auth.CodeAccessDenied, http.StatusForbidden, r.URL.Path)
-		return nil, 0, false
+		return nil, 0, false, false
 	}
 	declared, ok := quota.DeclaredSizeFromContext(r.Context())
 	if !ok || declared < 0 {
 		WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, r.URL.Path)
-		return nil, 0, false
+		return nil, 0, false, false
 	}
-	replacedBytes := int64(0)
-	if existing, err := h.backend.HeadObject(bucket, key); err == nil {
-		replacedBytes = existing.Size
-	} else if !errors.Is(err, storage.ErrNoSuchKey) && !errors.Is(err, storage.ErrNoSuchBucket) {
-		writeStorageError(w, err, r.URL.Path)
-		return nil, 0, false
+	replaced, replacedBytes, ok := h.headExisting(w, r, bucket, key)
+	if !ok {
+		return nil, 0, false, false
 	}
 	reserveBytes := declared - replacedBytes
 	if reserveBytes < 0 {
@@ -138,9 +156,23 @@ func (h *ObjectHandler) reserveDeclaredWrite(w http.ResponseWriter, r *http.Requ
 		} else {
 			WriteS3Error(w, "InternalError", http.StatusInternalServerError, r.URL.Path)
 		}
-		return nil, 0, false
+		return nil, 0, false, false
 	}
-	return reservation, replacedBytes, true
+	return reservation, replacedBytes, replaced, true
+}
+
+// headExisting 探测对象当前是否已存在及其大小。ok=false 表示探测失败且错误
+// 响应已写出,调用方必须立即返回。
+func (h *ObjectHandler) headExisting(w http.ResponseWriter, r *http.Request, bucket, key string) (existed bool, size int64, ok bool) {
+	existing, err := h.backend.HeadObject(bucket, key)
+	if err == nil {
+		return true, existing.Size, true
+	}
+	if errors.Is(err, storage.ErrNoSuchKey) || errors.Is(err, storage.ErrNoSuchBucket) {
+		return false, 0, true
+	}
+	writeStorageError(w, err, r.URL.Path)
+	return false, 0, false
 }
 
 func (h *ObjectHandler) Get(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -210,6 +242,8 @@ func (h *ObjectHandler) Delete(w http.ResponseWriter, r *http.Request, bucket, k
 	}
 	SetStandardHeaders(w)
 	w.WriteHeader(http.StatusNoContent)
+	// 节点级计数:删除成功才扣减;对象不存在时存储层视为成功,但计数不动。
+	recordTelemetry(h.telemetry, -deletedSize, telemetryDeleteObjectDelta(deleted))
 	h.commitUsage(r, -deletedSize, quota.OpDelete)
 	if deleted {
 		h.emitObjectEvent(r, hooks.ObjectDeleted, bucket, key, storage.ObjectInfo{Key: key, Size: deletedSize, ETag: info.ETag, Metadata: info.Metadata})

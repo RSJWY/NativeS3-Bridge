@@ -34,6 +34,10 @@ type AdminAPI struct {
 	// adminIdentity is the single-admin identity stamped into audit rows. The
 	// first version keeps a single administrator (design/PRD: no multi-user/RBAC).
 	adminIdentity string
+	// telemetryExpiry 是节点遥测的过期阈值,复用心跳口径
+	// heartbeat_interval * offline_multiplier(由 cmd/panel 从 PanelConfig 注入),
+	// 不维护第二套默认值。零值时按面板默认心跳参数计算。
+	telemetryExpiry time.Duration
 }
 
 // NewAdminAPI wires the admin API over its collaborators.
@@ -51,6 +55,20 @@ func NewAdminAPI(db *gorm.DB, hub *Hub, creds *CredentialStore, desired *Desired
 	}
 }
 
+// SetTelemetryExpiry 注入节点遥测过期阈值(heartbeat_interval * offline_multiplier)。
+func (a *AdminAPI) SetTelemetryExpiry(d time.Duration) {
+	if d > 0 {
+		a.telemetryExpiry = d
+	}
+}
+
+func (a *AdminAPI) effectiveTelemetryExpiry() time.Duration {
+	if a.telemetryExpiry > 0 {
+		return a.telemetryExpiry
+	}
+	return DefaultHeartbeatInterval * time.Duration(DefaultOfflineMultiplier)
+}
+
 // Routes registers the admin REST handlers on mux. Each handler is wrapped by
 // the caller's auth middleware in cmd/panel; here we only register paths.
 func (a *AdminAPI) Routes(mux *http.ServeMux, wrap func(http.Handler) http.Handler) {
@@ -63,16 +81,16 @@ func (a *AdminAPI) Routes(mux *http.ServeMux, wrap func(http.Handler) http.Handl
 // --- request/response shapes ---
 
 type nodeResponse struct {
-	ID              uint       `json:"id"`
-	DisplayName     string     `json:"display_name"`
-	Status          string     `json:"status"`
-	Online          bool       `json:"online"`
-	AppliedVersion  int64      `json:"applied_version"`
-	DesiredVersion  int64      `json:"desired_version"`
-	SyncState       string     `json:"sync_state"`
-	LastError       string     `json:"last_error,omitempty"`
-	DraftDirty      bool       `json:"draft_dirty"`
-	PublishRequired bool       `json:"publish_required"`
+	ID              uint   `json:"id"`
+	DisplayName     string `json:"display_name"`
+	Status          string `json:"status"`
+	Online          bool   `json:"online"`
+	AppliedVersion  int64  `json:"applied_version"`
+	DesiredVersion  int64  `json:"desired_version"`
+	SyncState       string `json:"sync_state"`
+	LastError       string `json:"last_error,omitempty"`
+	DraftDirty      bool   `json:"draft_dirty"`
+	PublishRequired bool   `json:"publish_required"`
 	// Region 是节点自报的本地 S3 签名区域,只读观测值。空串表示节点尚未连接过,
 	// 或其 agent 版本不上报该字段——不能理解为"节点没有区域"。
 	Region        string     `json:"region,omitempty"`

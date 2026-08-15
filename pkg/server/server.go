@@ -16,6 +16,8 @@ import (
 type Server struct {
 	httpServer *http.Server
 	tls        config.TLSConfig
+	// router 仅 managed 构造路径保留,用于在启动前注入节点级遥测计数器。
+	router *Router
 }
 
 func New(cfg config.ServerConfig, rateLimit config.RateLimitConfig, backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, commit handlers.UsageCommitter, emitter handlers.EventEmitter) *Server {
@@ -41,13 +43,23 @@ func NewWithQuotaManager(cfg config.ServerConfig, rateLimit config.RateLimitConf
 }
 
 func NewManagedWithQuotaManager(cfg config.ServerConfig, backend storage.Backend, multipartStore *storage.MultipartStore, bucketStore *storage.BucketStore, authenticator auth.Authenticator, manager handlers.QuotaManager, emitter handlers.EventEmitter, rateLimit *RateLimitController) *Server {
+	router, handler := NewManagedRouterWithQuotaManagerParts(backend, multipartStore, bucketStore, authenticator, manager, emitter, rateLimit)
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              cfg.S3Addr,
-			Handler:           NewManagedRouterWithQuotaManager(backend, multipartStore, bucketStore, authenticator, manager, emitter, rateLimit),
+			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		tls: cfg.TLS,
+		tls:    cfg.TLS,
+		router: router,
+	}
+}
+
+// SetTelemetryRecorder 注入节点级存储遥测计数器(managed 节点专用)。必须在
+// Run 开始接受流量之前调用;standalone 构造路径不注入,行为不变。
+func (s *Server) SetTelemetryRecorder(recorder handlers.TelemetryRecorder) {
+	if s.router != nil {
+		s.router.SetTelemetryRecorder(recorder)
 	}
 }
 

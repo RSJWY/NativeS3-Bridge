@@ -395,9 +395,11 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 				slog.Warn("heartbeat: load meta failed", "error", err)
 				continue
 			}
-			if err := c.sendMessage(ctx, ws, controlproto.TypeHeartbeat, "", controlproto.HeartbeatPayload{
-				AppliedVersion: meta.AppliedVersion,
-			}); err != nil {
+			// 遥测快照是单行数据库读(不可用时字段全部省略);心跳路径
+			// 绝不触发文件系统扫描。
+			payload := HeartbeatTelemetrySnapshot(c.db)
+			payload.AppliedVersion = meta.AppliedVersion
+			if err := c.sendMessage(ctx, ws, controlproto.TypeHeartbeat, "", payload); err != nil {
 				slog.Debug("heartbeat send failed", "error", err)
 				return
 			}

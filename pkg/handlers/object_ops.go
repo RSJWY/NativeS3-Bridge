@@ -61,8 +61,10 @@ func (h *ObjectHandler) Copy(w http.ResponseWriter, r *http.Request, bucket, key
 	var reservation *quota.Reservation
 	settled := false
 	replacedBytes := int64(0)
+	replaced := false
 	if existing, headErr := h.backend.HeadObject(bucket, key); headErr == nil {
 		replacedBytes = existing.Size
+		replaced = true
 	} else if !errors.Is(headErr, storage.ErrNoSuchKey) && !errors.Is(headErr, storage.ErrNoSuchBucket) {
 		writeStorageError(w, headErr, r.URL.Path)
 		return
@@ -122,6 +124,8 @@ func (h *ObjectHandler) Copy(w http.ResponseWriter, r *http.Request, bucket, key
 		writeStorageError(w, err, r.URL.Path)
 		return
 	}
+	// 目标对象已落盘:节点级计数按大小差与是否新建推进。
+	recordTelemetry(h.telemetry, info.Size-replacedBytes, telemetryPutObjectDelta(replaced))
 	if reservation != nil {
 		if err := h.quota.Settle(reservation, info.Size, replacedBytes, quota.OpPut); err != nil {
 			settled = true
@@ -178,10 +182,13 @@ func (h *ObjectHandler) DeleteObjects(w http.ResponseWriter, r *http.Request, bu
 			result.Errors = append(result.Errors, deleteError{Key: obj.Key, Code: "InvalidArgument", Message: "missing key"})
 			continue
 		}
-		// Capture size before deletion so quota usage can be decremented.
+		// Capture size/existence before deletion so quota usage and node
+		// telemetry can be decremented.
 		var deletedSize int64
+		deleted := false
 		if info, headErr := h.backend.HeadObject(bucket, obj.Key); headErr == nil {
 			deletedSize = info.Size
+			deleted = true
 		} else if !errors.Is(headErr, storage.ErrNoSuchKey) {
 			result.Errors = append(result.Errors, deleteError{Key: obj.Key, Code: deleteErrorCode(headErr), Message: "delete failed"})
 			continue
@@ -190,6 +197,8 @@ func (h *ObjectHandler) DeleteObjects(w http.ResponseWriter, r *http.Request, bu
 			result.Errors = append(result.Errors, deleteError{Key: obj.Key, Code: deleteErrorCode(err), Message: "delete failed"})
 			continue
 		}
+		// 逐个对象推进节点级计数:只有真正删除已存在对象才扣减。
+		recordTelemetry(h.telemetry, -deletedSize, telemetryDeleteObjectDelta(deleted))
 		if deletedSize > 0 {
 			h.commitUsage(r, -deletedSize, quota.OpDelete)
 			h.emitObjectEvent(r, hooks.ObjectDeleted, bucket, obj.Key, storage.ObjectInfo{Key: obj.Key, Size: deletedSize})

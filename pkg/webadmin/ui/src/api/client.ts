@@ -141,10 +141,32 @@ export interface PanelDashboardAttentionNode extends PanelNode {
   severity: PanelDashboardSeverity
 }
 
+/** 单个节点的最新存储遥测摘要。null 表示未上报完整遥测，不能当作 0 展示。 */
+export interface PanelNodeTelemetry {
+  node_id: number
+  display_name: string
+  used_bytes: number | null
+  object_count: number | null
+  observed_at: string | null
+  status: PanelTelemetryStatus
+}
+
+export type PanelTelemetryStatus = 'valid' | 'missing' | 'stale'
+
+export interface PanelDashboardTelemetry {
+  used_bytes_total: number
+  object_count: number
+  valid_nodes: number
+  missing_nodes: number
+  stale_nodes: number
+  nodes: PanelNodeTelemetry[]
+}
+
 /** Panel 首页仪表盘汇总。generated_at 是汇总生成时间，不是节点心跳时间。 */
 export interface PanelDashboardSummary {
   totals: PanelDashboardTotals
   health: PanelDashboardHealth
+  telemetry: PanelDashboardTelemetry
   attention_nodes: PanelDashboardAttentionNode[]
   generated_at: string
 }

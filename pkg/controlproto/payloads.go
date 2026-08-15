@@ -50,10 +50,48 @@ type HelloAckPayload struct {
 
 // HeartbeatPayload is sent periodically by the node to keep the connection
 // alive and report a lightweight observed-state summary.
+//
+// 遥测字段(used_bytes_total / object_count / observed_at)是可选的节点存储
+// 观测:指针类型让"字段缺失"与"合法的 0 字节 / 0 对象"可区分。旧节点不发
+// 这三个字段,Panel 必须把缺失解释为"未上报",绝不能当成 0。observed_at 是
+// 节点统计计数器的时间(RFC3339 UTC),不是 Panel 收到心跳的时间;三个字段
+// 只要有任何一处不完整,整组遥测都按"不可用"处理(见 Telemetry)。
 type HeartbeatPayload struct {
-	AppliedVersion int64 `json:"applied_version"`
-	UsedBytesTotal int64 `json:"used_bytes_total,omitempty"`
-	ObjectCount    int64 `json:"object_count,omitempty"`
+	AppliedVersion int64  `json:"applied_version"`
+	UsedBytesTotal *int64 `json:"used_bytes_total,omitempty"`
+	ObjectCount    *int64 `json:"object_count,omitempty"`
+	ObservedAt     string `json:"observed_at,omitempty"`
+}
+
+// HeartbeatTelemetry is the validated telemetry view of a heartbeat: the
+// three optional fields are only meaningful together.
+type HeartbeatTelemetry struct {
+	UsedBytesTotal int64
+	ObjectCount    int64
+	ObservedAt     time.Time
+}
+
+// Telemetry returns the node's storage observation when the payload carries a
+// complete, well-formed telemetry group. Missing fields, a missing/unparsable
+// observed_at, or partial data all yield ok=false ("未上报/不可用"), never a
+// fabricated zero snapshot.
+func (h HeartbeatPayload) Telemetry() (HeartbeatTelemetry, bool) {
+	if h.UsedBytesTotal == nil || h.ObjectCount == nil {
+		return HeartbeatTelemetry{}, false
+	}
+	observed := strings.TrimSpace(h.ObservedAt)
+	if observed == "" {
+		return HeartbeatTelemetry{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, observed)
+	if err != nil {
+		return HeartbeatTelemetry{}, false
+	}
+	return HeartbeatTelemetry{
+		UsedBytesTotal: *h.UsedBytesTotal,
+		ObjectCount:    *h.ObjectCount,
+		ObservedAt:     parsed.UTC(),
+	}, true
 }
 
 // HeartbeatAckPayload carries the panel clock so the node can detect drift.

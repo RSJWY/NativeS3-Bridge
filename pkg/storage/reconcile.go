@@ -34,7 +34,51 @@ func ReconcileBucket(root, bucket, metadataSuffix string) (ReconcileReport, erro
 		metadataSuffix = DefaultMetadataSuffix
 	}
 	report := ReconcileReport{Bucket: bucket}
-	err = filepath.WalkDir(bucketPath, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = walkBucket(bucketPath, metadataSuffix, &report)
+	return report, err
+}
+
+// ScanDataRoot 全量扫描数据目录下所有桶,汇总节点级对象数与字节数。它是节点
+// 遥测基线/重建的采集入口:逐个遍历根目录下的合法桶目录,复用 walkBucket 的
+// 排除规则(sidecar、.multipart、数据库文件),不做任何删除或记账变更。
+func ScanDataRoot(root, metadataSuffix string) (ReconcileReport, error) {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return ReconcileReport{}, err
+	}
+	if metadataSuffix == "" {
+		metadataSuffix = DefaultMetadataSuffix
+	}
+	report := ReconcileReport{Bucket: ""}
+	entries, err := os.ReadDir(rootAbs)
+	if errors.Is(err, os.ErrNotExist) {
+		return report, nil
+	}
+	if err != nil {
+		return ReconcileReport{}, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		// 非法桶名目录(运维临时目录等)不属于对象存储命名空间,直接跳过。
+		if err := ValidateBucketName(entry.Name()); err != nil {
+			continue
+		}
+		bucketReport := ReconcileReport{Bucket: entry.Name()}
+		if err := walkBucket(filepath.Join(rootAbs, entry.Name()), metadataSuffix, &bucketReport); err != nil {
+			return ReconcileReport{}, err
+		}
+		report.ObjectCount += bucketReport.ObjectCount
+		report.ScannedBytes += bucketReport.ScannedBytes
+	}
+	return report, nil
+}
+
+// walkBucket 统计单个桶目录下的对象数与字节数,跳过元数据 sidecar、.multipart
+// 与数据库文件。ReconcileBucket 与 ScanDataRoot 共用它,保证两套口径一致。
+func walkBucket(bucketPath, metadataSuffix string, report *ReconcileReport) error {
+	err := filepath.WalkDir(bucketPath, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -78,7 +122,7 @@ func ReconcileBucket(root, bucket, metadataSuffix string) (ReconcileReport, erro
 		report.ScannedBytes += info.Size()
 		return nil
 	})
-	return report, err
+	return err
 }
 
 func (r ReconcileReport) OrphanSidecarCount() int { return len(r.orphanFullPaths) }

@@ -97,9 +97,17 @@ type NodeState struct {
 	LastError      string `gorm:"size:512"`
 	// Region 是节点在 hello 里自报的本地 S3 签名区域,只观测不权威:Panel 永远
 	// 不写回节点,区域仍由节点 yaml 决定。旧节点不上报该字段,值保持空串。
-	Region        string `gorm:"size:64"`
-	LastHeartbeat *time.Time
-	UpdatedAt     time.Time
+	Region string `gorm:"size:64"`
+	// Telemetry 列保存节点心跳携带的最新一份存储观测(节点自报,单份快照,
+	// 不做历史)。可空列让"旧节点未上报"与"合法的 0 字节/0 对象"可区分:
+	// NULL 表示从未上报过完整遥测,绝不能当作 0 参与汇总。TelemetryValid=false
+	// 表示当前观测不可用(旧版心跳或字段不完整);旧值保留仅供排查,不参与聚合。
+	UsedBytesTotal      *int64     `gorm:"column:used_bytes_total"`
+	ObjectCount         *int64     `gorm:"column:object_count"`
+	TelemetryObservedAt *time.Time `gorm:"column:telemetry_observed_at"`
+	TelemetryValid      bool       `gorm:"column:telemetry_valid;not null;default:false"`
+	LastHeartbeat       *time.Time
+	UpdatedAt           time.Time
 }
 
 // NodeCredential stores an S3 credential owned by the panel. The secret key is

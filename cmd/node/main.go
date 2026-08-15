@@ -121,6 +121,14 @@ func main() {
 	// no admin listener so AdminAddr is left empty.
 	s3ServerCfg := config.ServerConfig{S3Addr: cfg.Server.S3Addr, TLS: cfg.Server.TLS}
 	s3Server := server.NewManagedWithQuotaManager(s3ServerCfg, backend, multipartStore, bucketStore, authenticator, quotaManager, hookManager, rateLimitController)
+	// 节点级存储遥测:计数器注入 S3 处理器,基线扫描在开始接受流量之前同步
+	// 完成一次(已有 native 文件获得真实初值,且不与在线写入产生扫描竞态)。
+	// 基线失败不阻塞 S3 服务:遥测保持"不可用",等待显式 reconcile 重建。
+	telemetryRecorder := nodeagent.NewStorageTelemetryRecorder(gdb)
+	s3Server.SetTelemetryRecorder(telemetryRecorder)
+	if err := nodeagent.EnsureStorageTelemetryBaseline(gdb, cfg.Storage.DataRoot, cfg.Storage.MetadataSuffix); err != nil {
+		slog.Error("storage telemetry baseline failed; telemetry stays unavailable until rebuild", "error", err)
+	}
 
 	// Control-plane agent: registration (first boot) + mTLS client loop.
 	agentDone := startAgent(ctx, cfg, gdb, credentialStore, bucketStore, hookManager, rateLimitController, logRing)
