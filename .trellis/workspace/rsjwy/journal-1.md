@@ -844,3 +844,36 @@ Implemented and verified the Panel/Node E2E release gate: local and Docker adapt
 ### Next Steps
 
 - None - task complete
+
+
+## Session 26: Panel node health dashboard
+
+**Date**: 2026-08-15
+**Task**: Panel node health dashboard
+**Branch**: `main`
+
+### Summary
+
+Planned, implemented, and verified the Panel node health dashboard with authenticated summary API, service-mode routing, attention ordering, and ChromeDriver E2E coverage.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8635513` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

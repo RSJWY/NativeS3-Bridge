@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 25
-- **Last Active**: 2026-07-26
+- **Total Sessions**: 26
+- **Last Active**: 2026-08-15
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~846 | Active |
+| `journal-1.md` | ~879 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 26 | 2026-08-15 | Panel node health dashboard | `8635513` | `main` |
 | 25 | 2026-07-26 | Panel 与 Node 日志查询及完整 E2E | `e844b2e`, `80331f6` | `main` |
 | 24 | 2026-07-25 | Panel Node E2E release gate | `008fc14`, `a5fdf28` | `main` |
 | 23 | 2026-07-24 | 修复 0.8.4 Release Go 1.21 清理竞态 | `335b85d` | `main` |
