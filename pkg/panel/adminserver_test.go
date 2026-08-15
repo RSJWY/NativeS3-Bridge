@@ -117,8 +117,22 @@ func TestAdminServerUsesPanelModeAndPanelRoutes(t *testing.T) {
 	if logsBody.Source != "file" || !logsBody.FileEnabled || len(logsBody.Entries) != 1 || logsBody.Entries[0].Message != "panel-ready" {
 		t.Fatalf("panel logs body = %+v", logsBody)
 	}
-	standaloneRoute := serveAuthenticated("/api/admin/dashboard/summary")
+	standaloneRoute := serveAuthenticated("/api/admin/usage-ranking")
 	if standaloneRoute.Code != http.StatusNotFound || !bytes.Contains(standaloneRoute.Body.Bytes(), []byte(`"not found"`)) {
 		t.Fatalf("standalone route status = %d, body=%s", standaloneRoute.Code, standaloneRoute.Body.String())
+	}
+
+	// Panel 仪表盘汇总:未认证 401,认证后返回合法的空汇总。
+	unauthorizedSummary := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(unauthorizedSummary, httptest.NewRequest(http.MethodGet, "/api/admin/dashboard/summary", nil))
+	if unauthorizedSummary.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized summary status = %d, body=%s", unauthorizedSummary.Code, unauthorizedSummary.Body.String())
+	}
+	summary := serveAuthenticated("/api/admin/dashboard/summary")
+	if summary.Code != http.StatusOK {
+		t.Fatalf("panel summary status = %d, body=%s", summary.Code, summary.Body.String())
+	}
+	if !bytes.Contains(summary.Body.Bytes(), []byte(`"attention_nodes":[]`)) {
+		t.Fatalf("panel summary must return an empty attention list, body=%s", summary.Body.String())
 	}
 }

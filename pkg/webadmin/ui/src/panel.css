@@ -391,3 +391,38 @@
     border-bottom: 0;
   }
 }
+
+.summary-note {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.health-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.health-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.state-row-only {
+  color: var(--text-muted);
+  font-size: 14px;
+  padding: 12px 0;
+}
+
+.panel-attention-table {
+  min-width: 1080px;
+}
+
+.attention-error {
+  max-width: 260px;
+}

@@ -4,6 +4,7 @@ import Dashboard from './views/Dashboard.vue'
 import Credentials from './views/Credentials.vue'
 import Buckets from './views/Buckets.vue'
 import Logs from './views/Logs.vue'
+import PanelDashboard from './views/PanelDashboard.vue'
 import PanelNodes from './views/PanelNodes.vue'
 import PanelNodeDetail from './views/PanelNodeDetail.vue'
 import { authState } from './state/auth'
@@ -18,6 +19,7 @@ const router = createRouter({
     { path: '/credentials', name: 'credentials', component: Credentials },
     { path: '/buckets', name: 'buckets', component: Buckets, meta: { requiresAuth: true } },
     { path: '/logs', name: 'logs', component: Logs, meta: { requiresAuth: true } },
+    { path: '/panel-dashboard', name: 'panel-dashboard', component: PanelDashboard },
     { path: '/nodes', name: 'panel-nodes', component: PanelNodes },
     { path: '/nodes/:id', name: 'panel-node-detail', component: PanelNodeDetail }
   ]

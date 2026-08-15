@@ -758,7 +758,7 @@ run_browser_gate() {
 		>"$TMP_DIR/browser.stdout" 2>"$TMP_DIR/browser.stderr" || {
 			fail "browser gate failed: $(redact_text <"$TMP_DIR/browser.stderr" 2>/dev/null || true)"
 		}
-	record 'ChromeDriver Panel /dashboard -> /nodes -> /logs and API boundary assertions'
+	record 'ChromeDriver Panel /panel-dashboard -> /nodes -> /logs and API boundary assertions'
 }
 
 main() {

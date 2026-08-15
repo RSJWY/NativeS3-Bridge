@@ -57,6 +57,7 @@ func (a *AdminAPI) Routes(mux *http.ServeMux, wrap func(http.Handler) http.Handl
 	h := func(fn http.HandlerFunc) http.Handler { return wrap(fn) }
 	mux.Handle("/api/admin/nodes", h(a.Nodes))
 	mux.Handle("/api/admin/nodes/", h(a.NodeByID))
+	mux.Handle("/api/admin/dashboard/summary", h(a.DashboardSummary))
 }
 
 // --- request/response shapes ---

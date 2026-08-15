@@ -30,8 +30,11 @@ from urllib.request import Request, urlopen
 DEFAULT_TIMEOUT = 30.0
 DRIVER_POLL_INTERVAL = 0.1
 ELEMENT_POLL_INTERVAL = 0.2
+# Standalone-only dashboard subpaths stay forbidden; the Panel node-health
+# summary now legitimately lives at /api/admin/dashboard/summary.
 FORBIDDEN_API_PREFIXES = (
-    "/api/admin/dashboard",
+    "/api/admin/dashboard/usage-ranking",
+    "/api/admin/dashboard/request-trend",
     "/api/admin/credentials",
     "/api/admin/buckets",
 )
@@ -538,8 +541,13 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
 
         _wait_until(
             time.monotonic() + args.timeout,
-            lambda: webdriver.current_url().rstrip("/").endswith("/nodes"),
-            "Panel login redirect to node list",
+            lambda: webdriver.current_url().rstrip("/").endswith("/panel-dashboard"),
+            "Panel login redirect to panel dashboard",
+        )
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: "需要关注的节点" in str(webdriver.execute("return document.body ? document.body.innerText : '';")),
+            "Panel dashboard content",
         )
         # Explicitly request the standalone dashboard route.  Panel mode must
         # redirect it back to the node list rather than loading standalone data.
@@ -549,12 +557,18 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         webdriver.push_route("/dashboard")
         current = _wait_until(
             time.monotonic() + args.timeout,
-            lambda: webdriver.current_url() if webdriver.current_url().rstrip("/").endswith("/nodes") else "",
-            "Panel /dashboard -> /nodes route guard",
+            lambda: webdriver.current_url() if webdriver.current_url().rstrip("/").endswith("/panel-dashboard") else "",
+            "Panel /dashboard -> /panel-dashboard route guard",
         )
         resolved_path = _api_path(str(current)).rstrip("/") or "/"
-        if resolved_path != "/nodes":
-            raise BrowserGateError(f"Panel dashboard route did not resolve to /nodes (got {_safe_url(str(current))})")
+        if resolved_path != "/panel-dashboard":
+            raise BrowserGateError(f"Panel standalone dashboard route did not resolve to /panel-dashboard (got {_safe_url(str(current))})")
+        webdriver.push_route("/nodes")
+        _wait_until(
+            time.monotonic() + args.timeout,
+            lambda: webdriver.current_url().rstrip("/").endswith("/nodes"),
+            "Panel navigation to node list",
+        )
         expected_name = args.expected_node_name
         _wait_until(
             time.monotonic() + args.timeout,
@@ -618,6 +632,8 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         resource_urls = webdriver.resource_urls()
         if not entries and not resource_urls:
             raise BrowserGateError("ChromeDriver returned no network evidence")
+        if not _saw_same_origin_api_path(entries, resource_urls, panel_url, "/api/admin/dashboard/summary"):
+            raise BrowserGateError("no same-origin /api/admin/dashboard/summary request was observed")
         if not _saw_same_origin_api_path(entries, resource_urls, panel_url, "/api/admin/nodes"):
             raise BrowserGateError("no same-origin /api/admin/nodes request was observed")
         if not _saw_same_origin_api_path(entries, resource_urls, panel_url, "/api/admin/nodes/1/tasks"):
@@ -632,6 +648,8 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         report["checks"] = [
             "login",
             "dashboard_redirect",
+            "panel_dashboard_content",
+            "panel_dashboard_summary_api",
             "node_visible",
             "panel_nodes_api",
             "node_logs_ui",

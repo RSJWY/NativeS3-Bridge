@@ -39,6 +39,7 @@
   - `/api/admin/dashboard/summary`: `total_credentials`, `total_quota_bytes`, `total_used_bytes`.
   - `/api/admin/dashboard/usage-ranking`: access key/name usage rows ordered by `used_bytes`.
   - `/api/admin/dashboard/request-trend?days=N`: UTC day buckets with put/get/delete and byte counters.
+  - Standalone dashboard endpoints are standalone-only; the Panel admin server instead serves `GET /api/admin/dashboard/summary` as the node-health aggregate (totals/health/attention nodes generated from `nodeToResponse` semantics) and must 404 on `usage-ranking` / `request-trend`. Same path, mode-specific shape: never serve credential totals in panel mode or node aggregates in standalone mode.
 - Bucket admin APIs are session-protected under `/api/admin/buckets*` and must use the shared `storage.BucketStore`, not S3 ACL routes:
   - `GET /api/admin/buckets` returns `[{name, acl, created_at}]` from `BucketStore.List`.
   - `POST /api/admin/buckets` accepts `{"name":"<bucket>"}`, calls `BucketStore.Create`, and returns the created bucket with default ACL `private`.

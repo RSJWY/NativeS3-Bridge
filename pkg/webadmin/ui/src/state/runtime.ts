@@ -13,11 +13,14 @@ export function setServiceMode(mode: ServiceMode) {
 }
 
 export function serviceHomePath(mode: ServiceMode = runtimeState.serviceMode) {
-  return mode === 'panel' ? '/nodes' : '/dashboard'
+  return mode === 'panel' ? '/panel-dashboard' : '/dashboard'
 }
 
 export function routeMatchesService(path: string, mode: ServiceMode = runtimeState.serviceMode) {
   const nodeRoute = path === '/nodes' || path.startsWith('/nodes/')
-  const panelRoute = nodeRoute || path === '/logs'
-  return mode === 'panel' ? panelRoute : !nodeRoute
+  if (mode === 'panel') {
+    return nodeRoute || path === '/panel-dashboard' || path === '/logs'
+  }
+  // standalone 保留共享的 /logs,只拒绝 Panel 专属路由。
+  return !nodeRoute && path !== '/panel-dashboard'
 }

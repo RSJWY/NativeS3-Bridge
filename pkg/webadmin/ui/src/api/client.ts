@@ -118,6 +118,37 @@ export interface PanelNode {
   created_at: string
 }
 
+export type PanelDashboardSeverity = 'sync_failed' | 'drift' | 'offline' | 'pending'
+
+export interface PanelDashboardTotals {
+  nodes: number
+  online: number
+  offline: number
+  retired: number
+  attention: number
+}
+
+export interface PanelDashboardHealth {
+  synced: number
+  waiting: number
+  failed: number
+  drift: number
+  unknown: number
+}
+
+/** 需要关注节点的摘要行；severity 是后端派生的展示排序键，前端不复算业务判断。 */
+export interface PanelDashboardAttentionNode extends PanelNode {
+  severity: PanelDashboardSeverity
+}
+
+/** Panel 首页仪表盘汇总。generated_at 是汇总生成时间，不是节点心跳时间。 */
+export interface PanelDashboardSummary {
+  totals: PanelDashboardTotals
+  health: PanelDashboardHealth
+  attention_nodes: PanelDashboardAttentionNode[]
+  generated_at: string
+}
+
 export interface PanelRegistrationToken {
   token: string
   expires_at: string
@@ -408,6 +439,9 @@ export const adminApi = {
     if (params.q) query.set('q', params.q)
     if (params.file) query.set('file', params.file)
     return apiFetch<LogsResponse>(`/api/admin/logs?${query.toString()}`)
+  },
+  panelDashboardSummary() {
+    return apiFetch<PanelDashboardSummary>('/api/admin/dashboard/summary')
   },
   listNodes() {
     return apiFetch<PanelNode[]>('/api/admin/nodes')
