@@ -31,7 +31,7 @@
       <div class="summary-card">
         <span>需要处理</span>
         <strong>{{ loading && !summary ? '…' : (summary?.totals.attention ?? 0) }}</strong>
-        <p class="summary-note">同步失败 / 漂移 / 待发布</p>
+        <p class="summary-note">同步失败 / 漂移 / 待发布 / 证书过期</p>
       </div>
       <div class="summary-card">
         <span>总使用容量</span>
@@ -212,7 +212,9 @@ const healthRows = computed(() => [
   { label: '待同步', count: summary.value?.health.waiting ?? 0, badgeClass: 'status-neutral' },
   { label: '同步失败', count: summary.value?.health.failed ?? 0, badgeClass: 'status-disabled' },
   { label: '配置漂移', count: summary.value?.health.drift ?? 0, badgeClass: 'status-disabled' },
-  { label: '未上报', count: summary.value?.health.unknown ?? 0, badgeClass: 'status-neutral' }
+  { label: '未上报', count: summary.value?.health.unknown ?? 0, badgeClass: 'status-neutral' },
+  { label: '证书已过期', count: summary.value?.certs.expired_nodes ?? 0, badgeClass: 'status-disabled' },
+  { label: '证书临期', count: summary.value?.certs.expiring_nodes ?? 0, badgeClass: 'status-warning' }
 ])
 
 onMounted(load)
@@ -233,17 +235,19 @@ async function load() {
 
 function severityLabel(severity: PanelDashboardSeverity) {
   const labels: Record<PanelDashboardSeverity, string> = {
+    cert_expired: '证书已过期',
     sync_failed: '同步失败',
     drift: '配置漂移',
     offline: '离线',
+    cert_expiring: '证书临期',
     pending: '待处理'
   }
   return labels[severity]
 }
 
 function severityBadgeClass(severity: PanelDashboardSeverity) {
-  if (severity === 'sync_failed' || severity === 'drift') return 'status-disabled'
-  if (severity === 'offline') return 'status-neutral'
+  if (severity === 'cert_expired' || severity === 'sync_failed' || severity === 'drift') return 'status-disabled'
+  if (severity === 'cert_expiring') return 'status-warning'
   return 'status-neutral'
 }
 

@@ -95,11 +95,13 @@
             <tbody>
               <tr v-if="certificateLoading" class="state-row"><td colspan="4">加载中…</td></tr>
               <tr v-else-if="certificates.length === 0" class="state-row"><td colspan="4">暂无已签发证书。</td></tr>
-              <tr v-for="certificate in certificates" :key="certificate.ID">
-                <td><code>{{ certificate.Serial }}</code></td>
-                <td><code class="fingerprint-code">{{ certificate.Fingerprint }}</code></td>
-                <td>{{ formatDate(certificate.NotAfter) }}</td>
-                <td>{{ certificate.Revoked ? '已撤销' : '有效' }}</td>
+              <tr v-for="certificate in certificates" :key="certificate.id">
+                <td><code>{{ certificate.serial }}</code></td>
+                <td><code class="fingerprint-code">{{ certificate.fingerprint }}</code></td>
+                <td>{{ formatCertExpiry(certificate) }}</td>
+                <td>
+                  <span :class="['status-badge', certificateStatusClass(certificate.status)]">{{ certificateStatusLabel(certificate.status) }}</span>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -121,7 +123,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { adminApi, type PanelCertificate, type PanelNode, type PanelPublishResult, type PanelRegistrationToken } from '../api/client'
+import { adminApi, type PanelCertificate, type PanelCertificateStatus, type PanelNode, type PanelPublishResult, type PanelRegistrationToken } from '../api/client'
 import PanelNodeBucketsSection from '../components/panel/PanelNodeBucketsSection.vue'
 import PanelNodeConfigSection from '../components/panel/PanelNodeConfigSection.vue'
 import PanelNodeCredentialsSection from '../components/panel/PanelNodeCredentialsSection.vue'
@@ -144,7 +146,11 @@ const certificateLoading = ref(false)
 const error = ref('')
 const certificateError = ref('')
 const actionMessage = ref('')
-const activeCertificateCount = computed(() => certificates.value.filter((certificate) => !certificate.Revoked).length)
+const activeCertificateCount = computed(
+  // 后端 status 判定:只有 active/expiring 算「有效」,过期与吊销都不算,
+  // 「撤销全部有效证书」按钮的语义才正确。
+  () => certificates.value.filter((certificate) => certificate.status === 'active' || certificate.status === 'expiring').length
+)
 // 区域由节点在握手时自报,Panel 只展示不下发。为空说明节点从未连接过,或其 agent
 // 版本尚不上报该字段——不代表节点没有区域配置,所以提示语要显式区分这两种含义。
 const regionHint = computed(() =>
@@ -310,7 +316,33 @@ function syncStateLabel(state: PanelNode['sync_state']) {
 }
 
 function formatDate(value?: string) {
-  return value ? new Date(value).toLocaleString() : '—'
+  return value ? new Date(value).toLocaleString() : '-'
+}
+
+// 剩余天数与到期时间是同一件事的两种读法,并入同一列展示。
+function formatCertExpiry(certificate: PanelCertificate) {
+  const base = formatDate(certificate.not_after)
+  const days = certificate.days_until_expiry
+  if (days < 0) return `${base}（已过期 ${-days} 天）`
+  if (days === 0) return `${base}（今日到期）`
+  return `${base}（剩 ${days} 天）`
+}
+
+function certificateStatusLabel(status: PanelCertificateStatus) {
+  const labels: Record<PanelCertificateStatus, string> = {
+    active: '有效',
+    expiring: '即将到期',
+    expired: '已过期',
+    revoked: '已撤销'
+  }
+  return labels[status]
+}
+
+function certificateStatusClass(status: PanelCertificateStatus) {
+  // 沿用既有状态样式体系:即将到期用警示色,已过期/已撤销用停用色。
+  if (status === 'active') return 'status-enabled'
+  if (status === 'expiring') return 'status-warning'
+  return 'status-disabled'
 }
 
 function messageFromError(err: unknown, fallback: string) {

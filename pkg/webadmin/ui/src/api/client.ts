@@ -118,7 +118,7 @@ export interface PanelNode {
   created_at: string
 }
 
-export type PanelDashboardSeverity = 'sync_failed' | 'drift' | 'offline' | 'pending'
+export type PanelDashboardSeverity = 'sync_failed' | 'drift' | 'offline' | 'pending' | 'cert_expired' | 'cert_expiring'
 
 export interface PanelDashboardTotals {
   nodes: number
@@ -134,6 +134,12 @@ export interface PanelDashboardHealth {
   failed: number
   drift: number
   unknown: number
+}
+
+/** 证书到期维度聚合(按节点当前证书口径统计,临期/已过期分开计数)。 */
+export interface PanelDashboardCerts {
+  expiring_nodes: number
+  expired_nodes: number
 }
 
 /** 需要关注节点的摘要行；severity 是后端派生的展示排序键，前端不复算业务判断。 */
@@ -167,6 +173,7 @@ export interface PanelDashboardSummary {
   totals: PanelDashboardTotals
   health: PanelDashboardHealth
   telemetry: PanelDashboardTelemetry
+  certs: PanelDashboardCerts
   attention_nodes: PanelDashboardAttentionNode[]
   generated_at: string
 }
@@ -279,16 +286,21 @@ export interface PanelPublishResult {
   push_error?: string
 }
 
+/** 证书到期状态,由后端按 TTL/3 比例阈值判定,前端只做展示不复算。 */
+export type PanelCertificateStatus = 'active' | 'expiring' | 'expired' | 'revoked'
+
 export interface PanelCertificate {
-  ID: number
-  NodeID: number
-  Fingerprint: string
-  Serial: string
-  NotBefore: string
-  NotAfter: string
-  Revoked: boolean
-  RevokedAt?: string
-  CreatedAt: string
+  id: number
+  fingerprint: string
+  serial: string
+  not_before: string
+  not_after: string
+  revoked: boolean
+  revoked_at?: string
+  created_at: string
+  status: PanelCertificateStatus
+  /** 剩余整天数;已过期为负数。 */
+  days_until_expiry: number
 }
 
 export type PanelTaskState = 'pending' | 'running' | 'success' | 'failed' | 'unknown'

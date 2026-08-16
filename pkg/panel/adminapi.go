@@ -344,6 +344,76 @@ func (a *AdminAPI) issueToken(w http.ResponseWriter, r *http.Request, id uint) {
 
 // --- certificates ---
 
+// 证书四态(派生值,非 DB 列)。判定优先级见 certStatus。
+const (
+	certStatusActive   = "active"
+	certStatusExpiring = "expiring"
+	certStatusExpired  = "expired"
+	certStatusRevoked  = "revoked"
+)
+
+// certResponse 是证书列表的 API 形状(显式 DTO,不给 GORM 模型加 json tag,
+// 避免 DB 列被钉成 API 契约)。派生字段(状态/剩余天数)在后端算,遵循
+// dashboard.go 的既有约定:不让前端复制业务判断。
+type certResponse struct {
+	ID              uint       `json:"id"`
+	Fingerprint     string     `json:"fingerprint"`
+	Serial          string     `json:"serial"`
+	NotBefore       time.Time  `json:"not_before"`
+	NotAfter        time.Time  `json:"not_after"`
+	Revoked         bool       `json:"revoked"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	Status          string     `json:"status"`            // active|expiring|expired|revoked
+	DaysUntilExpiry int        `json:"days_until_expiry"` // 已过期为负
+}
+
+// certExpiryThreshold 是临期阈值:证书自身 TTL 的 1/3(父任务 D3 比例阈值,
+// 不引入绝对值配置项)。与 nodeagent.RenewalThreshold 同语义。
+func certExpiryThreshold(notBefore, notAfter time.Time) time.Duration {
+	return notAfter.Sub(notBefore) / 3
+}
+
+// certStatus 判定证书四态,优先级顺序不可换:
+//
+//  1. Revoked           -> revoked(吊销优先于一切,即使同时已过期)
+//  2. now >= NotAfter   -> expired(与 pki.go IsCertValid 的 !Before 语义一致)
+//  3. remaining < TTL/3 -> expiring(严格小于,恰好等于阈值归 active)
+//  4. 否则              -> active(now < NotBefore 的未生效证书也归此态;
+//     签发时 NotBefore 已回拨一分钟,本系统不会出现这种证书)
+func certStatus(cert NodeCert, now time.Time) string {
+	if cert.Revoked {
+		return certStatusRevoked
+	}
+	if !now.Before(cert.NotAfter) {
+		return certStatusExpired
+	}
+	if cert.NotAfter.Sub(now) < certExpiryThreshold(cert.NotBefore, cert.NotAfter) {
+		return certStatusExpiring
+	}
+	return certStatusActive
+}
+
+// daysUntilExpiry 返回 NotAfter - now 的整天数(向下取整),已过期为负数。
+// 负数同样向下取整:过期 14 天 23 小时记为 -15(已完整流逝的整天)。
+// 不 clamp 到 0:运维需要知道过期了多久。
+func daysUntilExpiry(notAfter, now time.Time) int {
+	d := notAfter.Sub(now)
+	if d < 0 {
+		return -int((-d + 24*time.Hour - 1) / (24 * time.Hour))
+	}
+	return int(d / (24 * time.Hour))
+}
+
+func certToResponse(cert NodeCert, now time.Time) certResponse {
+	return certResponse{
+		ID: cert.ID, Fingerprint: cert.Fingerprint, Serial: cert.Serial,
+		NotBefore: cert.NotBefore, NotAfter: cert.NotAfter,
+		Revoked: cert.Revoked, RevokedAt: cert.RevokedAt, CreatedAt: cert.CreatedAt,
+		Status: certStatus(cert, now), DaysUntilExpiry: daysUntilExpiry(cert.NotAfter, now),
+	}
+}
+
 func (a *AdminAPI) certsRoute(w http.ResponseWriter, r *http.Request, id uint, rest []string) {
 	// /api/admin/nodes/{id}/certs           GET  -> list
 	// /api/admin/nodes/{id}/certs/revoke     POST -> revoke all node certs
@@ -357,7 +427,12 @@ func (a *AdminAPI) certsRoute(w http.ResponseWriter, r *http.Request, id uint, r
 			writeTransportError(w, http.StatusInternalServerError, "query certs failed")
 			return
 		}
-		writeTransportJSON(w, http.StatusOK, certs)
+		now := nowUTC()
+		items := make([]certResponse, 0, len(certs))
+		for _, cert := range certs {
+			items = append(items, certToResponse(cert, now))
+		}
+		writeTransportJSON(w, http.StatusOK, items)
 		return
 	}
 	if rest[0] == "revoke" && r.Method == http.MethodPost {

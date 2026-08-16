@@ -503,6 +503,14 @@ pre {
   color: var(--warning);
 }
 
+/* 与 .status-disabled 同一套警示配色,但降低一档:用于「即将到期」这类
+ 未坏但需动手的状态,与「已过期/已撤销」的红档区分。 */
+.status-warning {
+  border-color: #fed7aa;
+  background: var(--surface-muted);
+  color: var(--warning);
+}
+
 .table-help {
   margin-top: 6px;
   color: var(--text-muted);

@@ -48,6 +48,7 @@ type dashboardSummaryResponse struct {
 	Totals         dashboardTotals          `json:"totals"`
 	Health         dashboardHealth          `json:"health"`
 	Telemetry      dashboardTelemetry       `json:"telemetry"`
+	Certs          dashboardCerts           `json:"certs"`
 	AttentionNodes []dashboardAttentionNode `json:"attention_nodes"`
 	GeneratedAt    time.Time                `json:"generated_at"`
 }
@@ -68,6 +69,14 @@ type dashboardTelemetry struct {
 	Nodes          []dashboardNodeTelemetry `json:"nodes"`
 }
 
+// dashboardCerts 是证书到期维度聚合,复用 dashboardTelemetry 的三态计数范式。
+// 计数按「节点当前证书」口径(未吊销证书中 NotAfter 最大的一张)统计,
+// 临期与已过期分开,不合并成一个数。
+type dashboardCerts struct {
+	ExpiringNodes int `json:"expiring_nodes"`
+	ExpiredNodes  int `json:"expired_nodes"`
+}
+
 // dashboardNodeTelemetry 是单个节点的最新遥测摘要。值为 null 表示该节点
 // 未上报完整遥测,前端必须显示"未上报/不可用",绝不能显示 0。
 type dashboardNodeTelemetry struct {
@@ -79,19 +88,27 @@ type dashboardNodeTelemetry struct {
 	Status      string     `json:"status"`
 }
 
-// Severity 顺序:同步失败/漂移 > 离线 > 待同步/待发布。
+// Severity 顺序:证书已过期 > 同步失败/漂移 > 离线 > 证书临期 > 待同步/待发布。
+// cert_expired 排最高:控制面永久失联且不会自愈,比可重试的 sync_failed
+// 更严重;cert_expiring 排 offline 与 pending 之间:「还没坏但要动手」,
+// 比「已经坏了」轻,比「正常流转中」重(design §2.3)。rank 只是排序键,
+// 新档位加入时必须同步更新 attentionSeverity 的 switch,否则永远不会被选中。
 const (
-	severitySyncFailed = "sync_failed"
-	severityDrift      = "drift"
-	severityOffline    = "offline"
-	severityPending    = "pending"
+	severitySyncFailed   = "sync_failed"
+	severityDrift        = "drift"
+	severityOffline      = "offline"
+	severityPending      = "pending"
+	severityCertExpired  = "cert_expired"
+	severityCertExpiring = "cert_expiring"
 )
 
 var severityRank = map[string]int{
-	severitySyncFailed: 4,
-	severityDrift:      3,
-	severityOffline:    2,
-	severityPending:    1,
+	severityCertExpired:  6,
+	severitySyncFailed:   5,
+	severityDrift:        4,
+	severityOffline:      3,
+	severityCertExpiring: 2,
+	severityPending:      1,
 }
 
 // DashboardSummary 聚合节点生命周期、连接状态、同步健康和需要关注的节点,
@@ -116,6 +133,19 @@ func (a *AdminAPI) DashboardSummary(w http.ResponseWriter, r *http.Request) {
 		}
 		for i := range nodeStates {
 			states[nodeStates[i].NodeID] = &nodeStates[i]
+		}
+	}
+	// 证书同样批量载入后在内存按 node_id 分组,严禁在节点循环里逐个查
+	// (N+1 会违背本接口「一次响应覆盖首屏」的设计目标,design §3.2)。
+	nodeCerts := make(map[uint][]NodeCert, len(nodes))
+	if len(nodes) > 0 {
+		var certs []NodeCert
+		if err := a.db.Where("revoked = ?", false).Find(&certs).Error; err != nil {
+			writeTransportError(w, http.StatusInternalServerError, "query node certs failed")
+			return
+		}
+		for _, cert := range certs {
+			nodeCerts[cert.NodeID] = append(nodeCerts[cert.NodeID], cert)
 		}
 	}
 	generated := nowUTC()
@@ -152,19 +182,33 @@ func (a *AdminAPI) DashboardSummary(w http.ResponseWriter, r *http.Request) {
 			// 没有 NodeState 或未上报同步状态的节点进入 unknown。
 			resp.Health.Unknown++
 		}
+		// 证书到期按「当前证书」口径聚合:该节点未吊销证书中 NotAfter 最大
+		// 的一张(它代表节点最终能用到什么时候)。已过期节点必须进关注列表
+		// 使其在首屏可见(design §3.2)。
+		certSeverity := ""
+		if current, ok := currentNodeCert(nodeCerts[n.ID]); ok {
+			switch status := certStatus(current, generated); status {
+			case certStatusExpired:
+				resp.Certs.ExpiredNodes++
+				certSeverity = severityCertExpired
+			case certStatusExpiring:
+				resp.Certs.ExpiringNodes++
+				certSeverity = severityCertExpiring
+			}
+		}
 		// 需要处理的口径与 design §3 统一:同步失败/漂移 > 非退役离线 >
 		// waiting/draft_dirty/publish_required。即除"在线且已同步、无待发布
 		// 标记"的健康节点外,其余非退役节点都进入关注列表。
 		if attention := state.SyncState == SyncStateFailed || state.SyncState == SyncStateDrift ||
 			!state.Online || state.SyncState == SyncStateWaiting ||
-			state.DraftDirty || state.PublishRequired; attention {
+			state.DraftDirty || state.PublishRequired || certSeverity != ""; attention {
 			resp.Totals.Attention++
 			resp.AttentionNodes = append(resp.AttentionNodes, dashboardAttentionNode{
 				ID: state.ID, DisplayName: state.DisplayName, Status: state.Status,
 				Online: state.Online, AppliedVersion: state.AppliedVersion, DesiredVersion: state.DesiredVersion,
 				SyncState: state.SyncState, LastError: state.LastError, DraftDirty: state.DraftDirty,
 				PublishRequired: state.PublishRequired, Region: state.Region,
-				LastHeartbeat: state.LastHeartbeat, Severity: attentionSeverity(state),
+				LastHeartbeat: state.LastHeartbeat, Severity: attentionSeverity(state, certSeverity),
 			})
 		}
 		// 节点遥测摘要:缺失/过期节点不贡献总量,也不被记成 0。
@@ -210,16 +254,36 @@ func nodeTelemetrySummary(n Node, state *NodeState, generated time.Time, expiry 
 	return entry, true
 }
 
-// attentionSeverity 只对已进入需要关注集合的节点分级:同步失败/漂移最高,
-// 其次非退役离线(含离线且 waiting 的节点),最后是待同步/待发布。
-func attentionSeverity(state nodeResponse) string {
+// currentNodeCert 返回该节点未吊销证书中 NotAfter 最大的一张作为「当前证书」。
+// 同一节点可能短暂存在两张未吊销证书(签发-激活窗口,父任务 D1),取最晚
+// 到期的一张代表节点最终能用到什么时候。
+func currentNodeCert(certs []NodeCert) (NodeCert, bool) {
+	var best NodeCert
+	found := false
+	for _, cert := range certs {
+		if !found || cert.NotAfter.After(best.NotAfter) {
+			best = cert
+			found = true
+		}
+	}
+	return best, found
+}
+
+// attentionSeverity 只对已进入需要关注集合的节点分级:证书已过期最高,
+// 其次同步失败/漂移,再次非退役离线(含离线且 waiting 的节点),
+// 最后是证书临期与待同步/待发布。
+func attentionSeverity(state nodeResponse, certSeverity string) string {
 	switch {
+	case certSeverity == severityCertExpired:
+		return severityCertExpired
 	case state.SyncState == SyncStateFailed:
 		return severitySyncFailed
 	case state.SyncState == SyncStateDrift:
 		return severityDrift
 	case !state.Online:
 		return severityOffline
+	case certSeverity == severityCertExpiring:
+		return severityCertExpiring
 	default:
 		return severityPending
 	}

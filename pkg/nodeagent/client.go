@@ -26,6 +26,32 @@ import (
 // AgentVersion identifies this agent build in the hello handshake.
 const AgentVersion = "1.0.0"
 
+// certErrLogEvery 与 certErrorReporter.log 配合实现降频:证书类永久错误的
+// 首次失败立即报 Error,之后每 N 次重连重复一次(60s 上限退避下约 10 分钟
+// 一条),避免每次重连刷屏,但绝不完全静默(R4.3)。
+const certErrLogEvery = 10
+
+// certError 是证书类永久错误的分类结果。两条路径失败位置完全不同,必须
+// 分别识别并分别报错(design §3.3):
+//
+//   - 路径 A(local):本地证书已过期或损坏,在 TLS 握手阶段就被本机拒绝,
+//     请求根本没到 panel。确定性判定,不依赖错误字符串匹配。
+//   - 路径 B(rejected):panel 返回 401 -- 证书被吊销、节点被停用/退役、
+//     或指纹不在证书表内。失败发生在 HTTP 层。
+type certError struct {
+	kind string // "local" | "rejected"
+	err  error
+}
+
+func (e *certError) Error() string {
+	if e.kind == "local" {
+		return fmt.Sprintf("node client certificate unusable: %v", e.err)
+	}
+	return fmt.Sprintf("panel rejected node certificate: %v", e.err)
+}
+
+func (e *certError) Unwrap() error { return e.err }
+
 // Client tuning defaults. These bound reconnection and heartbeat behavior so a
 // panel outage produces steady, jittered retries rather than a tight loop.
 const (
@@ -80,6 +106,9 @@ type Client struct {
 	executor  *Executor
 	runner    TaskRunner
 	telemetry *StorageTelemetryRecorder
+	// certErrs 对证书类永久错误做「首次立即报、之后降频重复」的日志节流,
+	// 连接成功时重置计数,恢复后再次失败仍会立即报(R4.3)。
+	certErrs certErrorReporter
 
 	writeMu sync.Mutex
 	ws      *websocket.Conn
@@ -134,20 +163,88 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
+// certErrorReporter 节流证书类永久错误的 Error 日志:同一类错误首次立即
+// 报,之后每 certErrLogEvery 次重复一次;不同类错误各自独立计数;Reset
+// 在连接成功时清零,恢复后再次失败立即重新报。日志级别提升不改变控制流,
+// node 继续退避重连并服务本地 DB(安全网 A,R4.4)。
+type certErrorReporter struct {
+	failures map[string]int
+}
+
+func (r *certErrorReporter) log(kind, action, detail string, err error) {
+	if r.failures == nil {
+		r.failures = make(map[string]int)
+	}
+	r.failures[kind]++
+	n := r.failures[kind]
+	if n == 1 || n%certErrLogEvery == 0 {
+		slog.Error("node certificate problem prevents control-plane connection",
+			"kind", kind, "failures", n, "action", action, "detail", detail, "error", err)
+	}
+}
+
+func (r *certErrorReporter) Reset() {
+	r.failures = nil
+}
+
+// checkLocalCert 在拨号前做一次本地证书检查(路径 A):证书缺失、损坏或已过
+// NotAfter 时给出确定性的、不依赖错误字符串匹配的判定。复用兄弟任务
+// register.go 的 LoadCertificate(R4.5,AC15),到期口径与签发/续期完全一致。
+func (c *Client) checkLocalCert() *certError {
+	cert, err := c.cfg.Identity.LoadCertificate()
+	if err != nil {
+		return &certError{kind: "local", err: err}
+	}
+	if !time.Now().Before(cert.NotAfter) {
+		return &certError{kind: "local", err: fmt.Errorf(
+			"client certificate expired at %s", cert.NotAfter.Format(time.RFC3339))}
+	}
+	return nil
+}
+
 // connectAndServe dials the panel, runs the handshake, and serves the connection
 // until it closes or ctx is cancelled.
 func (c *Client) connectAndServe(ctx context.Context) error {
+	// 路径 A:拨号前主动检查本地证书,过期/损坏在 TLS 握手阶段就会失败,
+	// 提前在这里给出确定的证书语义,而不是混进通用的 dial 错误。
+	if certErr := c.checkLocalCert(); certErr != nil {
+		c.certErrs.log("local",
+			"管理员在 panel 上签发一次性注册令牌,填入 node.yaml 后重启节点(无宽限期)",
+			certErr.Error(), certErr)
+		return certErr
+	}
+
 	tlsConfig, err := c.clientTLS()
 	if err != nil {
+		certLoadErr := &certError{kind: "local", err: err}
+		if strings.Contains(err.Error(), "load client cert") {
+			// LoadX509KeyPair 失败 = 证书/私钥文件本身有问题(路径 A),
+			// 不是网络瞬时错误。
+			c.certErrs.log("local",
+				"管理员在 panel 上签发一次性注册令牌,填入 node.yaml 后重启节点(无宽限期)",
+				certLoadErr.Error(), certLoadErr)
+			return certLoadErr
+		}
 		return fmt.Errorf("build client TLS: %w", err)
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, c.cfg.DialTimeout)
 	defer cancel()
-	ws, _, err := websocket.Dial(dialCtx, c.cfg.AgentURL, &websocket.DialOptions{
+	ws, resp, err := websocket.Dial(dialCtx, c.cfg.AgentURL, &websocket.DialOptions{
 		HTTPClient: tlsHTTPClient(tlsConfig),
 	})
 	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			// 路径 B:panel 对「证书被吊销 / 节点停用或退役 / 指纹不在表内」
+			// 一律返回 401。证书本身能完成 TLS 握手,问题在 panel 侧的
+			// 吊销/停用/指纹表,与路径 A(本地证书不可用)的文案分开。
+			rejected := &certError{kind: "rejected", err: fmt.Errorf(
+				"panel returned HTTP %d (client certificate required)", resp.StatusCode)}
+			c.certErrs.log("rejected",
+				"请管理员在管理面检查该节点状态与证书吊销记录;若被吊销需重新注册",
+				rejected.Error(), rejected)
+			return rejected
+		}
 		return fmt.Errorf("dial panel: %w", err)
 	}
 	ws.SetReadLimit(clientMaxMessageBytes)
@@ -160,6 +257,8 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	if err := c.handshake(ctx, ws); err != nil {
 		return fmt.Errorf("handshake: %w", err)
 	}
+	// 连接成功:证书错误节流计数归零,恢复后再次失败仍会立即报 Error。
+	c.certErrs.Reset()
 
 	serveCtx, serveCancel := context.WithCancel(ctx)
 	defer serveCancel()
