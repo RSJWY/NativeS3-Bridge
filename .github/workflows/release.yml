@@ -180,6 +180,22 @@ jobs:
           E2E_REPORT: ${{ runner.temp }}/natives3-e2e-docker-report.txt
         run: bash scripts/test-panel-node-e2e.sh --mode docker
 
+      - name: Collect openssl ca.log on failure
+        # 诊断 eccee91 引入的 E3 过期证书签名失败：openssl ca 输出被脚本存到
+        # 临时目录的 ca.log，fail 时路径丢失。递归收集 /tmp 下所有 ca.log 进
+        # runner.temp 以便随 artifact 上传，拿到 CI openssl 版本的真实报错。
+        if: ${{ failure() }}
+        run: |
+          mkdir -p "${{ runner.temp }}/ca-logs"
+          find /tmp -name ca.log 2>/dev/null | while read -r f; do
+            cp "$f" "${{ runner.temp }}/ca-logs/$(dirname "$f" | tr '/_' '__').ca.log" 2>/dev/null || true
+          done
+          echo "=== collected ca logs ==="
+          ls -la "${{ runner.temp }}/ca-logs/" || true
+          for f in "${{ runner.temp }}/ca-logs/"*.log; do
+            echo "--- $f ---"; cat "$f" || true
+          done
+
       - name: Upload redacted E2E evidence on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@v7
@@ -189,6 +205,7 @@ jobs:
           retention-days: 3
           path: |
             ${{ runner.temp }}/natives3-e2e-*-report.txt
+            ${{ runner.temp }}/ca-logs/
 
   artifacts:
     name: Build release archives
