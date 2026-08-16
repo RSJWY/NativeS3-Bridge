@@ -894,11 +894,18 @@ extendedKeyUsage = clientAuth
 EOF
 	# -startdate/-enddate are absolute UTC (YYYYMMDDHHMMSSZ). Pick a window that
 	# is unambiguously in the past relative to the test host clock.
-	( cd "$ca_dir" && openssl ca -config "$cnf" -cert "$ca_crt" -keyfile "$ca_key" \
+	if ! ( cd "$ca_dir" && openssl ca -config "$cnf" -cert "$ca_crt" -keyfile "$ca_key" \
 		-in "$csr" -out "$node_cert" \
 		-startdate 20260101000000Z -enddate 20260102000000Z \
-		-extensions client_ext -batch -notext >"$ca_dir/ca.log" 2>&1 ) \
-		|| fail "openssl ca failed to sign expired node cert (see $ca_dir/ca.log)"
+		-extensions client_ext -batch -notext >"$ca_dir/ca.log" 2>&1 ); then
+		# 失败时立即把 ca.log 打到 stderr：脚本退出前 trap cleanup 会 rm -rf TMP_DIR，
+		# 之后再想找这个文件就来不及了。CI 与本地 openssl 版本行为可能不同，需要
+		# 真实报错定位。
+		echo "=== openssl ca failed; ca.log follows ===" >&2
+		cat "$ca_dir/ca.log" >&2 || true
+		echo "=== openssl version: $(openssl version) ===" >&2
+		fail "openssl ca failed to sign expired node cert (ca.log dumped above)"
+	fi
 	# Self-proof: the cert we just signed is past NotAfter.
 	openssl x509 -checkend 0 -noout -in "$node_cert" >/dev/null 2>&1 \
 		&& fail 'signed node cert is NOT expired (expected past NotAfter for E3)'
