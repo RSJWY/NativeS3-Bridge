@@ -70,14 +70,14 @@ This is the **only gate** where all three artifacts are present and malleable. A
 
 ## Case Study: Certificate Renewal Evaporation (2026-08)
 
-A multi-node mTLS control plane task (`07-13-multi-node-mtls`) explicitly required certificate renewal lifecycle management:
+A multi-node mTLS control plane task (`07-13-multi-node-mtls-control-plane`) explicitly required certificate renewal lifecycle management:
 
 | Stage | Location | Status |
 |-------|----------|--------|
-| Requirement | `.trellis/tasks/07-13-multi-node-mtls/prd.md:47,53`—panel manages renewal lifecycle | ✅ Present |
-| Design | `.trellis/tasks/07-13-multi-node-mtls/design.md:100-103` §3.3—detailed renewal design | ✅ Present |
-| Risk mitigation | `.trellis/tasks/07-13-multi-node-mtls/design.md:216`—depends on "proactive renewal before expiry" | ✅ Present |
-| **Execution plan** | `.trellis/tasks/07-13-multi-node-mtls/implement.md` 155 lines, 8 phases—**no mention of renewal** | ❌ Gap |
+| Requirement | `.trellis/tasks/archive/2026-07/07-13-multi-node-mtls-control-plane/prd.md:47,53`—panel manages renewal lifecycle | ✅ Present |
+| Design | `.trellis/tasks/archive/2026-07/07-13-multi-node-mtls-control-plane/design.md:100-103` §3.3—detailed renewal design | ✅ Present |
+| Risk mitigation | `.trellis/tasks/archive/2026-07/07-13-multi-node-mtls-control-plane/design.md:216`—depends on "proactive renewal before expiry" | ✅ Present |
+| **Execution plan** | `.trellis/tasks/archive/2026-07/07-13-multi-node-mtls-control-plane/implement.md` 155 lines, 8 phases—**no mention of renewal** | ❌ Gap |
 | Implementation | No renewal code shipped | ❌ Missing |
 | Verification | `trellis-check` walked implement.md → all green | ⚠️ False pass |
 
