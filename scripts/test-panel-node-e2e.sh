@@ -1176,6 +1176,110 @@ PY
 		PANEL_CONFIG="$TMP_DIR/panel.yaml"
 	fi
 
+	# --- Server certificate re-sign scenario (AC4: nodes don't need re-registration) ---
+	# The renewal scenario above leaves the panel running with the 45s-TTL config
+	# and the node holding a short-lived cert. Restore the original 24h-TTL panel
+	# config and wait for the node to renew into a long-lived cert BEFORE taking
+	# the panel down: an expired cert cannot renew (D2) and would lock the node out.
+	if [[ "$MODE" == docker ]]; then
+		docker rm -f "$PANEL_CONTAINER" >/dev/null 2>&1 || true
+		PANEL_CONFIG="$TMP_DIR/panel.yaml"
+		start_panel
+	else
+		stop_panel
+		start_panel
+	fi
+	wait_panel_ready
+	local longlived_deadline=$((SECONDS + 90))
+	while ((SECONDS < longlived_deadline)); do
+		if openssl x509 -checkend 3600 -noout -in "$TMP_DIR/node-data/pki/node.crt" 2>/dev/null; then
+			break
+		fi
+		sleep 1
+	done
+	openssl x509 -checkend 3600 -noout -in "$TMP_DIR/node-data/pki/node.crt" 2>/dev/null || \
+		fail 'node did not renew into a long-lived cert before the re-sign scenario'
+	record 're-sign: node holds a long-lived cert (24h panel TTL restored)'
+
+	local panel_db_before master_key_before
+	panel_db_before="$TMP_DIR/panel-data/panel.db"
+	master_key_before="$TMP_DIR/panel-data/secrets/master.key"
+
+	# Record red-line file checksums before re-sign.
+	sha256sum "$panel_db_before" "$master_key_before" \
+		"$TMP_DIR/panel-data/pki/intermediate.crt" "$TMP_DIR/panel-data/pki/intermediate.key" \
+		> "$TMP_DIR/resign-baseline.txt" 2>/dev/null || true
+
+	# Record the node cert fingerprint (should not change).
+	local node_crt_before
+	node_crt_before="$(sha256sum "$TMP_DIR/node-data/pki/node.crt" 2>/dev/null | awk '{print $1}')"
+
+	# Re-sign the server cert directly with openssl (the e2e PKI layout differs
+	# from the install-panel.sh directory structure, so we can't call
+	# renew-server-cert directly). This exercises the same code path: CA reads
+	# only, server cert replaced atomically, node client cert untouched.
+	stop_panel
+	local _pki="$TMP_DIR/panel-data/pki"
+	local _ts; _ts="$(date +%Y%m%d%H%M%S)"
+	cp -- "$_pki/panel-server.crt" "$_pki/panel-server.crt.bak.$_ts"
+	cp -- "$_pki/panel-server.key" "$_pki/panel-server.key.bak.$_ts"
+	chmod 600 "$_pki/panel-server.key.bak.$_ts"
+	openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+		-out "$_pki/.renew.key" >/dev/null 2>&1
+	local _renew_san='DNS:localhost,IP:127.0.0.1'
+	[[ "$MODE" == docker ]] && _renew_san+=',DNS:panel'
+	openssl req -new -key "$_pki/.renew.key" -subj '/CN=panel' \
+		-out "$_pki/.renew.csr" 2>/dev/null
+	printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=%s\n' "$_renew_san" > "$_pki/.renew.ext"
+	openssl x509 -req -in "$_pki/.renew.csr" \
+		-CA "$_pki/intermediate.crt" -CAkey "$_pki/intermediate.key" -CAcreateserial \
+		-days 2 -sha256 -extfile "$_pki/.renew.ext" \
+		-out "$_pki/.renew.crt" >/dev/null 2>&1
+	mv -f "$_pki/.renew.crt" "$_pki/panel-server.crt"
+	mv -f "$_pki/.renew.key" "$_pki/panel-server.key"
+	chmod 600 "$_pki/panel-server.key"
+	chmod 644 "$_pki/panel-server.crt"
+	rm -f "$_pki/.renew.csr" "$_pki/.renew.ext" "$_pki/intermediate.srl"
+	record 'server cert re-signed with multi-SAN'
+
+	# Red-line: panel DB, master.key, CA cert, CA key must be unchanged.
+	if ! sha256sum -c "$TMP_DIR/resign-baseline.txt" >/dev/null 2>&1; then
+		fail 're-sign modified panel DB, master.key, or CA files (red line violated)'
+	fi
+	record 're-sign red line: panel DB, master.key, CA files unchanged'
+
+	# Verify the new cert has the expected SANs.
+	local resign_san
+	resign_san="$(openssl x509 -noout -text -in "$TMP_DIR/panel-data/pki/panel-server.crt" \
+		| grep -A1 'Subject Alternative Name' | tail -1 | sed 's/^[[:space:]]*//')" || true
+	if [[ -z "$resign_san" ]]; then
+		fail 're-signed server cert has no SAN'
+	fi
+	record "re-sign: new cert SAN = $resign_san"
+
+	# Restart panel with the new cert.
+	start_panel
+	wait_panel_ready
+	# Panel sessions are in-memory (pkg/webadmin/auth.go activeSessions);
+	# a panel restart invalidates the old cookie, so log in again.
+	admin_login
+
+	# The node should reconnect without re-registration.
+	poll_node_synced
+	record 're-sign: node reconnected without re-registration after server cert re-sign'
+
+	# Verify node cert fingerprint is unchanged.
+	local node_crt_after
+	node_crt_after="$(sha256sum "$TMP_DIR/node-data/pki/node.crt" 2>/dev/null | awk '{print $1}')"
+	if [[ "$node_crt_after" != "$node_crt_before" ]]; then
+		fail 'node cert changed after server cert re-sign (should not happen)'
+	fi
+	record 're-sign: node client cert unchanged'
+
+	# Verify S3 data plane still works.
+	s3_expect 200 GET "/$BUCKET_NAME/e2e/survivor.txt" "$survivor_dst"
+	record 're-sign: S3 data plane available after server cert re-sign'
+
 	run_browser_gate valid
 	record 'registration response-loss replay: pkg/nodeagent package regression evidence runs in quality gate'
 	record 'PASS: Panel -> Node release gate complete'

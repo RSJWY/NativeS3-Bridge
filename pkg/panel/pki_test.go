@@ -1,15 +1,18 @@
 package panel
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,7 +55,7 @@ func newTestIntermediateCA(t *testing.T) *CA {
 		t.Fatalf("write ca key: %v", err)
 	}
 
-	ca, err := LoadIntermediateCA(certPath, keyPath)
+	ca, err := LoadIntermediateCA(certPath, keyPath, time.Now())
 	if err != nil {
 		t.Fatalf("load ca: %v", err)
 	}
@@ -322,5 +325,121 @@ func TestActivateCertNoOldCerts(t *testing.T) {
 	}
 	if row.ActivatedAt == nil {
 		t.Fatal("sole cert must have activated_at set")
+	}
+}
+
+// writeTestCAFiles writes a self-signed CA cert+key to dir with the given
+// NotBefore/NotAfter, returning the cert and key file paths.
+func writeTestCAFiles(t *testing.T, dir string, notBefore, notAfter time.Time) (certPath, keyPath string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen ca key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-intermediate-ca"},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create ca cert: %v", err)
+	}
+	certPath = filepath.Join(dir, "ca.crt")
+	keyPath = filepath.Join(dir, "ca.key")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatalf("write ca cert: %v", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal ca key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("write ca key: %v", err)
+	}
+	return certPath, keyPath
+}
+
+func TestLoadIntermediateCAExpired(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	notBefore := now.Add(-48 * time.Hour)
+	notAfter := now.Add(-time.Hour)
+	certPath, keyPath := writeTestCAFiles(t, dir, notBefore, notAfter)
+
+	_, err := LoadIntermediateCA(certPath, keyPath, now)
+	if err == nil {
+		t.Fatal("expected error for expired CA")
+	}
+	if !strings.Contains(err.Error(), "intermediate CA expired") {
+		t.Fatalf("error should mention CA expiry, got: %v", err)
+	}
+}
+
+func TestLoadIntermediateCANotYetValid(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	notBefore := now.Add(time.Hour)
+	notAfter := now.Add(48 * time.Hour)
+	certPath, keyPath := writeTestCAFiles(t, dir, notBefore, notAfter)
+
+	_, err := LoadIntermediateCA(certPath, keyPath, now)
+	if err == nil {
+		t.Fatal("expected error for not-yet-valid CA")
+	}
+	if !strings.Contains(err.Error(), "not yet valid") {
+		t.Fatalf("error should mention CA not yet valid, got: %v", err)
+	}
+}
+
+func TestLoadIntermediateCAValidNoError(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	notBefore := now.Add(-time.Hour)
+	notAfter := now.Add(365 * 24 * time.Hour)
+	certPath, keyPath := writeTestCAFiles(t, dir, notBefore, notAfter)
+
+	ca, err := LoadIntermediateCA(certPath, keyPath, now)
+	if err != nil {
+		t.Fatalf("expected success for valid CA, got: %v", err)
+	}
+	if ca == nil {
+		t.Fatal("CA should not be nil")
+	}
+}
+
+func TestLoadIntermediateCANearExpiry(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	// 30 days remaining: inside the 90-day warn window but not expired.
+	notBefore := now.Add(-24 * time.Hour)
+	notAfter := now.Add(30 * 24 * time.Hour)
+	certPath, keyPath := writeTestCAFiles(t, dir, notBefore, notAfter)
+
+	// Capture slog output to assert the near-expiry warning fires.
+	var buf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prevLogger)
+
+	// Near expiry must NOT block startup: load succeeds with a non-nil CA.
+	ca, err := LoadIntermediateCA(certPath, keyPath, now)
+	if err != nil {
+		t.Fatalf("near-expiry CA should load successfully, got: %v", err)
+	}
+	if ca == nil {
+		t.Fatal("CA should not be nil")
+	}
+	if !strings.Contains(buf.String(), "intermediate CA is approaching expiry") {
+		t.Fatalf("expected near-expiry warning in log, got: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "remaining_days") {
+		t.Fatalf("expected remaining_days in warning, got: %q", buf.String())
 	}
 }

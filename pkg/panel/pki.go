@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"os"
 	"strings"
@@ -23,6 +24,11 @@ import (
 // (see design §3.3).
 const DefaultClientCertTTL = 90 * 24 * time.Hour
 
+// caExpiryWarnAfter 是 CA 自身临期告警阈值。取 90 天的理由：与客户端证书
+// TTL 同量级，且 CA 到期意味着全网重装（信任锚不可轮换，见遗留项 L1），
+// 90 天是能排期的最短窗口。
+const caExpiryWarnAfter = 90 * 24 * time.Hour
+
 // CA holds the online intermediate CA used to sign node client certificates.
 // The offline root CA is not loaded here: it only signs/rotates the
 // intermediate and is kept off the panel's daily path (design §3.1).
@@ -35,7 +41,10 @@ type CA struct {
 // LoadIntermediateCA loads the intermediate CA certificate and private key from
 // PEM files. Both are required; a missing or malformed file is a fatal,
 // fail-closed error so the panel refuses to start without a usable CA.
-func LoadIntermediateCA(certPath, keyPath string) (*CA, error) {
+//
+// The now parameter is used for CA self-validity checks (expired / not-yet-valid
+// / near-expiry warning) so callers can inject deterministic times in tests.
+func LoadIntermediateCA(certPath, keyPath string, now time.Time) (*CA, error) {
 	if strings.TrimSpace(certPath) == "" || strings.TrimSpace(keyPath) == "" {
 		return nil, fmt.Errorf("intermediate CA cert and key paths are required")
 	}
@@ -53,6 +62,19 @@ func LoadIntermediateCA(certPath, keyPath string) (*CA, error) {
 	}
 	if !cert.IsCA {
 		return nil, fmt.Errorf("intermediate CA certificate is not a CA")
+	}
+	if now.UTC().Before(cert.NotBefore) {
+		return nil, fmt.Errorf("intermediate CA is not yet valid (valid from %s); this is the CA itself, not a node or server certificate", cert.NotBefore.UTC().Format(time.RFC3339))
+	}
+	if !now.UTC().Before(cert.NotAfter) {
+		return nil, fmt.Errorf("intermediate CA expired at %s; CA expiry requires full cluster reinstall (trust anchor is not rotatable); this is the CA itself, not a node or server certificate", cert.NotAfter.UTC().Format(time.RFC3339))
+	}
+	remaining := cert.NotAfter.UTC().Sub(now.UTC())
+	if remaining < caExpiryWarnAfter {
+		slog.Warn("intermediate CA is approaching expiry",
+			"remaining_days", int(remaining.Hours()/24),
+			"expires_at", cert.NotAfter.UTC().Format(time.RFC3339),
+			"action", "CA expiry requires full cluster reinstall (trust anchor is not rotatable)")
 	}
 	key, err := parsePrivateKeyPEM(keyPEM)
 	if err != nil {

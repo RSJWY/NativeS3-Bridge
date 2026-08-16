@@ -31,7 +31,7 @@ CA 过期 → 签出的证书链直接不可用，必须 fail-closed（R3.1）�
 ### 2.1 子命令 CLI
 
 ```
-install-panel.sh renew-server-cert --install-dir PATH --panel-host HOST[,HOST...] [--days N] [--no-restart]
+install-panel.sh renew-server-cert --install-dir PATH --panel-host HOST[,HOST...] [--days N] [--restart]
 ```
 
 | 参数 | 说明 |
@@ -39,11 +39,11 @@ install-panel.sh renew-server-cert --install-dir PATH --panel-host HOST[,HOST...
 | `--install-dir` | 必填。先过 `validate_install_dir`（`install-panel.sh:81`，含危险目录黑名单） |
 | `--panel-host` | 必填，逗号分隔的 SAN 列表；每项独立判 IPv4/DNS |
 | `--days` | 可选，默认 825（与装机 `install-panel.sh:289` 一致） |
-| `--no-restart` | 可选。默认重签后**不自动重启**（重启是有感操作，不应默认发生）；本 flag 保留给脚本化场景显式表达意图 —— 见下方「退出码」段的说明 |
+| `--restart` | 可选。默认重签后**不自动重启**（重启会中断所有节点控制面连接，不应默认发生）；加此 flag 显式要求重启 |
 
 退出码：`0` 成功；非 0 由 `die` 统一产生（沿用 `install-panel.sh:47` 的 `install-panel: <msg>` 前缀格式）。
 
-**注**：`--no-restart` 的语义在实现时二选一并在 usage 写清——要么默认不重启、`--restart` 显式要求重启，要么默认重启、`--no-restart` 抑制。**推荐前者**（默认不重启、提供 `--restart`），理由：重启会中断所有节点控制面连接，不该是默认行为。实现者请按推荐项落地并同步修正本节参数表。
+**已裁定**：采用「默认不重启、`--restart` 显式要求」语义。理由：重启会中断所有节点控制面连接，不该是默认行为。
 
 前置检查（任一不满足即 `die`，不做任何写入）：
 1. `id -u` 为 0（与装机 `:249` 一致）。

@@ -19,23 +19,41 @@ usage() {
 Install a standalone NativeS3 panel.
 
 Usage:
-  install-panel.sh --panel-host HOST [options]
+  install-panel.sh --panel-host HOST[,HOST...] [options]
+  install-panel.sh renew-server-cert --install-dir PATH --panel-host HOST[,HOST...] [options]
+
+Subcommands:
+  (default)             Install a new panel
+  renew-server-cert     Re-sign the panel server certificate (non-destructive;
+                        does not touch panel DB, master.key, or node certs)
 
 Required:
-  --panel-host HOST       DNS hostname or IPv4 address nodes use for panel:9443
+  --panel-host HOST[,HOST...]
+                        DNS hostname(s) or IPv4 address(es) nodes use for
+                        panel:9443. Multiple values comma-separated (mixed
+                        DNS and IPv4 allowed).
 
 Options:
-  --install-dir PATH      Installation directory (default: /opt/natives3-panel)
-  --tag TAG               GHCR image tag (default: latest)
-  --db-driver DRIVER      Database driver: sqlite, mysql (also MariaDB), or postgres (default: sqlite)
-  --db-dsn DSN            Database DSN. Default: /data/panel.db (sqlite). For
-                          mysql/postgres pass the full connection string, or in
-                          an interactive terminal leave it unset to be prompted
-                          for host/port/user/password/dbname. Written into
-                          panel.yaml and never echoed.
-  --force                 Replace an existing installation directory
-  --no-start              Generate and validate files without pulling or starting
-  -h, --help              Show this help
+  --install-dir PATH    Installation directory (default: /opt/natives3-panel)
+  --tag TAG             GHCR image tag (default: latest)
+  --db-driver DRIVER    Database driver: sqlite, mysql (also MariaDB), or postgres (default: sqlite)
+  --db-dsn DSN          Database DSN. Default: /data/panel.db (sqlite). For
+                        mysql/postgres pass the full connection string, or in
+                        an interactive terminal leave it unset to be prompted
+                        for host/port/user/password/dbname. Written into
+                        panel.yaml and never echoed.
+  --force               Replace an existing installation directory
+  --no-start            Generate and validate files without pulling or starting
+  -h, --help            Show this help
+
+renew-server-cert options:
+  --install-dir PATH    (required) Existing installation directory
+  --panel-host HOST[,HOST...]
+                        (required) New SAN list for the server certificate
+  --days N              Certificate validity in days (default: 825)
+  --restart             Restart the panel container after successful re-sign
+                        (default: do not restart; the panel must be restarted
+                        manually for the new certificate to take effect)
 
 When attached to a terminal, a missing --panel-host and any unset database
 options are prompted for; sqlite defaults to /data/panel.db. In a
@@ -87,6 +105,31 @@ validate_install_dir() {
       die "refusing unsafe installation directory: $1"
       ;;
   esac
+}
+
+# build_san takes a comma-separated list of hostnames/IPv4 addresses and outputs
+# the OpenSSL subjectAltName value (e.g. "DNS:foo.example.com,IP:10.0.0.1").
+# Each item is independently classified using is_ipv4 / is_dns_name. Any item
+# that matches neither causes die (no silent drop, R2.3). An empty overall list
+# also dies. This is the single source of truth for SAN construction — install
+# and renew-server-cert both call it.
+build_san() {
+  local input="$1" item san=""
+  IFS=',' read -r -a _san_items <<<"$input"
+  for item in "${_san_items[@]}"; do
+    item="${item## }"
+    item="${item%% }"
+    [[ -n "$item" ]] || continue
+    if is_ipv4 "$item"; then
+      san="${san:+$san,}IP:$item"
+    elif is_dns_name "$item"; then
+      san="${san:+$san,}DNS:$item"
+    else
+      die "--panel-host entry is not a valid DNS hostname or IPv4 address: $item"
+    fi
+  done
+  [[ -n "$san" ]] || die "--panel-host must contain at least one valid DNS hostname or IPv4 address"
+  printf '%s' "$san"
 }
 
 validate_db_driver() {
@@ -157,6 +200,172 @@ prompt_external_dsn() {
   esac
 }
 
+# --- renew-server-cert subcommand ---
+# Re-signs the panel server certificate in-place. Non-destructive: only writes
+# under <install_dir>/data/pki/. Never touches panel DB, master.key,
+# intermediate-ca.key, or node_certs data (red line, structural protection).
+renew_server_cert() {
+  local rc_install_dir="" rc_panel_host="" rc_days=825 rc_restart=false
+  while (($# > 0)); do
+    case "$1" in
+      --install-dir)
+        (($# >= 2)) || die "--install-dir requires a value"
+        rc_install_dir="$2"
+        shift 2
+        ;;
+      --panel-host)
+        (($# >= 2)) || die "--panel-host requires a value"
+        rc_panel_host="$2"
+        shift 2
+        ;;
+      --days)
+        (($# >= 2)) || die "--days requires a value"
+        rc_days="$2"
+        shift 2
+        ;;
+      --restart)
+        rc_restart=true
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "renew-server-cert: unknown argument: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$rc_install_dir" ]] || die "renew-server-cert: --install-dir is required"
+  [[ -n "$rc_panel_host" ]] || die "renew-server-cert: --panel-host is required"
+  validate_install_dir "$rc_install_dir"
+
+  local pki_dir="$rc_install_dir/data/pki"
+  local ca_crt="$pki_dir/intermediate-ca.crt"
+  local ca_key="$pki_dir/intermediate-ca.key"
+  local server_crt="$pki_dir/panel-server.crt"
+  local server_key="$pki_dir/panel-server.key"
+
+  # --- Pre-flight checks (all must pass before any write) ---
+  [[ "$(id -u)" -eq 0 ]] || die "run this command as root (for example with sudo)"
+  require_command openssl
+  [[ -f "$ca_crt" && -r "$ca_crt" ]] || die "renew-server-cert: CA cert not found or not readable: $ca_crt"
+  [[ -f "$ca_key" && -r "$ca_key" ]] || die "renew-server-cert: CA key not found or not readable: $ca_key"
+  [[ -f "$server_crt" ]] || die "renew-server-cert: existing server cert not found: $server_crt (run install first)"
+
+  local san
+  san="$(build_san "$rc_panel_host")"
+
+  umask 077
+
+  local ts
+  ts="$(date +%Y%m%d%H%M%S)"
+  local bak_crt="${server_crt}.bak.${ts}"
+  local bak_key="${server_key}.bak.${ts}"
+
+  # --- Backup existing cert+key (R4.1) ---
+  cp -- "$server_crt" "$bak_crt"
+  cp -- "$server_key" "$bak_key"
+  chmod 600 "$bak_key"
+
+  # --- Generate new cert using temp filenames (R4.2: fail → originals untouched) ---
+  local tmp_key="$pki_dir/.panel-server-renew.key"
+  local tmp_csr="$pki_dir/.panel-server-renew.csr"
+  local tmp_ext="$pki_dir/.panel-server-renew.ext"
+  local tmp_crt="$pki_dir/.panel-server-renew.crt"
+
+  # Clean up temp files on exit (success or failure)
+  trap 'rm -f -- "$tmp_key" "$tmp_csr" "$tmp_ext" "$tmp_crt" "$pki_dir/intermediate-ca.srl"' EXIT
+
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 \
+    -out "$tmp_key" >/dev/null 2>&1 || die "renew-server-cert: failed to generate new private key"
+  openssl req -new -sha256 \
+    -key "$tmp_key" \
+    -subj "/CN=$(printf '%s' "$rc_panel_host" | cut -d, -f1)" \
+    -out "$tmp_csr" 2>/dev/null || die "renew-server-cert: failed to generate CSR"
+  cat >"$tmp_ext" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=$san
+EOF
+  openssl x509 -req -sha256 -days "$rc_days" \
+    -in "$tmp_csr" \
+    -CA "$ca_crt" \
+    -CAkey "$ca_key" \
+    -CAcreateserial \
+    -extfile "$tmp_ext" \
+    -out "$tmp_crt" >/dev/null 2>&1 || die "renew-server-cert: failed to sign new certificate"
+
+  # --- Validate new cert before replacing (R4.5 / AC9) ---
+  openssl x509 -in "$tmp_crt" -noout >/dev/null 2>&1 || die "renew-server-cert: new certificate is not parseable"
+  local san_check
+  san_check="$(openssl x509 -in "$tmp_crt" -noout -text | grep -A1 'Subject Alternative Name' | tail -1 | sed 's/^[[:space:]]*//')" || true
+  [[ -n "$san_check" ]] || die "renew-server-cert: new certificate has no SAN extension"
+  openssl verify -CAfile "$ca_crt" "$tmp_crt" >/dev/null 2>&1 || die "renew-server-cert: new certificate does not verify against CA"
+
+  # --- Atomic replace (R4.6) ---
+  mv -f -- "$tmp_crt" "$server_crt"
+  mv -f -- "$tmp_key" "$server_key"
+  chmod 600 "$server_key"
+  chmod 644 "$server_crt"
+  chown 10001:10001 "$server_crt" "$server_key"
+
+  # --- Clean up intermediate files (R4.4 / AC11) ---
+  rm -f -- "$tmp_csr" "$tmp_ext" "$pki_dir/intermediate-ca.srl"
+  trap - EXIT
+
+  # --- Output (R4.5 / R5.2 / R5.3) ---
+  local new_expiry
+  new_expiry="$(openssl x509 -in "$server_crt" -noout -enddate | cut -d= -f2)"
+  cat <<EOF
+Panel server certificate re-signed successfully.
+
+  SAN:          $san_check
+  Expires:      $new_expiry
+  Install dir:  $rc_install_dir
+
+Backups (delete after confirming the new certificate works):
+  $bak_crt
+  $bak_key
+
+Rollback (if the new certificate has problems):
+  mv -f "$bak_crt" "$server_crt"
+  mv -f "$bak_key" "$server_key"
+  chown 10001:10001 "$server_crt" "$server_key"
+  chmod 600 "$server_key"
+  chmod 644 "$server_crt"
+  Then restart the panel container.
+
+IMPORTANT: The panel loads the server certificate at process startup.
+The new certificate will NOT take effect until the panel container is restarted.
+
+To restart now:
+  docker compose --project-directory "$rc_install_dir" -f "$rc_install_dir/docker-compose.yml" restart panel
+
+Re-signing the server certificate does NOT invalidate already-registered nodes.
+The CA and node client certificates are unchanged; nodes will reconnect without re-registration.
+EOF
+
+  if [[ "$rc_restart" == true ]]; then
+    echo "Restarting panel container (--restart)..."
+    docker compose --project-directory "$rc_install_dir" -f "$rc_install_dir/docker-compose.yml" restart panel
+  else
+    echo "Use --restart to automatically restart the panel container after re-signing."
+  fi
+}
+
+# --- Subcommand dispatch ---
+# If $1 is a known subcommand, shift and dispatch; otherwise fall through to
+# the default install path. This keeps the install body un-reindented (design
+# §1.1).
+if [[ $# -gt 0 && "$1" == "renew-server-cert" ]]; then
+  shift
+  renew_server_cert "$@"
+  exit 0
+fi
+
 while (($# > 0)); do
   case "$1" in
     --panel-host)
@@ -206,7 +415,7 @@ done
 
 if [[ -z "$panel_host" ]]; then
   if [[ -t 0 ]]; then
-    read -r -p "Panel hostname or IPv4 address used by nodes: " panel_host
+    read -r -p "Panel hostname or IPv4 address used by nodes (comma-separated for multiple): " panel_host
   else
     die "--panel-host is required in non-interactive mode"
   fi
@@ -238,13 +447,7 @@ validate_tag "$tag"
 validate_db_driver "$db_driver"
 validate_db_dsn "$db_driver" "$db_dsn"
 quoted_db_dsn="$(yaml_quote "$db_dsn")"
-if is_ipv4 "$panel_host"; then
-  san="IP:$panel_host"
-elif is_dns_name "$panel_host"; then
-  san="DNS:$panel_host"
-else
-  die "--panel-host must be a valid DNS hostname or IPv4 address"
-fi
+san="$(build_san "$panel_host")"
 
 [[ "$(id -u)" -eq 0 ]] || die "run this installer as root (for example with sudo)"
 require_command openssl

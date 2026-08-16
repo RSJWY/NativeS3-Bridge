@@ -55,7 +55,7 @@ func main() {
 		slog.Error("init secret cipher", "error", err)
 		os.Exit(1)
 	}
-	ca, err := panel.LoadIntermediateCA(cfg.PKI.IntermediateCertFile, cfg.PKI.IntermediateKeyFile)
+	ca, err := panel.LoadIntermediateCA(cfg.PKI.IntermediateCertFile, cfg.PKI.IntermediateKeyFile, time.Now())
 	if err != nil {
 		slog.Error("load intermediate CA", "error", err)
 		os.Exit(1)
