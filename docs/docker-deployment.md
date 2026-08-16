@@ -304,6 +304,9 @@ keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
 subjectAltName=DNS:panel.example.com
 EOF
+# node 通过多个主机名/IP 连接时，SAN 需用逗号分隔写全，例如：
+# subjectAltName=DNS:panel.example.com,IP:10.0.0.5
+# 连接名不在 SAN 内会导致 node 侧 TLS 校验失败；详见运维指南 §10.5。
 sudo openssl x509 -req -sha256 -days 825 \
   -in /tmp/panel-server.csr \
   -CA /opt/natives3-panel/data/pki/intermediate-ca.crt \
@@ -312,6 +315,11 @@ sudo openssl x509 -req -sha256 -days 825 \
   -out /opt/natives3-panel/data/pki/panel-server.crt
 rm -f /tmp/panel-server.csr /tmp/panel-server.ext
 ```
+
+若 node 会通过多个主机名/IP 连接 panel，`subjectAltName` 需逗号分隔全部值，例如
+`subjectAltName=DNS:panel.example.com,IP:10.0.0.5`——node 实际使用的主机名/IP 必须在
+SAN 内，否则 TLS 校验失败。到期重签可直接用安装脚本的
+[§10.5 renew-server-cert](multi-node-operations.md#105-re-signing-the-panel-server-cert)。
 
 编辑 `panel.yaml`：保持容器内路径 `/data/...`，使用独立 SQLite `/data/panel.db`，并设置随机 session secret 与 bootstrap 密码：
 
@@ -467,8 +475,13 @@ sudo rm -rf /opt/natives3-node
 - node：`natives3.db`、`objects/`、sidecar、`node.yaml`、`node.key` 与 `node.crt`；
 - panel 数据库与主密钥必须分开保存，只有数据库备份不应能解密 S3 secret。
 
-生产级离线 root CA、在线 intermediate 轮换、节点证书撤销、恢复演练和事故处理见
-[多节点 mTLS 运维指南](multi-node-operations.md)。
+节点证书撤销、恢复演练和事故处理见[多节点 mTLS 运维指南](multi-node-operations.md)的
+[§5](multi-node-operations.md#5-security-incident-handling)与
+[§8](multi-node-operations.md#8-recovery-drill-checklist)。注意：部署中不存在离线
+root CA，部署 CA（`intermediate-ca.crt`，实为自签根，见
+[§10.6 已知限制 L1](multi-node-operations.md#106-ca-expiry---known-limitation-l1)）
+不可轮换。证书全生命周期运维（自动续期、到期巡检、过期恢复、服务端证书重签）见
+[§10 Certificate lifecycle operations](multi-node-operations.md#10-certificate-lifecycle-operations)。
 
 ## 9. 安全边界
 
@@ -477,5 +490,8 @@ sudo rm -rf /opt/natives3-node
 - node 只发布 `9000`，不提供管理端口。公网 S3 应在应用或可信反向代理层启用 HTTPS。
 - CA 私钥和 panel 主密钥都不得复制到 node。node 只需要公共 CA。
 - 注册令牌只用于首次注册。成功后清空 `node.yaml` 中的令牌，并限制配置文件读取权限。
-- `--force` 会删除已有安装目录，不是升级命令。
+- `--force` 会删除已有安装目录，不是升级命令。服务端证书到期时的正确做法是
+  `renew-server-cert` 子命令，见
+  [§10.5](multi-node-operations.md#105-re-signing-the-panel-server-cert)，绝不要用
+  `--force`「续期」。
 - `latest` 适合快速体验；需要可重复部署和可控回滚时应固定发布 tag。

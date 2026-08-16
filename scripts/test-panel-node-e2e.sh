@@ -848,6 +848,64 @@ query_node_logs() {
 	fail 'timed out polling Node log query task'
 }
 
+# cert_der_fp prints the SHA-256 fingerprint of a cert's DER bytes (the same
+# value the panel stores in node_certs.fingerprint and returns from
+# /api/admin/nodes/{id}/certs). Plain `sha256sum` hashes the PEM file
+# bytes, which is different — use this whenever comparing against the API.
+cert_der_fp() {
+	# openssl -fingerprint prints uppercase hex with colons; the panel stores
+	# lowercase (hex.EncodeToString). Normalize to lowercase, no colons.
+	openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null \
+		| sed 's/^sha256 Fingerprint=//; s/://g' | tr 'A-F' 'a-f'
+}
+
+# sign_expired_node_cert produces an expired node.crt at <node_cert> using the
+# panel's e2e CA and the node's EXISTING node.key (so the public key matches
+# what the panel already has on file). It uses `openssl ca` with
+# -startdate/-enddate because openssl 3.0.x lacks x509 -not_before/-not_after.
+# The result is chain-valid but past NotAfter; the node's local pre-dial check
+# (path A) rejects it before any TLS handshake, matching §10.4.
+sign_expired_node_cert() {
+	local node_key="$1" node_cert="$2" ca_crt="$3" ca_key="$4" ca_dir
+	ca_dir="$(mktemp -d "$TMP_DIR/oca.XXXXXX")"
+	mkdir -p "$ca_dir/demoCA/newcerts"
+	: >"$ca_dir/demoCA/index.txt"
+	echo 1000 >"$ca_dir/demoCA/serial"
+	local csr="$ca_dir/node.csr" cnf="$ca_dir/ca.cnf"
+	openssl req -new -key "$node_key" -subj '/CN=node-1' -out "$csr" 2>/dev/null
+	cat >"$cnf" <<EOF
+[ca]
+default_ca = CA_default
+[CA_default]
+database = /dev/null
+new_certs_dir = $ca_dir/demoCA/newcerts
+certificate = $ca_crt
+private_key = $ca_key
+serial = $ca_dir/demoCA/serial
+default_md = sha256
+policy = policy_any
+x509_extensions = client_ext
+[policy_any]
+commonName = supplied
+[client_ext]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = clientAuth
+EOF
+	# -startdate/-enddate are absolute UTC (YYYYMMDDHHMMSSZ). Pick a window that
+	# is unambiguously in the past relative to the test host clock.
+	( cd "$ca_dir" && openssl ca -config "$cnf" -cert "$ca_crt" -keyfile "$ca_key" \
+		-in "$csr" -out "$node_cert" \
+		-startdate 20260101000000Z -enddate 20260102000000Z \
+		-extensions client_ext -batch -notext >"$ca_dir/ca.log" 2>&1 ) \
+		|| fail "openssl ca failed to sign expired node cert (see $ca_dir/ca.log)"
+	# Self-proof: the cert we just signed is past NotAfter.
+	openssl x509 -checkend 0 -noout -in "$node_cert" >/dev/null 2>&1 \
+		&& fail 'signed node cert is NOT expired (expected past NotAfter for E3)'
+	chmod 600 "$node_cert"
+	record "E3: signed chain-valid but expired node.crt (path A will reject before dial)"
+}
+
 run_browser_gate() {
 	if [[ "$SKIP_BROWSER" == 1 ]]; then
 		record 'browser gate skipped by request'
@@ -1279,6 +1337,120 @@ PY
 	# Verify S3 data plane still works.
 	s3_expect 200 GET "/$BUCKET_NAME/e2e/survivor.txt" "$survivor_dst"
 	record 're-sign: S3 data plane available after server cert re-sign'
+
+	# --- Expired node cert recovery scenario (AC5: §10.4 walked end-to-end) ---
+	# The re-sign scenario leaves the node online with a valid, long-lived cert.
+	# We now manufacture an expired node.crt (same node.key, real e2e CA) and
+	# walk the §10.4 recovery sequence: path A rejects the expired cert, S3
+	# safety net A keeps serving, then token re-registration restores the node.
+	# Keep a survivor object so S3 availability can be asserted during outage.
+	printf 'survives cert expiry\n' >"$survivor_src"
+	s3_expect 200 PUT "/$BUCKET_NAME/e2e/survivor.txt" "$TMP_DIR/survivor-expired-put.out" "$survivor_src"
+
+	local _ca_crt="$TMP_DIR/panel-data/pki/intermediate.crt"
+	local _ca_key="$TMP_DIR/panel-data/pki/intermediate.key"
+	local _node_key="$TMP_DIR/node-data/pki/node.key"
+	local _node_crt="$TMP_DIR/node-data/pki/node.crt"
+	[[ -s $_node_key && -s $_node_crt && -s $_ca_crt && -s $_ca_key ]] \
+		|| fail 'E3 precondition: node key/cert or panel CA missing after re-sign'
+
+	# Snapshot the fingerprint of the currently-active node cert BEFORE we
+	# overwrite it with an expired one. After §10.4 recovery, D1 must have
+	# revoked this originally-active cert and activated a new one. (The expired
+	# cert we manufacture is never in the panel DB — it is only a local file
+	# the node rejects at path A — so it is not the subject of the D1 check.)
+	local active_fp_before
+	active_fp_before="$(cert_der_fp "$_node_crt")"
+	# Also confirm the panel currently has this cert activated (sanity).
+	api_request GET /api/admin/nodes/1/certs
+	E2E_ACTIVE_FP="$active_fp_before" python3 - "$API_BODY" <<'PY'
+import json, os, sys
+active = os.environ["E2E_ACTIVE_FP"]
+certs = json.load(open(sys.argv[1], encoding="utf-8"))
+if not isinstance(certs, list):
+	raise SystemExit("certs response is not a JSON array")
+row = next((c for c in certs if c.get("fingerprint") == active), None)
+if row is None:
+	raise SystemExit(f"pre-E3 active cert {active} not in panel DB")
+if row.get("status") != "active":
+	raise SystemExit(f"pre-E3 active cert status={row.get('status')}, want active")
+# activated_at is not exposed by the API; status==active is the proxy for
+# "the panel has seen this cert connect and not revoked it" (D1).
+PY
+	record 'E3: pre-condition — node holds an active (D1-activated) cert in panel DB'
+
+	stop_node
+	sign_expired_node_cert "$_node_key" "$_node_crt" "$_ca_crt" "$_ca_key"
+	start_node
+	# Give the node a moment to attempt (and fail) the control-plane connection.
+	sleep 2
+	# Assert path A: the node log reports a local cert problem (expired).
+	if ! grep -Eiq 'client certificate expired|certificate problem prevents control-plane' \
+		"$NODE_LOG" "$TMP_DIR/node-stdout.log" 2>/dev/null; then
+		fail 'E3: node did not report path A cert error for expired cert'
+	fi
+	record 'E3: node reported path A cert error (expired), no control-plane connection'
+	# Assert safety net A: S3 data plane still serves the local DB object.
+	s3_expect 200 GET "/$BUCKET_NAME/e2e/survivor.txt" "$survivor_dst"
+	cmp "$survivor_src" "$survivor_dst" || fail 'E3: S3 bytes changed during expired-cert outage'
+	record 'E3: S3 data plane stayed available while node cert was expired (safety net A)'
+
+	# Walk §10.4 recovery: issue token -> stop node -> delete expired cert+key
+	# -> write token -> start node -> poll sync -> clear token.
+	# Note: the node's old key is reused only if we keep it; §10.4 step 4 says
+	# delete node.crt AND node.key, so the node generates a fresh key on
+	# re-registration (its public key changes; the panel accepts the new CSR).
+	api_expect 201 POST /api/admin/nodes/1/tokens
+	REGISTRATION_TOKEN="$(json_field "$API_BODY" token)"
+	[[ -n "$REGISTRATION_TOKEN" ]] || fail 'E3: panel returned empty re-registration token'
+	stop_node
+	rm -f "$_node_crt" "$_node_key"
+	# write_configs resets NODE_CONFIG and needs the token; save/restore panel
+	# config because the re-sign block above may have changed it.
+	local _saved_panel_cfg="$PANEL_CONFIG"
+	write_configs "$REGISTRATION_TOKEN"
+	PANEL_CONFIG="$_saved_panel_cfg"
+	start_node
+	wait_s3 "$NODE_S3_URL" node-after-expired-recovery
+	poll_node_synced
+	record 'E3: node re-registered via §10.4 (token) and reconnected'
+
+	# Clear the token (§10.4 step 7 hygiene).
+	write_configs ''
+	PANEL_CONFIG="$_saved_panel_cfg"
+	# write_configs rewrote node.yaml without the token but did NOT restart;
+	# restarting is not required for hygiene, the token is already consumed.
+
+	# Assert D1: the previously-active cert is revoked, a new one activated.
+	api_request GET /api/admin/nodes/1/certs
+	E2E_ACTIVE_FP="$active_fp_before" python3 - "$API_BODY" <<'PY'
+import json, os, sys
+active = os.environ["E2E_ACTIVE_FP"]
+certs = json.load(open(sys.argv[1], encoding="utf-8"))
+if not isinstance(certs, list):
+	raise SystemExit("certs response is not a JSON array")
+found_old = False
+found_new_active = False
+for c in certs:
+	fp = c.get("fingerprint")
+	if fp == active:
+		found_old = True
+		if not c.get("revoked"):
+			raise SystemExit(f"previously-active cert {fp} not marked revoked (D1)")
+	if fp != active and c.get("status") == "active":
+		found_new_active = True
+if not found_old:
+	raise SystemExit(f"previously-active cert {active} not present in certs list")
+if not found_new_active:
+	raise SystemExit("no new activated cert after recovery (D1)")
+PY
+	record 'E3: D1 verified — previously-active cert revoked, new cert activated'
+
+	# Verify the new node cert is long-lived and S3 still works.
+	openssl x509 -checkend 3600 -noout -in "$_node_crt" 2>/dev/null \
+		|| fail 'E3: new node cert is not long-lived (expected >1h remaining)'
+	s3_expect 200 GET "/$BUCKET_NAME/e2e/survivor.txt" "$survivor_dst"
+	record 'E3: S3 data plane available after expired-cert recovery'
 
 	run_browser_gate valid
 	record 'registration response-loss replay: pkg/nodeagent package regression evidence runs in quality gate'

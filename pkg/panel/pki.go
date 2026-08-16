@@ -21,7 +21,7 @@ import (
 
 // DefaultClientCertTTL is the validity period of an issued node client
 // certificate. Nodes renew via POST /renew over HTTPS mTLS before expiry
-// (see design §3.3).
+// (see docs/multi-node-operations.md §10.2).
 const DefaultClientCertTTL = 90 * 24 * time.Hour
 
 // caExpiryWarnAfter 是 CA 自身临期告警阈值。取 90 天的理由：与客户端证书
@@ -29,9 +29,14 @@ const DefaultClientCertTTL = 90 * 24 * time.Hour
 // 90 天是能排期的最短窗口。
 const caExpiryWarnAfter = 90 * 24 * time.Hour
 
-// CA holds the online intermediate CA used to sign node client certificates.
-// The offline root CA is not loaded here: it only signs/rotates the
-// intermediate and is kept off the panel's daily path (design §3.1).
+// CA holds the deployment CA used to sign node client certificates and the
+// panel server certificate. Despite the historical "intermediate-ca" file
+// name, there is NO offline root CA above it: the deployment CA is a
+// self-signed, pathlen:0 root. It is simultaneously the client-cert issuer,
+// the server-cert issuer, and the only trust anchor for both directions.
+// Losing its key means full cluster reinstall - it cannot be rotated while
+// remaining a trust anchor (known limitation L1, see
+// docs/multi-node-operations.md §10.6).
 type CA struct {
 	cert    *x509.Certificate
 	certPEM []byte

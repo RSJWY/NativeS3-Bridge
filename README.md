@@ -481,9 +481,18 @@ GET /api/admin/auth-settings
 | `POST` | `/api/admin/nodes/{id}/desired-state/push` | 向在线节点重推当前期望状态。 |
 | `POST` | `/api/admin/nodes/{id}/tasks` | 下发日志查询、存储扫描或存储对账等一次性任务。 |
 | `GET` | `/api/admin/nodes/{id}/tasks/{taskId}` | 查询任务结果。 |
-| `GET` | `/api/admin/nodes/{id}/certs` | 查看 node 客户端证书。 |
+| `GET` | `/api/admin/nodes/{id}/certs` | 查看 node 客户端证书，含剩余天数（`days_until_expiry`）与四态状态（active/expiring/expired/revoked）。 |
 | `POST` | `/api/admin/nodes/{id}/certs/revoke` | 撤销该节点的全部证书并断开控制面连接。 |
 | `GET` | `/api/admin/logs` | 查看 Panel 自身的内存 ring、当前日志文件和安全枚举的轮转历史。 |
+
+### 证书生命周期
+
+- node 客户端证书默认 90 天（`pki.client_cert_ttl`），剩余有效期低于 TTL/3（默认 30 天）时自动经 `POST /renew` 续期，无需人工干预；已过期的证书只能令牌重注册，无宽限期。
+- panel 服务端证书默认 825 天，到期用 `install-panel.sh renew-server-cert` 重签（不影响已注册节点，需重启 panel 生效），**不要用 `--force`**。
+- 部署 CA 默认 3650 天，不可轮换，到期只能全网重装（已知限制 L1）。
+
+完整 runbook（到期巡检、过期节点恢复七步、多 SAN 重签、CA 已知限制）见
+[多节点运维文档 §10 Certificate lifecycle operations](docs/multi-node-operations.md#10-certificate-lifecycle-operations)。
 
 ### Panel 日志
 

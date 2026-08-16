@@ -52,8 +52,11 @@ type AgentListenerConfig struct {
 	KeyFile  string `yaml:"key_file"`
 }
 
-// PKIConfig locates the online intermediate CA. The offline root CA is not
-// referenced here: it only signs/rotates the intermediate out of band.
+// PKIConfig locates the deployment CA. Despite the historical
+// "intermediate_ca" yaml keys, there is NO offline root CA above it: the
+// deployment CA is a self-signed, pathlen:0 root and cannot be rotated while
+// remaining a trust anchor (known limitation L1, see
+// docs/multi-node-operations.md §10.6).
 type PKIConfig struct {
 	IntermediateCertFile string `yaml:"intermediate_cert_file"`
 	IntermediateKeyFile  string `yaml:"intermediate_key_file"`
