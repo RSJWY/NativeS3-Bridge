@@ -716,13 +716,20 @@ func (s *TransportServer) upsertNodeState(nodeID uint, updates map[string]any) e
 	var err error
 	for attempt := 0; attempt <= nodeStateMaxBusyRetries; attempt++ {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			if err != nil {
-				return errors.Join(err, ctxErr)
-			}
 			return ctxErr
 		}
 		err = s.upsertNodeStateOnce(nodeID, updates)
-		if err == nil || s.deps.DB.Dialector.Name() != "sqlite" || !isSQLiteBusyError(err) {
+		if err == nil {
+			return nil
+		}
+		// Context 取消优先:ctx 取消时底层驱动可能抛出难以归类的错误——GORM 用
+		// fmt.Errorf("%v; %w") 把 busy 错误与事务清理错误合并,原始类型从错误链
+		// 丢失,isSQLiteBusyError 无法识别。只要 ctx 已取消就返回干净的 context
+		// 错误,保证调用方 errors.Is(err, context.Canceled) 成立,并停止重试。
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if s.deps.DB.Dialector.Name() != "sqlite" || !isSQLiteBusyError(err) {
 			return err
 		}
 		if attempt == nodeStateMaxBusyRetries {
@@ -737,7 +744,8 @@ func (s *TransportServer) upsertNodeState(nodeID uint, updates map[string]any) e
 				default:
 				}
 			}
-			return errors.Join(err, ctx.Err())
+			// Context 取消后立即返回干净的 context 错误,不合并之前的 busy 错误。
+			return ctx.Err()
 		case <-timer.C:
 		}
 	}

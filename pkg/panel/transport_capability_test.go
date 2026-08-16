@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -195,6 +196,35 @@ func TestNodeStateUpsertStopsBusyRetryOnContextCancellation(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 1 {
 		t.Fatalf("attempts after cancellation = %d, want 1", got)
+	}
+}
+
+// TestNodeStateUpsertWithCompoundErrorAndCanceledContext 回归测试:精确模拟 CI 慢路径
+// 场景——GORM callback 在 create 中途注入 busy 错误并取消 context,GORM 的事务清理
+// 再追加一个事务错误,用 fmt.Errorf("%v; %w") 合并成复合错误,导致原始的 Code()
+// 方法从错误链丢失。upsertNodeState 必须在 create 返回后立即检查 ctx.Err(),
+// 而不能依赖 isSQLiteBusyError 识别出复合错误中的 busy 成分。
+func TestNodeStateUpsertWithCompoundErrorAndCanceledContext(t *testing.T) {
+	gdb := openTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	const callbackName = "test:compound_error_with_cancel"
+	if err := gdb.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+		cancel()
+		// 模拟 GORM 的 AddError "%v; %w" 合并:第一个错误变成字符串前缀,Code() 丢失。
+		busyErr := &testSQLiteError{code: 5, msg: "database is locked"}
+		txErr := errors.New("sql: transaction has already been committed or rolled back")
+		compoundErr := fmt.Errorf("%v; %w", busyErr, txErr)
+		tx.AddError(compoundErr)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer gdb.Callback().Create().Remove(callbackName)
+
+	transport := NewTransportServer(TransportDeps{DB: gdb.WithContext(ctx), Hub: NewHub()})
+	err := transport.upsertNodeState(1, map[string]any{"sync_state": SyncStateWaiting})
+	// 修复后必须返回干净的 context.Canceled,而非复合错误。
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("compound error with canceled context = %v, want context.Canceled", err)
 	}
 }
 
