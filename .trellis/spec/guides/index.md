@@ -23,6 +23,7 @@ These guides help you **ask the right questions before coding**.
 |-------|---------|-------------|
 | [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
 | [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
+| [Requirement Traceability Guide](./requirement-traceability-guide.md) | Forward/backward trace from PRD to implement.md; AC quality checks | Workflow 1.4 (before task.py start) |
 
 ---
 
@@ -51,6 +52,14 @@ These guides help you **ask the right questions before coding**.
 
 → Read [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md)
 
+### When to Check Requirement Traceability
+
+- [ ] **Before task.py start (workflow 1.4)**: Run [Requirement Traceability Guide](./requirement-traceability-guide.md) checklist—every PRD Requirement must map to an implement.md Step
+- [ ] **When PRD has ≥5 Requirements**: Traceability gaps become likely; forward trace is essential
+- [ ] **Risk mitigation with pairs** (defense + compensation): Check both halves have Steps—see also Tautological Test Warning below
+
+→ Read [Requirement Traceability Guide](./requirement-traceability-guide.md)
+
 ### When Verifying AI Cross-Review Results
 
 - [ ] Reviewer claims "user input can be malicious" → Check the actual data source (internal manifest? user config? external API?)
@@ -64,6 +73,8 @@ These guides help you **ask the right questions before coding**.
 3. **Variable misreading**: Not tracing a variable to its actual definition (e.g., Map keyed by path vs name)
 
 **Verification rule**: Every CRITICAL/WARNING finding must be verified against the actual code before prioritizing. Budget ~35% false-positive rate for AI reviews.
+
+**Related**: [Requirement Traceability Guide](./requirement-traceability-guide.md)—Defense-only testing (e.g., "expired certs rejected" without "renewal before expiry") is a variant where the test verifies the wrong half of the mitigation pair.
 
 ---
 
