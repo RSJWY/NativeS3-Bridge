@@ -198,7 +198,15 @@ func startAgent(ctx context.Context, cfg *config.NodeConfig, gdb *gorm.DB, inval
 		// S3 service; the node keeps serving from local DB and retries later.
 		if !identity.HasCertificate() {
 			if strings.TrimSpace(cfg.Panel.Token) == "" || strings.TrimSpace(cfg.Panel.RegisterURL) == "" {
-				slog.Warn("node is not registered and no registration token/url configured; serving S3 from local DB only")
+				if _, err := os.Stat(identity.CertFile); err == nil {
+					slog.Error("local client certificate is expired or damaged; " +
+						"request a new registration token from the panel admin, " +
+						"set it in node.yaml panel.registration_token, then restart the node")
+				} else {
+					slog.Error("node is not registered and no registration token/url configured; " +
+						"request a registration token from the panel admin, " +
+						"set it in node.yaml panel.registration_token, then restart the node")
+				}
 				return
 			}
 			slog.Info("node registration starting; transient failures will be retried")

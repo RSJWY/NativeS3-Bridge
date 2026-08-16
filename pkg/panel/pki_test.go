@@ -214,3 +214,113 @@ func TestSignRejectsBadCSR(t *testing.T) {
 		t.Fatal("expected error for malformed CSR")
 	}
 }
+
+func TestActivateCertRevokesOthers(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := gdb.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	now := time.Now().UTC()
+
+	// Issue two certs for the same node.
+	signed1, _ := ca.SignNodeCSR(newNodeCSR(t), node.ID, 0, now)
+	signed2, _ := ca.SignNodeCSR(newNodeCSR(t), node.ID, 0, now)
+	cert1 := NodeCert{NodeID: node.ID, Fingerprint: signed1.Fingerprint, Serial: signed1.Serial, NotBefore: signed1.NotBefore, NotAfter: signed1.NotAfter}
+	cert2 := NodeCert{NodeID: node.ID, Fingerprint: signed2.Fingerprint, Serial: signed2.Serial, NotBefore: signed2.NotBefore, NotAfter: signed2.NotAfter}
+	if err := gdb.Create(&cert1).Error; err != nil {
+		t.Fatalf("store cert1: %v", err)
+	}
+	if err := gdb.Create(&cert2).Error; err != nil {
+		t.Fatalf("store cert2: %v", err)
+	}
+
+	// Activate cert2: cert1 should be revoked, cert2 should not.
+	if err := ActivateCert(gdb, signed2.Fingerprint, node.ID, now); err != nil {
+		t.Fatalf("activate cert2: %v", err)
+	}
+
+	var row1, row2 NodeCert
+	gdb.Where("fingerprint = ?", signed1.Fingerprint).First(&row1)
+	gdb.Where("fingerprint = ?", signed2.Fingerprint).First(&row2)
+	if !row1.Revoked {
+		t.Fatal("old cert (cert1) must be revoked after activating cert2")
+	}
+	if row2.Revoked {
+		t.Fatal("new cert (cert2) must not be revoked after activation")
+	}
+	if row2.ActivatedAt == nil {
+		t.Fatal("new cert (cert2) must have activated_at set")
+	}
+}
+
+func TestActivateCertIdempotent(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := gdb.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	now := time.Now().UTC()
+
+	signed1, _ := ca.SignNodeCSR(newNodeCSR(t), node.ID, 0, now)
+	signed2, _ := ca.SignNodeCSR(newNodeCSR(t), node.ID, 0, now)
+	gdb.Create(&NodeCert{NodeID: node.ID, Fingerprint: signed1.Fingerprint, Serial: signed1.Serial, NotBefore: signed1.NotBefore, NotAfter: signed1.NotAfter})
+	gdb.Create(&NodeCert{NodeID: node.ID, Fingerprint: signed2.Fingerprint, Serial: signed2.Serial, NotBefore: signed2.NotBefore, NotAfter: signed2.NotAfter})
+
+	// Activate cert2 three times.
+	for i := 0; i < 3; i++ {
+		if err := ActivateCert(gdb, signed2.Fingerprint, node.ID, now.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatalf("activate cert2 attempt %d: %v", i, err)
+		}
+	}
+
+	// cert1 should be revoked exactly once (no double-revoke issues).
+	var row1 NodeCert
+	gdb.Where("fingerprint = ?", signed1.Fingerprint).First(&row1)
+	if !row1.Revoked {
+		t.Fatal("cert1 should be revoked")
+	}
+
+	// cert2's activated_at should not change after the first call.
+	var row2 NodeCert
+	gdb.Where("fingerprint = ?", signed2.Fingerprint).First(&row2)
+	if row2.ActivatedAt == nil {
+		t.Fatal("cert2 should have activated_at set")
+	}
+	firstActivated := *row2.ActivatedAt
+
+	// Re-activate and verify it didn't change.
+	_ = ActivateCert(gdb, signed2.Fingerprint, node.ID, now.Add(time.Hour))
+	gdb.Where("fingerprint = ?", signed2.Fingerprint).First(&row2)
+	if !row2.ActivatedAt.Equal(firstActivated) {
+		t.Fatalf("activated_at changed after re-activation: %v -> %v", firstActivated, *row2.ActivatedAt)
+	}
+}
+
+func TestActivateCertNoOldCerts(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := gdb.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	now := time.Now().UTC()
+
+	// Only one cert, no old certs to revoke.
+	signed, _ := ca.SignNodeCSR(newNodeCSR(t), node.ID, 0, now)
+	gdb.Create(&NodeCert{NodeID: node.ID, Fingerprint: signed.Fingerprint, Serial: signed.Serial, NotBefore: signed.NotBefore, NotAfter: signed.NotAfter})
+
+	if err := ActivateCert(gdb, signed.Fingerprint, node.ID, now); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	var row NodeCert
+	gdb.Where("fingerprint = ?", signed.Fingerprint).First(&row)
+	if row.Revoked {
+		t.Fatal("sole cert must not be revoked")
+	}
+	if row.ActivatedAt == nil {
+		t.Fatal("sole cert must have activated_at set")
+	}
+}

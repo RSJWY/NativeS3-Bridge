@@ -83,11 +83,12 @@ func NewTransportServer(deps TransportDeps) *TransportServer {
 	return &TransportServer{deps: deps}
 }
 
-// Handler returns the HTTP handler exposing /register and /agent.
+// Handler returns the HTTP handler exposing /register, /agent, and /renew.
 func (s *TransportServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", s.handleRegister)
 	mux.HandleFunc("/agent", s.handleAgent)
+	mux.HandleFunc("/renew", s.handleRenew)
 	return mux
 }
 
@@ -152,6 +153,90 @@ func (s *TransportServer) handleRegister(w http.ResponseWriter, r *http.Request)
 	writeTransportJSON(w, http.StatusOK, outcome.response)
 }
 
+// handleRenew issues a renewed client certificate to an already-authenticated
+// node. Identity is taken solely from the mTLS client certificate (not the
+// request body) to prevent cross-node certificate substitution. The CSR's CN
+// must match the node identity bound to the presenting certificate. The old
+// certificate is NOT revoked here — that happens when the new cert first
+// successfully connects via /agent (D1).
+func (s *TransportServer) handleRenew(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeTransportError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	fingerprint, nodeID, ok := s.authenticateMTLS(r)
+	if !ok {
+		s.audit("node_cert_renew", 0, "", "denied")
+		writeTransportError(w, http.StatusUnauthorized, "valid client certificate required")
+		return
+	}
+	_ = fingerprint
+	var req renewRequest
+	dec := json.NewDecoder(io.LimitReader(r.Body, registrationBodyLimit))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.audit("node_cert_renew", nodeID, "", "denied")
+		writeTransportError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.CSRPEM == "" {
+		s.audit("node_cert_renew", nodeID, "", "denied")
+		writeTransportError(w, http.StatusBadRequest, "csr_pem is required")
+		return
+	}
+
+	csr, err := parseCSRPEM([]byte(req.CSRPEM))
+	if err != nil {
+		s.audit("node_cert_renew", nodeID, "", "denied")
+		writeTransportError(w, http.StatusBadRequest, "invalid CSR")
+		return
+	}
+	if err := csr.CheckSignature(); err != nil {
+		s.audit("node_cert_renew", nodeID, "", "denied")
+		writeTransportError(w, http.StatusBadRequest, "CSR signature invalid")
+		return
+	}
+	if csr.Subject.CommonName != nodeSubject(nodeID).CommonName {
+		s.audit("node_cert_renew", nodeID, "", "denied")
+		writeTransportError(w, http.StatusBadRequest, "CSR subject does not match node identity")
+		return
+	}
+
+	now := nowUTC()
+	signed, err := s.deps.CA.SignNodeCSR([]byte(req.CSRPEM), nodeID, s.deps.ClientCTTL, now)
+	if err != nil {
+		slog.Error("renew: sign CSR failed", "node", nodeID, "error", err)
+		s.audit("node_cert_renew", nodeID, "", "denied")
+		writeTransportError(w, http.StatusInternalServerError, "certificate signing failed")
+		return
+	}
+	cert := NodeCert{
+		NodeID:      nodeID,
+		Fingerprint: signed.Fingerprint,
+		Serial:      signed.Serial,
+		NotBefore:   signed.NotBefore,
+		NotAfter:    signed.NotAfter,
+	}
+	if err := s.deps.DB.Create(&cert).Error; err != nil {
+		slog.Error("renew: persist cert failed", "node", nodeID, "error", err)
+		s.audit("node_cert_renew", nodeID, "", "denied")
+		writeTransportError(w, http.StatusInternalServerError, "certificate persistence failed")
+		return
+	}
+	s.audit("node_cert_renew", nodeID, signed.Fingerprint, "issued")
+	writeTransportJSON(w, http.StatusOK, registerResponse{
+		CertPEM:   string(signed.CertPEM),
+		CACertPEM: string(s.deps.CA.CertificatePEM()),
+		NotAfter:  signed.NotAfter.Format(time.RFC3339),
+	})
+}
+
+// renewRequest is the body for POST /renew: only the CSR, identity comes from
+// the mTLS client certificate.
+type renewRequest struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
 // handleAgent upgrades an mTLS-authenticated request to a WebSocket and runs the
 // control-plane serve loop. The peer certificate MUST already be verified by the
 // TLS layer; this handler performs the application-layer revocation/lifecycle
@@ -195,6 +280,12 @@ func (s *TransportServer) authenticateMTLS(r *http.Request) (fingerprint string,
 	}
 	if !valid {
 		return "", 0, false
+	}
+	// Activate the cert (D1): first connection with this fingerprint marks it
+	// activated and revokes all other unrevoked certs for the same node.
+	// Failure is non-fatal — the connection proceeds (R2.3).
+	if err := ActivateCert(s.deps.DB, fp, id, nowUTC()); err != nil {
+		slog.Error("activate node certificate failed", "node", id, "fingerprint", fp, "error", err)
 	}
 	return fp, id, true
 }

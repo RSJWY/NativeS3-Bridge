@@ -50,6 +50,9 @@ type NodeCert struct {
 	NotAfter    time.Time
 	Revoked     bool `gorm:"not null;default:false"`
 	RevokedAt   *time.Time
+	// ActivatedAt 记录该证书首次成功接入控制面的时刻。为空表示已签发但节点尚未
+	// 用它连上来——此时旧证书仍然有效,节点可以安全回落(父任务 D1)。
+	ActivatedAt *time.Time
 	CreatedAt   time.Time
 }
 

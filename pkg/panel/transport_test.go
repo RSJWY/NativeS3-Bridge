@@ -10,15 +10,20 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/controlproto"
+	"github.com/RSJWY/NativeS3-Bridge/pkg/db"
 )
 
 // issueNodeClientCert signs a node client cert from the test CA and returns the
@@ -332,4 +337,323 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatalf("marshal: %v", err)
 	}
 	return string(data)
+}
+
+// --- /renew endpoint tests ---
+
+// renewTestCert issues a node client cert, persists the NodeCert row, and
+// returns the tls.Certificate + fingerprint for use in /renew tests.
+func renewTestCert(t *testing.T, gdb *gorm.DB, ca *CA, nodeID uint) (tls.Certificate, string) {
+	t.Helper()
+	clientCert, fingerprint := issueNodeClientCert(t, ca, nodeID)
+	if err := gdb.Create(&NodeCert{
+		NodeID: nodeID, Fingerprint: fingerprint, Serial: "1",
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+	}).Error; err != nil {
+		t.Fatalf("store cert: %v", err)
+	}
+	return clientCert, fingerprint
+}
+func TestRenewIssuesCert(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	ts := NewTransportServer(TransportDeps{DB: gdb, CA: ca, Hub: NewHub()})
+
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := gdb.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	clientCert, oldFingerprint := renewTestCert(t, gdb, ca, node.ID)
+
+	// Build a CSR with the correct CN for this node.
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: fmt.Sprintf("node-%d", node.ID)},
+	}, key)
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+
+	body := mustJSON(t, renewRequest{CSRPEM: string(csrPEM)})
+	srv := startTestServer(t, ts, ca)
+	defer srv.Close()
+
+	clientTLS := &tls.Config{Certificates: []tls.Certificate{clientCert}, InsecureSkipVerify: true}
+	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: clientTLS}}
+
+	resp, err := httpClient.Post(srv.URL+"/renew", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("renew request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("renew status = %d, want 200", resp.StatusCode)
+	}
+	var result registerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode renew response: %v", err)
+	}
+	if result.CertPEM == "" || result.CACertPEM == "" || result.NotAfter == "" {
+		t.Fatalf("renew response missing fields: %+v", result)
+	}
+
+	// A new NodeCert row must exist.
+	var count int64
+	gdb.Model(&NodeCert{}).Where("node_id = ?", node.ID).Count(&count)
+	if count != 2 {
+		t.Fatalf("expected 2 cert rows after renew, got %d", count)
+	}
+
+	// The old cert must NOT be revoked (D1: activation happens on /agent reconnect).
+	var oldCert NodeCert
+	if err := gdb.Where("fingerprint = ?", oldFingerprint).First(&oldCert).Error; err != nil {
+		t.Fatalf("query old cert: %v", err)
+	}
+	if oldCert.Revoked {
+		t.Fatal("old cert must not be revoked at renew time (D1)")
+	}
+
+	// Audit entry must exist.
+	var auditCount int64
+	gdb.Model(&AuditLog{}).Where("action = ? AND target_node = ? AND result = ?", "node_cert_renew", node.ID, "issued").Count(&auditCount)
+	if auditCount != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", auditCount)
+	}
+}
+
+func TestRenewRejectsExpiredCert(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	ts := NewTransportServer(TransportDeps{DB: gdb, CA: ca, Hub: NewHub()})
+
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := gdb.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	clientCert, fingerprint := issueNodeClientCert(t, ca, node.ID)
+	// Persist as already expired.
+	if err := gdb.Create(&NodeCert{
+		NodeID: node.ID, Fingerprint: fingerprint, Serial: "1",
+		NotBefore: time.Now().Add(-2 * time.Hour), NotAfter: time.Now().Add(-time.Hour),
+	}).Error; err != nil {
+		t.Fatalf("store cert: %v", err)
+	}
+
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: fmt.Sprintf("node-%d", node.ID)},
+	}, key)
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+	body := mustJSON(t, renewRequest{CSRPEM: string(csrPEM)})
+
+	srv := startTestServer(t, ts, ca)
+	defer srv.Close()
+	clientTLS := &tls.Config{Certificates: []tls.Certificate{clientCert}, InsecureSkipVerify: true}
+	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: clientTLS}}
+
+	resp, err := httpClient.Post(srv.URL+"/renew", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("renew request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("renew with expired cert: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestRenewRejectsRevokedCert(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	ts := NewTransportServer(TransportDeps{DB: gdb, CA: ca, Hub: NewHub()})
+
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := gdb.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	clientCert, _ := renewTestCert(t, gdb, ca, node.ID)
+	// Revoke the cert.
+	if _, err := RevokeNodeCerts(gdb, node.ID, time.Now()); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: fmt.Sprintf("node-%d", node.ID)},
+	}, key)
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+	body := mustJSON(t, renewRequest{CSRPEM: string(csrPEM)})
+
+	srv := startTestServer(t, ts, ca)
+	defer srv.Close()
+	clientTLS := &tls.Config{Certificates: []tls.Certificate{clientCert}, InsecureSkipVerify: true}
+	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: clientTLS}}
+
+	resp, err := httpClient.Post(srv.URL+"/renew", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("renew request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("renew with revoked cert: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestRenewRejectsRetiredNode(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	ts := NewTransportServer(TransportDeps{DB: gdb, CA: ca, Hub: NewHub()})
+
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := gdb.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	clientCert, _ := renewTestCert(t, gdb, ca, node.ID)
+	// Retire the node.
+	if err := gdb.Model(&node).Update("status", NodeStatusRetired).Error; err != nil {
+		t.Fatalf("retire node: %v", err)
+	}
+
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: fmt.Sprintf("node-%d", node.ID)},
+	}, key)
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+	body := mustJSON(t, renewRequest{CSRPEM: string(csrPEM)})
+
+	srv := startTestServer(t, ts, ca)
+	defer srv.Close()
+	clientTLS := &tls.Config{Certificates: []tls.Certificate{clientCert}, InsecureSkipVerify: true}
+	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: clientTLS}}
+
+	resp, err := httpClient.Post(srv.URL+"/renew", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("renew request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("renew with retired node: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestRenewRejectsNoClientCert(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	ts := NewTransportServer(TransportDeps{DB: gdb, CA: ca, Hub: NewHub()})
+
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := gdb.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: fmt.Sprintf("node-%d", node.ID)},
+	}, key)
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+	body := mustJSON(t, renewRequest{CSRPEM: string(csrPEM)})
+
+	srv := startTestServer(t, ts, ca)
+	defer srv.Close()
+	// No client cert.
+	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+
+	resp, err := httpClient.Post(srv.URL+"/renew", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("renew request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("renew without client cert: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestRenewRejectsCSRCNMismatch(t *testing.T) {
+	gdb := openTestDB(t)
+	ca := newTestIntermediateCA(t)
+	ts := NewTransportServer(TransportDeps{DB: gdb, CA: ca, Hub: NewHub()})
+
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := gdb.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	clientCert, _ := renewTestCert(t, gdb, ca, node.ID)
+
+	// CSR with wrong CN (node-999 instead of node-1).
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: "node-999"},
+	}, key)
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+	body := mustJSON(t, renewRequest{CSRPEM: string(csrPEM)})
+
+	srv := startTestServer(t, ts, ca)
+	defer srv.Close()
+	clientTLS := &tls.Config{Certificates: []tls.Certificate{clientCert}, InsecureSkipVerify: true}
+	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: clientTLS}}
+
+	resp, err := httpClient.Post(srv.URL+"/renew", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("renew request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("renew with mismatched CSR CN: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestActivateCertFailureDoesNotBlockConnection verifies AC9: when the
+// ActivateCert DB transaction fails, authenticateMTLS still returns ok=true
+// so the connection proceeds. Availability takes priority (R2.3).
+func TestActivateCertFailureDoesNotBlockConnection(t *testing.T) {
+	// Use a writable DB to set up schema and data, then reopen read-only so
+	// IsCertValid (SELECT) succeeds but ActivateCert (UPDATE) fails.
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "panel.db")
+	writableDB, err := db.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open writable db: %v", err)
+	}
+	if err := Migrate(writableDB); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	ca := newTestIntermediateCA(t)
+	node := Node{DisplayName: "n1", Status: NodeStatusActive}
+	if err := writableDB.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	clientCert, fingerprint := issueNodeClientCert(t, ca, node.ID)
+	if err := writableDB.Create(&NodeCert{
+		NodeID: node.ID, Fingerprint: fingerprint, Serial: "1",
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+	}).Error; err != nil {
+		t.Fatalf("store cert: %v", err)
+	}
+	sqlDB, _ := writableDB.DB()
+	_ = sqlDB.Close()
+
+	// Reopen read-only: SELECTs work, UPDATEs/INSERTs fail.
+	roDB, err := gorm.Open(sqlite.Open("file:"+dbPath+"?mode=ro"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open read-only db: %v", err)
+	}
+	t.Cleanup(func() {
+		s, _ := roDB.DB()
+		_ = s.Close()
+	})
+
+	hub := NewHub()
+	ts := NewTransportServer(TransportDeps{DB: roDB, CA: ca, Hub: hub})
+
+	// Build a request with r.TLS set to carry the client cert.
+	leaf, _ := x509.ParseCertificate(clientCert.Certificate[0])
+	r := &http.Request{
+		TLS: &tls.ConnectionState{
+			PeerCertificates: []*x509.Certificate{leaf},
+		},
+	}
+	fp, nodeID, ok := ts.authenticateMTLS(r)
+	if !ok {
+		t.Fatal("authenticateMTLS must return ok=true even when ActivateCert fails (R2.3)")
+	}
+	if fp == "" || nodeID != node.ID {
+		t.Fatalf("authenticateMTLS returned wrong identity: fp=%q nodeID=%d", fp, nodeID)
+	}
 }

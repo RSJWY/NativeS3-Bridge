@@ -1,6 +1,7 @@
 package nodeagent
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -10,6 +11,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -166,6 +168,86 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	go c.heartbeatLoop(serveCtx, ws)
 
 	return c.serveLoop(serveCtx, ws)
+}
+
+// renewCertificate sends a POST /renew request to the panel with a fresh CSR
+// and persists the issued certificate to disk. It reuses the existing mTLS
+// client configuration (clientTLS) and the node's private key.
+func (c *Client) renewCertificate(ctx context.Context) error {
+	renewURL, err := renewURLFromAgentURL(c.cfg.AgentURL)
+	if err != nil {
+		return fmt.Errorf("derive renew URL: %w", err)
+	}
+	key, err := c.cfg.Identity.ensureKey()
+	if err != nil {
+		return fmt.Errorf("load node key: %w", err)
+	}
+	csrPEM, err := buildCSR(key, c.cfg.NodeID)
+	if err != nil {
+		return fmt.Errorf("build CSR: %w", err)
+	}
+	tlsConfig, err := c.clientTLS()
+	if err != nil {
+		return fmt.Errorf("build client TLS: %w", err)
+	}
+	httpClient := &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsConfig},
+	}
+	body, err := json.Marshal(map[string]string{"csr_pem": string(csrPEM)})
+	if err != nil {
+		return fmt.Errorf("marshal renew request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, renewURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build renew request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("renew request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("renew rejected with status %d", resp.StatusCode)
+	}
+	var result registerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode renew response: %w", err)
+	}
+	if result.CertPEM == "" {
+		return fmt.Errorf("panel returned an empty certificate")
+	}
+	if err := persistPEM(c.cfg.Identity.CertFile, []byte(result.CertPEM), 0o644); err != nil {
+		return fmt.Errorf("write renewed cert: %w", err)
+	}
+	return nil
+}
+
+// renewURLFromAgentURL derives the /renew HTTPS endpoint URL from the agent
+// WebSocket URL. It replaces the scheme (wss→https, ws→http) and the last path
+// segment (/agent → /renew), preserving host, port, and any path prefix.
+func renewURLFromAgentURL(agentURL string) (string, error) {
+	u, err := url.Parse(agentURL)
+	if err != nil {
+		return "", fmt.Errorf("parse agent URL: %w", err)
+	}
+	switch u.Scheme {
+	case "wss":
+		u.Scheme = "https"
+	case "ws":
+		u.Scheme = "http"
+	default:
+		return "", fmt.Errorf("unexpected agent URL scheme %q", u.Scheme)
+	}
+	parts := strings.Split(u.Path, "/")
+	if len(parts) > 0 && parts[len(parts)-1] == "agent" {
+		parts[len(parts)-1] = "renew"
+	} else {
+		parts = append(parts, "renew")
+	}
+	u.Path = strings.Join(parts, "/")
+	return u.String(), nil
 }
 
 // handshake sends hello (with the locally-applied version + hash) and processes
@@ -388,10 +470,13 @@ func (c *Client) recordTaskResult(task controlproto.TaskPayload, result controlp
 	return c.db.Create(&rec).Error
 }
 
-// heartbeatLoop sends periodic heartbeats until ctx is cancelled.
+// heartbeatLoop sends periodic heartbeats until ctx is cancelled. It also
+// checks whether the client certificate needs renewal on each tick, so a
+// long-lived connection will still renew before expiry (R3.3).
 func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 	ticker := time.NewTicker(c.cfg.HeartbeatInterval)
 	defer ticker.Stop()
+	renewed := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -402,8 +487,6 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 				slog.Warn("heartbeat: load meta failed", "error", err)
 				continue
 			}
-			// 遥测快照是单行数据库读(不可用时字段全部省略);心跳路径
-			// 绝不触发文件系统扫描。
 			payload := HeartbeatTelemetrySnapshot(c.db)
 			if c.telemetry != nil {
 				payload = c.telemetry.HeartbeatTelemetrySnapshot()
@@ -412,6 +495,23 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 			if err := c.sendMessage(ctx, ws, controlproto.TypeHeartbeat, "", payload); err != nil {
 				slog.Debug("heartbeat send failed", "error", err)
 				return
+			}
+			// Check for certificate renewal on each heartbeat tick. Once
+			// renewal succeeds, don't retry (R3.5). The ws close will cause
+			// the serve loop to exit and Run to reconnect with the new cert.
+			if !renewed {
+				cert, err := c.cfg.Identity.LoadCertificate()
+				if err == nil && NeedsRenewal(cert, time.Now()) {
+					slog.Info("client certificate approaching expiry, requesting renewal")
+					if err := c.renewCertificate(ctx); err != nil {
+						slog.Warn("certificate renewal failed; will retry on next heartbeat", "error", err)
+					} else {
+						renewed = true
+						slog.Info("certificate renewed successfully, reconnecting with new certificate")
+						_ = ws.Close(websocket.StatusNormalClosure, "renewed certificate, reconnecting")
+						return
+					}
+				}
 			}
 		}
 	}

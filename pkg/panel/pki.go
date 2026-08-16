@@ -19,7 +19,8 @@ import (
 )
 
 // DefaultClientCertTTL is the validity period of an issued node client
-// certificate. Nodes renew over mTLS before expiry (see design §3.3).
+// certificate. Nodes renew via POST /renew over HTTPS mTLS before expiry
+// (see design §3.3).
 const DefaultClientCertTTL = 90 * 24 * time.Hour
 
 // CA holds the online intermediate CA used to sign node client certificates.
@@ -183,6 +184,33 @@ func RevokeNodeCerts(db *gorm.DB, nodeID uint, now time.Time) (int64, error) {
 		Where("node_id = ? AND revoked = ?", nodeID, false).
 		Updates(map[string]any{"revoked": true, "revoked_at": revokedAt})
 	return res.RowsAffected, res.Error
+}
+
+// ActivateCert marks the given certificate as activated (first successful
+// control-plane connection with this cert) and revokes all other unrevoked
+// certificates for the same node. This implements decision D1: the old
+// certificate is only revoked once the new one has proven it can connect.
+//
+// The operation is idempotent: if the cert is already activated,
+// RowsAffected == 0 and no revocation occurs. The cert itself is never
+// revoked (fingerprint <> ? excludes it).
+func ActivateCert(db *gorm.DB, fingerprint string, nodeID uint, now time.Time) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		activatedAt := now.UTC()
+		res := tx.Model(&NodeCert{}).
+			Where("fingerprint = ? AND activated_at IS NULL", fingerprint).
+			Update("activated_at", activatedAt)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		// Revoke all other unrevoked certs for this node.
+		return tx.Model(&NodeCert{}).
+			Where("node_id = ? AND fingerprint <> ? AND revoked = ?", nodeID, fingerprint, false).
+			Updates(map[string]any{"revoked": true, "revoked_at": activatedAt}).Error
+	})
 }
 
 func parseCertPEM(data []byte) (*x509.Certificate, error) {

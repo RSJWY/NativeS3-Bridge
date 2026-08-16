@@ -2,6 +2,9 @@
 # Binaries
 /natives3bridge
 /panel
+/node
+/.e2e-panel
+/.e2e-node
 natives3bridge.exe
 /bin/
 *.exe

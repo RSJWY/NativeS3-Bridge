@@ -42,16 +42,49 @@ type Identity struct {
 	CAFile   string // panel intermediate CA certificate (PEM) for server verification
 }
 
-// HasCertificate reports whether a previously-issued client certificate already
-// exists on disk, so the node can skip re-registration and dial with mTLS.
+// HasCertificate reports whether a valid, unexpired client certificate exists
+// on disk. A certificate that is missing, unreadable, malformed, or past its
+// NotAfter returns false — the node will then fall through to the registration
+// branch (which requires a token) or log an error if no token is configured.
 func (id Identity) HasCertificate() bool {
-	if _, err := os.Stat(id.CertFile); err != nil {
-		return false
-	}
 	if _, err := os.Stat(id.KeyFile); err != nil {
 		return false
 	}
-	return true
+	cert, err := id.LoadCertificate()
+	if err != nil {
+		return false
+	}
+	return time.Now().Before(cert.NotAfter)
+}
+
+// LoadCertificate reads and parses the on-disk client certificate. Returns an
+// error if the file is missing, not valid PEM, or not a parseable certificate.
+func (id Identity) LoadCertificate() (*x509.Certificate, error) {
+	data, err := os.ReadFile(id.CertFile)
+	if err != nil {
+		return nil, fmt.Errorf("read client cert: %w", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("client cert %q is not a valid PEM certificate", id.CertFile)
+	}
+	return x509.ParseCertificate(block.Bytes)
+}
+
+// RenewalThreshold returns the duration before NotAfter at which renewal should
+// trigger. It is one-third of the certificate's total validity period (D3:
+// proportional threshold so it scales with TTL changes).
+func RenewalThreshold(cert *x509.Certificate) time.Duration {
+	ttl := cert.NotAfter.Sub(cert.NotBefore)
+	return ttl / 3
+}
+
+// NeedsRenewal reports whether the certificate should be renewed at the given
+// time. Returns true if the remaining validity is less than the renewal
+// threshold.
+func NeedsRenewal(cert *x509.Certificate, now time.Time) bool {
+	remaining := cert.NotAfter.Sub(now)
+	return remaining < RenewalThreshold(cert)
 }
 
 // ensureKey loads the node private key from KeyFile, generating and persisting a

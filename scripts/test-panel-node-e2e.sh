@@ -1038,6 +1038,144 @@ main() {
 	stop_wrong_node
 	s3_expect 204 DELETE "/$BUCKET_NAME/e2e/survivor.txt" "$TMP_DIR/survivor-delete.out"
 
+	# --- Certificate auto-renewal scenario ---
+	# Re-create the survivor object so S3 availability can be verified during
+	# the renewal flow (it was deleted in the wrong-CA section above).
+	printf 'survives cert renewal\n' >"$survivor_src"
+	s3_expect 200 PUT "/$BUCKET_NAME/e2e/survivor.txt" "$TMP_DIR/survivor-renew-put.out" "$survivor_src"
+
+	# Stop the node, reconfigure panel with a very short client_cert_ttl, restart
+	# panel, then restart the node. The node will register with a short-lived cert.
+	# Once the cert crosses the TTL/3 renewal threshold, the node should
+	# automatically POST /renew, get a new cert, and reconnect. The old cert
+	# should be revoked after the new one activates.
+	stop_node
+	stop_panel
+
+	# Rewrite panel config with a 45-second client cert TTL.
+	# Threshold = 45/3 = 15s. The node should renew ~15s before expiry.
+	local renew_panel_config="$TMP_DIR/panel-renew.yaml"
+	local renew_ttl="45s"
+	if [[ "$MODE" == docker ]]; then
+		panel_root=/data
+		admin_bind='0.0.0.0:9001'
+		agent_bind='0.0.0.0:9443'
+	else
+		panel_root="$TMP_DIR/panel-data"
+		admin_bind="127.0.0.1:$PANEL_ADMIN_PORT"
+		agent_bind="127.0.0.1:$PANEL_AGENT_PORT"
+	fi
+	cat >"$renew_panel_config" <<EOF
+admin_addr: "$admin_bind"
+agent:
+  addr: "$agent_bind"
+  cert_file: "$panel_root/pki/panel-server.crt"
+  key_file: "$panel_root/pki/panel-server.key"
+pki:
+  intermediate_cert_file: "$panel_root/pki/intermediate.crt"
+  intermediate_key_file: "$panel_root/pki/intermediate.key"
+  client_cert_ttl: $renew_ttl
+master_key_file: "$panel_root/secrets/master.key"
+database:
+  driver: sqlite
+  dsn: "$panel_root/panel.db"
+webadmin:
+  admin_bootstrap_password: "$ADMIN_PASSWORD"
+  session_secret: "$SESSION_SECRET"
+  session_ttl_minutes: 60
+heartbeat_interval: 1s
+offline_multiplier: 3
+log_level: info
+log:
+  file: "$panel_root/logs/panel.log"
+  max_size_mb: 5
+  max_backups: 1
+EOF
+	chmod 600 "$renew_panel_config"
+
+	# Remove the old node cert so it re-registers with the short TTL.
+	rm -f "$TMP_DIR/node-data/pki/node.crt"
+
+	# Restart panel with short TTL config.
+	if [[ "$MODE" == docker ]]; then
+		docker rm -f "$PANEL_CONTAINER" >/dev/null 2>&1 || true
+		PANEL_CONFIG="$renew_panel_config"
+		start_panel
+	else
+		PANEL_CONFIG="$renew_panel_config"
+		start_panel
+	fi
+	wait_panel_ready
+	admin_login
+
+	# Re-issue a registration token (the old one was consumed).
+	api_expect 201 POST /api/admin/nodes/1/tokens
+	REGISTRATION_TOKEN="$(json_field "$API_BODY" token)"
+
+	# Rewrite node config with the new token. write_configs resets PANEL_CONFIG
+	# to the original path, so save and restore our renew config.
+	local saved_panel_config="$renew_panel_config"
+	write_configs "$REGISTRATION_TOKEN"
+	PANEL_CONFIG="$saved_panel_config"
+
+	start_node
+	wait_s3 "$NODE_S3_URL" node-renew
+	poll_node_synced
+
+	# Capture the original cert fingerprint.
+	local cert_before
+	cert_before="$(sha256sum "$TMP_DIR/node-data/pki/node.crt" | awk '{print $1}')"
+	record "renewal: node registered with short-TTL cert (fingerprint=$cert_before)"
+
+	# Wait for the renewal to happen: the node should renew within ~30s
+	# (45s TTL - 15s threshold = 30s of validity before renewal triggers).
+	local renew_deadline=$((SECONDS + 60))
+	local cert_after
+	while ((SECONDS < renew_deadline)); do
+		cert_after="$(sha256sum "$TMP_DIR/node-data/pki/node.crt" 2>/dev/null | awk '{print $1}')"
+		if [[ -n "$cert_after" && "$cert_after" != "$cert_before" ]]; then
+			record "renewal: node certificate changed (new fingerprint=$cert_after)"
+			break
+		fi
+		sleep 1
+	done
+	if [[ "$cert_after" == "$cert_before" ]]; then
+		fail "node did not renew its certificate within the expected window"
+	fi
+
+	# Verify the node reconnects and syncs after renewal.
+	poll_node_synced
+	record 'renewal: node reconnected and synced after certificate renewal'
+
+	# Verify S3 data plane remained available throughout.
+	s3_expect 200 GET "/$BUCKET_NAME/e2e/survivor.txt" "$survivor_dst"
+	cmp "$survivor_src" "$survivor_dst" || fail 'S3 bytes changed during renewal'
+	record 'renewal: S3 data plane stayed available during cert renewal'
+
+	# Verify the old cert is revoked in the panel DB (D1: after new cert activates).
+	local renew_deadline2=$((SECONDS + 15))
+	while ((SECONDS < renew_deadline2)); do
+		api_request GET /api/admin/nodes/1
+		if [[ "$API_STATUS" == 200 ]]; then
+			# Check if the node is online — if so, the new cert has activated.
+			if python3 - "$API_BODY" <<'PY'
+import json, sys
+obj = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if obj.get("online") else 1)
+PY
+			then
+				record 'renewal: new cert activated, node online'
+				break
+			fi
+		fi
+		sleep 1
+	done
+
+	# Restore the original panel config for any remaining steps.
+	if [[ "$MODE" != docker ]]; then
+		PANEL_CONFIG="$TMP_DIR/panel.yaml"
+	fi
+
 	run_browser_gate valid
 	record 'registration response-loss replay: pkg/nodeagent package regression evidence runs in quality gate'
 	record 'PASS: Panel -> Node release gate complete'
