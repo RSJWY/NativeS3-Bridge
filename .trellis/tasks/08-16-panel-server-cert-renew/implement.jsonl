@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"安装脚本是发布契约的一部分;test-distribution-contract.sh 的文本门禁与双镜像升级路径约定在此。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"CA 过期 fail-closed 错误与临期 Warn 的文案、级别需遵循既有约定,且必须能区分 CA 自身与叶子证书。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"必须复用 die/require_command/validate_install_dir/is_ipv4/is_dns_name,不得再复制第三份 helper。"}
+{"file":".trellis/tasks/08-16-node-cert-lifecycle/prd.md","reason":"父任务:遗留项 L1(CA 层级不可轮换)明确排除在本轮范围外;D2 红线不得触碰客户端证书校验。"}

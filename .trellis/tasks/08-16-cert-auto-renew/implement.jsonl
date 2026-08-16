@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"node_certs 增列 activated_at 必须走增量迁移；本文件定义 GORM 模型、AutoMigrate + validateSchema 约定与只增不改不删的红线。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"节点侧证书过期/续期失败的日志级别与结构化字段需遵循既有约定；R3.2 的 Error 级报错文案受此约束。"}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"/renew 是 panel 上的新 HTTP 端点，请求校验、错误响应形状与敏感数据（CSR 不得入日志/审计）约定在此。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"续期跨 panel PKI/HTTP 端点、panel DB、节点 agent、节点文件系统四层；用其边界检查表核对可空字段、时间戳与失败回落语义。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"本任务多处强制复用既有函数（authenticateMTLS / SignNodeCSR / registerResponse / clientTLS / persistPEM / buildCSR / nodeSubject），不得平行实现。"}
+{"file":".trellis/tasks/08-16-node-cert-lifecycle/prd.md","reason":"父任务：承重决策 D1/D2/D3 与跨子任务验收标准 AC1-AC9 的唯一来源，实现期间不得擅自变更。"}

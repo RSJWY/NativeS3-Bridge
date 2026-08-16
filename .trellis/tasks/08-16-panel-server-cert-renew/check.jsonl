@@ -1,0 +1,4 @@
+{"file":".trellis/tasks/08-16-node-cert-lifecycle/prd.md","reason":"核对跨子任务标准与遗留项边界;AC5(D2 红线)必须 grep 自证。"}
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"核对 test-distribution-contract.sh 门禁未破、usage 文本断言仍成立、发布路径未受影响。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"核对 SAN 判定逻辑是否只有一份(装机与重签共用),helper 未被复制。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"核对 CA 过期/临期的错误与 Warn 文案能否区分 CA 自身与服务端/客户端证书。"}

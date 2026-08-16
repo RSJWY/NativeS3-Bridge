@@ -1,0 +1,5 @@
+{"file":".trellis/tasks/08-16-node-cert-lifecycle/prd.md","reason":"核对跨子任务标准，尤其 AC2(无静默失败)、AC3(安全网 A)、AC5(D2 红线)。"}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"核对 DTO 字段命名、响应形状与鉴权路由是否符合既有 panel 端点约定。"}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"核对四态渲染、状态样式复用(未新造配色)、以及 dashboard 未新增顶层卡片。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"核对是否出现平行实现:到期判定、severity 机制、批量查询是否复用既有范式。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"核对 AC16/AC17:panel 与 node DB schema 均无变更，且 dashboard 聚合无 N+1 查询。"}

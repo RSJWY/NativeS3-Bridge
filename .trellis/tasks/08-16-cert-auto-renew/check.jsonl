@@ -1,0 +1,5 @@
+{"file":".trellis/tasks/08-16-node-cert-lifecycle/prd.md","reason":"验收必须对照父任务的跨子任务标准 AC1-AC9，尤其 AC4（安全网 C 增量迁移）与 AC5（D2 红线：ClientAuth 语义未变、未引入放宽校验的 VerifyPeerCertificate）。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"核对 activated_at 是否以加列方式引入、validateSchema 是否通过、旧 panel DB 原地升级后既有数据是否完好。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"核对是否出现平行实现：clientTLS / persistPEM / buildCSR / nodeSubject / registerResponse 必须复用而非重写。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"核对 AC2（无静默失败）：证书类永久错误是否为 Error 级、是否指明恢复动作、是否泄露私钥或 CSR 材料。"}
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"核对 /renew 的错误响应形状、审计脱敏是否符合既有 panel 端点约定。"}

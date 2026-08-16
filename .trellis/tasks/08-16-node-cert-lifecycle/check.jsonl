@@ -1,0 +1,4 @@
+{"file":".trellis/tasks/08-16-node-cert-lifecycle/prd.md","reason":"父任务集成验收的唯一依据：跨子任务标准 AC1-AC8、三条承重决策 D1/D2/D3、以及本轮不做但需登记的遗留项 L1-L4。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"集成验收需跨四层核对（panel PKI/HTTP、panel DB、节点 agent、Vue 管理面 + 安装脚本），用其边界检查表发现子任务交界处的漏项。"}
+{"file":".trellis/spec/backend/release-guidelines.md","reason":"本轮改动涉及安装脚本、双镜像与 e2e 发布门禁；集成验收需确认发布契约与升级路径未被破坏。"}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"核对 AC4：panel DB 严格增量、节点 DB 零改动（安全网 C）。"}

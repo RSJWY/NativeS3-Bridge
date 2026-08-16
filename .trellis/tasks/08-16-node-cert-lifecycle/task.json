@@ -1,0 +1,32 @@
+{
+  "id": "node-cert-lifecycle",
+  "name": "node-cert-lifecycle",
+  "title": "节点证书生命周期治理",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "rsjwy",
+  "assignee": "rsjwy",
+  "createdAt": "2026-08-16",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "08-16-cert-auto-renew",
+    "08-16-cert-expiry-observability",
+    "08-16-panel-server-cert-renew",
+    "08-16-cert-docs-correction",
+    "08-16-requirement-traceability-gate"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

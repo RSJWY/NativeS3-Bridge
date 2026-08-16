@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/webadmin-guidelines.md","reason":"/certs 改为显式 DTO、dashboard 聚合扩展都受既有 admin API 响应形状、路由与敏感数据约定约束。"}
+{"file":".trellis/spec/frontend/webadmin-ui-guidelines.md","reason":"PanelCertificate 类型改名、四态状态渲染、Panel 路由隔离与加载/错误态要求在此。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"到期状态是后端派生、前端只展示；跨 panel API / dashboard 聚合 / Vue UI / 节点日志四层，用其边界检查表核对口径一致。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"必须复用 dashboard 既有 Attention/Severity 机制与兄弟子任务的 LoadCertificate/RenewalThreshold，不得平行实现到期判定。"}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"节点侧两条证书错误路径的日志级别、结构化字段与降频策略受此约束。"}
+{"file":".trellis/tasks/08-16-node-cert-lifecycle/prd.md","reason":"父任务：承重决策 D1/D2/D3 与跨子任务验收标准的唯一来源。"}
