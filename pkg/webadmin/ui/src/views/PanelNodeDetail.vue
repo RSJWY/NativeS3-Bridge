@@ -78,7 +78,6 @@
       <PanelNodeCredentialsSection :node-id="nodeID" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" @changed="handleDraftChanged" />
       <PanelNodeWebhooksSection :node-id="nodeID" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" @changed="handleDraftChanged" />
       <PanelNodeRateLimitSection :node-id="nodeID" :disabled="node.status === 'retired'" :refresh-key="resourceRevision" @changed="handleDraftChanged" />
-      <PanelNodeLogsSection :node-id="nodeID" :online="node.online" :disabled="node.status === 'retired'" />
 
       <section class="panel panel-detail-section">
         <div class="panel-section-heading">
@@ -107,6 +106,8 @@
           </table>
         </div>
       </section>
+
+      <PanelNodeLogsSection :node-id="nodeID" :online="node.online" :disabled="node.status === 'retired'" />
     </template>
 
     <div v-if="tokenResult" class="modal-backdrop" @click.self="closeToken">
