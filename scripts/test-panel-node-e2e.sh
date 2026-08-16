@@ -877,7 +877,7 @@ sign_expired_node_cert() {
 [ca]
 default_ca = CA_default
 [CA_default]
-database = /dev/null
+database = $ca_dir/demoCA/index.txt
 new_certs_dir = $ca_dir/demoCA/newcerts
 certificate = $ca_crt
 private_key = $ca_key
