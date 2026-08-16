@@ -1,0 +1,106 @@
+# 公网安全部署与监控
+
+公网部署要把 S3 API 和管理后台视为不同安全边界。
+
+推荐拓扑：
+
+```text
+Internet
+  |
+  | HTTPS
+  v
+Reverse proxy / CDN / WAF
+  |-- s3.example.com    -> node S3 listener :9000
+  |-- admin.example.com -> panel admin listener :9001
+
+node ──outbound mTLS──▶ panel agent listener :9443
+```
+
+## 基本原则
+
+- 所有公网入口必须使用 HTTPS。
+- S3 API 和管理后台使用不同域名，便于独立 cookie、限流、WAF 和日志策略。
+- 管理后台公网访问不要只依赖单密码。建议启用 TOTP 和 captcha。
+- `admin_addr` 尽量绑定内网地址，公网只通过反向代理访问。
+- `trust_forwarded` 只在可信代理覆盖转发头时启用。
+- 业务直链优先使用 private bucket + 短 TTL presigned URL。
+- `public-read` 只用于明确对所有知道 URL 的人公开的对象。
+- panel 的 9443 端口只用于 node 注册和控制面连接，应使用正确的服务端证书并限制无关来源。
+
+## Nginx 反向代理示例
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name s3.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/s3.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/s3.example.com/privkey.pem;
+
+    client_max_body_size 0;
+
+    location / {
+        proxy_pass http://127.0.0.1:9000;
+        proxy_http_version 1.1;
+        proxy_cache off;
+        proxy_cache_convert_head off;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name admin.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/admin.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/admin.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:9001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+```
+
+> **已有反向代理部署必须更新配置：** NativeS3-Bridge 镜像或二进制不会自动修改宿主机 Nginx 配置。升级或迁移后，应重新编辑/保存 S3 站点的反向代理块，确保 `location /` 包含 `proxy_cache off`、`proxy_cache_convert_head off` 和 `proxy_set_header Host $http_host`，然后执行 `nginx -t` 并 reload；无需为此重新构建 NativeS3-Bridge 镜像。
+
+S3 SigV4 会把 HTTP method 纳入签名。Nginx 的代理缓存配置可能把客户端 `HEAD` 转成上游 `GET`，导致 `HeadObject`/`HeadBucket` 返回 `SignatureDoesNotMatch`，而 PUT/GET/DELETE 仍然正常。使用宝塔等面板生成配置时，还要检查额外 include 文件是否重新启用了 `proxy_cache` 或覆盖 `proxy_cache_convert_head off`。修复后，Nginx access log 与 NativeS3 `s3 request` 日志应同时记录 `HEAD`。
+
+若下发给 node 的策略启用了 `rate_limit.trust_forwarded`，必须确保 node 不能被绕过代理直接访问。
+
+## 公网生产检查清单
+
+- `panel -check-config -config configs/panel.yaml` 与 `node -check-config -config configs/node.yaml` 均已通过。
+- panel 主密钥、中间 CA、agent 服务端证书和 node CA 信任链均已备份并验证。
+- HTTPS 已在应用或可信反向代理终止。
+- `webadmin.password_hash` 已配置。
+- `webadmin.admin_bootstrap_password` 已清空。
+- `webadmin.session_secret` 已替换为随机值。
+- `webadmin.totp.enabled: true`。
+- `webadmin.captcha.enabled: true`，或有明确的内网/反代替代防护。
+- `rate_limit.trust_forwarded` 仅在可信反代后启用。
+- 日志不记录 Authorization、Cookie、captcha token、session secret、完整 presigned URL 或对象内容。
+- public-read bucket 中只有明确公开的对象。
+
+## 运维端点与监控
+
+容器 healthcheck 的真实现状：
+
+- panel Compose 使用 `panel -check-config`。该检查会读取主密钥和在线 CA 并校验配置字段，但不是请求级 liveness/readiness 探针，也不能替代完整启动检查。
+- node Compose 使用 `node -health`。该探测会对已配置的 S3 listener 发起真实请求，属于进程级 liveness 信号。
+
+不要按旧单体 README 暴露 `/healthz`、`/readyz` 或 `/metrics`；当前 panel 管理服务器没有注册这些旧端点。
+
+除 healthcheck 外，生产监控还应覆盖：
+
+- panel 与 node 容器状态、重启次数和退出码。
+- panel 9001、9443 监听状态，以及 node 9000 S3 探测。
+- panel 中节点的 online、last heartbeat、applied/desired version 和 drift 状态。
+- panel/node 日志中的注册失败、证书错误、任务失败和数据库迁移错误。

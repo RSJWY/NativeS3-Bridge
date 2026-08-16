@@ -1,60 +1,28 @@
 # NativeS3-Bridge
 
-NativeS3-Bridge 是一个 panel/node 分离的轻量 S3 桥接系统。node 把操作系统上的真实目录映射为标准 S3 兼容 API；panel 提供集中管理界面、节点注册、配置下发和运维任务控制。S3 对象流量直接进入 node，不经过 panel。
+panel/node 分离的轻量 S3 桥接系统。node 把操作系统上的真实目录映射为标准 S3 兼容 API；panel 提供集中管理界面、节点注册、配置下发和运维任务控制。S3 对象流量直接进入 node，不经过 panel。
 
-项目目标很明确：在不引入专有对象格式的前提下，让本地文件系统可以被 S3 客户端、业务服务、脚本和浏览器直链安全访问。
+项目目标：在不引入专有对象格式的前提下，让本地文件系统可以被 S3 客户端、业务服务、脚本和浏览器直链安全访问。
 
-## 文档导航
+## 核心特性
 
-- [核心能力](#核心能力)
-- [界面预览](#界面预览)
-- [适用场景](#适用场景)
-- [架构与数据模型](#架构与数据模型)
-- [快速开始](#快速开始)
-- [配置说明](#配置说明)
-- [S3 API 使用](#s3-api-使用)
-- [管理后台](#管理后台)
-- [公网安全部署](#公网安全部署)
-- [运维端点与监控](#运维端点与监控)
-- [事件钩子](#事件钩子)
-- [Docker 部署](#docker-部署)
-- [发布流程](#发布流程)
-- [开发与验证](#开发与验证)
-- [仓库文件与忽略规则](#仓库文件与忽略规则)
-- [License](#license)
-
-## 核心能力
-
-| 能力 | 说明 |
-|---|---|
-| 原生文件 1:1 映射 | Bucket 是 `storage.data_root` 下的一级目录，Object Key 是 bucket 内的相对路径文件。对象字节以原始文件形式落盘，不切块、不封装、不改名。 |
-| S3 兼容 API | 支持 Header SigV4、query presigned URL、对象 CRUD、bucket 操作、分段上传、批量删除、服务端复制、tagging、自定义元数据和 Range 下载。 |
-| 管理面/数据面分离 | panel 只承载管理 UI、REST 与 mTLS 控制面；node 只承载 S3 数据面和主动连接 panel 的 agent。 |
-| 多数据库 | panel 与每个 node 使用物理独立的数据库，均可通过 GORM 使用 SQLite、MySQL 或 PostgreSQL。 |
-| 配额与统计 | 每个 S3 credential 可设置 quota，PUT 和 multipart complete 会按最终对象大小计入用量，请求统计按 UTC 日期聚合。 |
-| 匿名 public-read | Bucket ACL 支持 `private` 与 `public-read`。匿名访问仅允许 public-read bucket 的对象级 `GET`/`HEAD`。 |
-| 集中管理 | panel 使用单管理员登录，支持 TOTP、Turnstile-compatible captcha、节点生命周期、一次性注册令牌、credential 管理、期望配置发布和远程任务。 |
-| 双二进制部署 | Vue3 管理界面通过 `go:embed` 打入 `panel`；`panel` 与 `node` 可分别构建、升级和回滚，运行时不需要 Node.js。 |
-| 异步 Webhook | 对象创建、删除和 multipart complete 可异步投递事件，失败重试不阻塞 S3 请求。 |
-
-## 界面预览
-
-仓库中的现有截图来自拆分前的单节点管理界面，不代表当前 panel/node 控制面的节点注册和管理流程，因此不再把它们作为当前部署预览。当前分支以 panel Admin API、节点在线状态、期望版本和任务结果为准。
+- **原生文件 1:1 映射** — Bucket 是 `storage.data_root` 下的一级目录，Object Key 是 bucket 内的相对路径；对象字节原样落盘，不切块、不封装、不改名。
+- **S3 兼容 API** — Header SigV4 / query presigned、对象 CRUD、bucket 操作、分段上传、批量删除、服务端复制、tagging、自定义元数据、Range 下载。
+- **管理面/数据面分离** — panel 只承载管理 UI、REST 与 mTLS 控制面；node 只承载 S3 数据面，并主动拨号连接 panel。
+- **多数据库** — panel 与 node 数据库物理独立，均支持 SQLite、MySQL、PostgreSQL（GORM）。
+- **配额与统计** — 每个 S3 credential 可设 quota，PUT 和 multipart complete 按最终对象大小计入用量，请求统计按 UTC 日期聚合。
+- **匿名 public-read** — public-read bucket 仅开放匿名对象级 `GET`/`HEAD`。
+- **集中管理** — 单管理员登录（TOTP、captcha 可选）、节点生命周期、一次性注册令牌、credential 管理、版本化期望配置发布和远程任务。
+- **双二进制部署** — Vue3 管理界面通过 `go:embed` 打入 panel；运行时不需要 Node.js。
+- **异步 Webhook** — 对象创建、删除和 multipart complete 异步投递事件，失败重试不阻塞 S3 请求。
 
 ## 适用场景
 
-- 局域网或内网环境中，把已有目录快速暴露为 S3 接口。
-- 游戏、互动引擎、AI 工作流、媒体处理脚本需要 S3 API，但希望对象仍是普通文件。
-- 业务服务生成私有对象的短时预签名直链，终端用户通过浏览器或 HTTP 客户端直接下载。
-- 小型团队需要一个集中 panel 管理多个轻量 node、同时保留原生文件布局的对象网关。
+适合：内网把已有目录快速暴露为 S3 接口；游戏、AI 工作流、媒体脚本需要 S3 API 但希望对象仍是普通文件；业务生成私有对象的短时预签名直链供浏览器直接下载；小团队用集中 panel 管理多个轻量 node。
 
-不适合的场景：
+不适合：AWS IAM 级策略、多租户隔离、对象级授权或多用户 RBAC；分布式高可用、跨节点副本、纠删码、版本化或对象锁；把文件存成专有块格式。
 
-- 需要 AWS IAM 级别策略、多租户隔离、对象级授权或多用户 RBAC。
-- 需要分布式高可用、跨节点副本、纠删码、版本化或对象锁。
-- 需要把文件存储为专有块格式或跨盘卷合并。
-
-## 架构与数据模型
+## 架构
 
 ```text
 管理员 ──HTTPS──▶ panel :9001
@@ -71,623 +39,31 @@ S3 客户端 ───────────────▶ node :9000
                            └─ 原生对象文件与 sidecar
 ```
 
-- panel 不监听 S3 端口，也不保存或转发对象字节。
-- node 不提供管理 UI 或管理端口；它只暴露 S3 listener，并主动连接 panel。
-- panel 与 node 数据库物理分离。panel 保存节点、证书指纹、加密后的 credential 和期望配置；node 保存实际生效的 S3 业务状态、统计和 agent 状态。
-- node 断开控制面后仍按最后一次成功应用的本地配置继续提供 S3 服务。
-- 当前拆分是对旧单体入口的硬切换；新部署应使用 `cmd/panel` 与 `cmd/node`。
+- panel 不监听 S3 端口，也不保存或转发对象字节；node 没有管理端口，只暴露 S3 listener 并主动连接 panel。
+- 两库物理分离：panel 保存节点生命周期、证书指纹、审计、加密后的 S3 secret 和版本化期望配置；node 保存实际生效的 credentials、buckets、请求统计和 hooks。
+- panel 主密钥（32 字节 AEAD key）用于加密 S3 secret，必须与 panel 数据库分开备份。
+- node 断开控制面后，仍按最后一次成功应用的本地配置继续提供 S3 服务。
+- 当前拆分是对旧单体入口的硬切换；新部署使用 `cmd/panel` 与 `cmd/node`。
 
 ### 原生文件布局
 
-对象只落在 node。使用示例 node 配置时：
-
-```yaml
-storage:
-  data_root: "/data/objects"
-  metadata_suffix: ".s3meta"
-```
-
-上传对象：
-
-```text
-bucket: media
-key:    images/cover.jpg
-```
-
-落盘结果：
+对象只落在 node。上传 `media/images/cover.jpg`（`data_root: /data/objects`）后落盘为：
 
 ```text
 /data/objects/
 └── media/
     └── images/
-        ├── cover.jpg
-        └── cover.jpg.s3meta
+        ├── cover.jpg          # 原始对象字节，可直接用文件管理器/脚本读取
+        └── cover.jpg.s3meta   # ETag、Content-Type、metadata、tags、size、上传时间
 ```
 
-`cover.jpg` 是原始对象字节，可直接用系统文件管理器、图片查看器或脚本读取。`.s3meta` 保存 ETag、Content-Type、自定义 metadata、tags、size 和上传时间。缺少 sidecar 时，服务仍能读取原生对象，只是 metadata/tags 为空或按扩展名推断。
-
-### 数据归属
-
-| 位置 | 主要内容 |
-|---|---|
-| panel 数据库 | 节点生命周期、注册令牌 hash、节点证书指纹、审计、加密后的 S3 secret、版本化期望配置和任务结果。 |
-| panel 主密钥文件 | 解密 panel 数据库中 S3 secret 的 32 字节 AEAD 主密钥；必须与数据库分开备份。 |
-| panel PKI | 在线中间 CA 与 agent listener 服务端证书；用于首次注册和后续 mTLS。 |
-| node 数据库 | 实际生效的 credentials、buckets、request stats、hooks，以及控制面应用版本和证书状态。 |
-| node 数据目录 | 原始对象、`.s3meta` sidecar、multipart 临时文件和 node 私钥/证书。 |
-
-对象字节、对象 metadata 和 tags 不进入 panel，也不存入关系数据库。
+缺少 sidecar 时服务仍能读取原生对象，只是 metadata/tags 为空或按扩展名推断。对象字节、metadata 和 tags 不进入 panel，也不存入关系数据库。
 
 ## 快速开始
 
-> 容器部署可以直接使用 GHCR 已发布的 `natives3-panel` 与 `natives3-node` 镜像；无源码快速安装见 [Docker 部署](#docker-部署)。
+### 方式一：Docker 一键安装（推荐）
 
-### 1. 环境要求
-
-- Go 1.21+
-- Node.js 18+，仅在需要重新构建管理后台前端时使用
-- OpenSSL，用于生成本地验证所需的主密钥和 PKI
-- AWS CLI，可选，用于端到端验证 S3 API
-- Docker，可选，用于容器部署
-
-### 2. 构建 panel 与 node
-
-从完整源码构建时先构建前端，再构建 Go：
-
-```bash
-npm ci --prefix pkg/webadmin/ui
-npm run build --prefix pkg/webadmin/ui
-go build -o panel ./cmd/panel
-go build -o node ./cmd/node
-```
-
-如果 `pkg/webadmin/ui/dist/` 已经存在有效构建产物，可以直接执行 Go 构建：
-
-```bash
-go build -o panel ./cmd/panel
-go build -o node ./cmd/node
-```
-
-### 3. 准备两套配置
-
-仓库不会提交真实运行配置。panel 与 node 使用不同配置：
-
-```bash
-cp -n configs/panel.example.yaml configs/panel.yaml
-cp -n configs/node.example.yaml configs/node.yaml
-```
-
-- `configs/panel.yaml`：管理监听、控制面 TLS、在线中间 CA、主密钥、panel 数据库和管理员认证。
-- `configs/node.yaml`：S3 listener、对象目录、node 本地数据库、panel URL、逻辑节点 ID 和 node mTLS 文件。
-
-示例里的 `/data/...` 是容器内路径。本机直接运行二进制时，应改成当前用户可读写的绝对路径。容器镜像、PKI 和挂载流程见 [Docker 部署](#docker-部署)。
-
-### 4. 按顺序启动
-
-panel 会在缺少主密钥、中间 CA 或 agent 服务端证书时拒绝启动。准备好这些文件后先校验并启动 panel：
-
-```bash
-./panel -check-config -config configs/panel.yaml
-./panel -config configs/panel.yaml
-```
-
-然后通过 panel Admin API（Curl 示例见下文）完成：
-
-1. 登录 `http://127.0.0.1:9001/`。
-2. 创建逻辑节点，记录 `node_id`。
-3. 为该节点签发一次性注册令牌；令牌默认 10 分钟有效且只显示一次。
-4. 把 `node_id`、令牌、`register_url` 和 `agent_url` 写入 `configs/node.yaml`。
-5. 确保 node 配置中的 `panel.ca_file` 指向能够验证 panel agent 服务端证书的 CA 文件。
-
-最后校验并启动 node：
-
-```bash
-./node -check-config -config configs/node.yaml
-./node -config configs/node.yaml
-```
-
-node 首次启动会在本地生成私钥和 CSR，用一次性令牌换取客户端证书，随后使用 mTLS 连接 panel。注册成功后可清空配置中的 `registration_token`；node 私钥不会上传到 panel。
-
-默认网络边界：
-
-| 进程 | 默认监听 | 用途 |
-|---|---|---|
-| panel admin | `127.0.0.1:9001`（示例容器内为 `0.0.0.0:9001`） | 管理 UI 和 REST。 |
-| panel agent | `0.0.0.0:9443` | node 首次注册和 mTLS WebSocket。 |
-| node S3 | `0.0.0.0:9000` | AWS CLI、SDK 和 HTTP 客户端。 |
-
-## 配置说明
-
-完整示例见 [configs/panel.example.yaml](configs/panel.example.yaml) 和 [configs/node.example.yaml](configs/node.example.yaml)。不要使用旧单体配置示例作为 panel/node 新部署入口。
-
-### panel 配置
-
-```yaml
-admin_addr: "0.0.0.0:9001"
-
-agent:
-  addr: "0.0.0.0:9443"
-  cert_file: "/data/pki/panel-server.crt"
-  key_file: "/data/pki/panel-server.key"
-
-pki:
-  intermediate_cert_file: "/data/pki/intermediate-ca.crt"
-  intermediate_key_file: "/data/pki/intermediate-ca.key"
-  client_cert_ttl: 2160h
-
-master_key_file: "/data/secrets/master.key"
-
-database:
-  driver: "sqlite"
-  dsn: "/data/panel.db"
-
-webadmin:
-  password_hash: ""
-  admin_bootstrap_password: ""
-  session_secret: "replace-with-a-random-32-byte-secret-value"
-```
-
-- `agent.cert_file` / `agent.key_file`：9443 listener 的服务端 TLS 身份；证书 SAN 必须覆盖 node 使用的主机名。
-- `pki.intermediate_*`：在线中间 CA。panel 用它签发 node 客户端证书，缺失时 fail-closed。
-- `master_key_file`：恰好 32 字节的原始主密钥，用于加密 S3 secret；不得只和 panel 数据库放在同一备份中。
-- `database`：只保存 panel 控制面状态，不保存对象或 node 的请求统计。
-- `webadmin.admin_bootstrap_password`：仅用于首次生成 bcrypt hash。启动日志输出 hash 后，把它写入 `password_hash` 并清空 bootstrap password。
-- `webadmin.session_secret`：生产环境必须替换为至少 32 字节的随机值。
-
-panel 配置检查会实际加载主密钥和在线 CA，并校验 agent 服务端证书路径字段；完整启动时才会真正加载 agent listener 证书和私钥：
-
-```bash
-./panel -check-config -config configs/panel.yaml
-```
-
-### node 配置
-
-```yaml
-server:
-  s3_addr: "0.0.0.0:9000"
-  tls:
-    enabled: false
-
-storage:
-  data_root: "/data/objects"
-  metadata_suffix: ".s3meta"
-
-database:
-  driver: "sqlite"
-  dsn: "/data/natives3.db"
-
-panel:
-  node_id: 1
-  register_url: "https://panel:9443/register"
-  agent_url: "wss://panel:9443/agent"
-  registration_token: ""
-  cert_file: "/data/pki/node.crt"
-  key_file: "/data/pki/node.key"
-  ca_file: "/data/pki/panel-ca.crt"
-  heartbeat_interval: 15s
-```
-
-- `storage.data_root`：对象根目录。示例挂载 `./node-data:/data`，所以宿主机对象位于 `./node-data/objects`。
-- `database.dsn`：node 本地状态库。示例中位于宿主机 `./node-data/natives3.db`。
-- `panel.node_id`：必须先由 panel 创建，不能自行猜测。
-- `registration_token`：只在首次无证书启动时使用；注册成功后可清空。
-- `cert_file` / `key_file`：node 本地 mTLS 身份。私钥由 node 首次注册时生成并始终留在 node。
-- `ca_file`：验证 panel agent 服务端证书的 CA；Docker 示例应放在 `./node-data/pki/panel-ca.crt`。
-
-node 不读取管理端监听、管理员密码等 panel 字段。credentials、bucket、quota、webhook 和 rate-limit 等业务配置由 panel 形成版本化期望状态并下发；升级旧节点时，遗留业务字段会被忽略，而不是作为新部署配置继续维护。
-
-```bash
-./node -check-config -config configs/node.yaml
-```
-
-### 数据库驱动与备份
-
-panel 和 node 都支持 SQLite、MySQL、PostgreSQL，但 DSN 必须分别写在 `configs/panel.yaml` 与 `configs/node.yaml` 中。
-
-```yaml
-# SQLite
-database:
-  driver: "sqlite"
-  dsn: "/data/panel.db" # panel；node 示例为 /data/natives3.db
-
-# MySQL
-database:
-  driver: "mysql"
-  dsn: "user:pass@tcp(mysql:3306)/natives3panel?charset=utf8mb4&parseTime=True&loc=Local"
-
-# PostgreSQL
-database:
-  driver: "postgres"
-  dsn: "host=postgres user=natives3 password=pass dbname=natives3panel port=5432 sslmode=disable"
-```
-
-- 启动时会打开并迁移各自数据库；迁移或 schema 校验失败时，对应进程退出。
-- SQLite 备份只保护关系数据。panel 还必须单独备份主密钥、CA、配置和审计；node 还必须备份对象目录、sidecar、本地数据库和 node 私钥/证书。
-- panel 数据库备份与主密钥备份必须位于不同信任域。只有数据库备份不应能恢复明文 S3 secret。
-- MySQL/PostgreSQL 应使用数据库原生一致备份、托管快照、物理备份或 PITR；应用不会在启动时替你复制远端数据库。
-- 完整恢复集合与演练步骤见 [多节点运维文档](docs/multi-node-operations.md)。
-
-## S3 API 使用
-
-### AWS CLI 环境变量
-
-```bash
-export AWS_ACCESS_KEY_ID=TESTKEY
-export AWS_SECRET_ACCESS_KEY=TESTSECRET
-export AWS_DEFAULT_REGION=us-east-1
-EP="--endpoint-url http://127.0.0.1:9000"
-```
-
-### 常用操作
-
-```bash
-# 创建 bucket
-aws $EP s3 mb s3://mybucket
-
-# 上传对象
-aws $EP s3api put-object \
-  --bucket mybucket \
-  --key docs/readme.txt \
-  --body ./README.md \
-  --metadata author=alice,project=demo
-
-# 查看对象 metadata
-aws $EP s3api head-object --bucket mybucket --key docs/readme.txt
-
-# 列举对象
-aws $EP s3api list-objects-v2 --bucket mybucket --prefix docs/
-
-# 下载对象
-aws $EP s3api get-object --bucket mybucket --key docs/readme.txt ./download.txt
-
-# Range 下载
-aws $EP s3api get-object \
-  --bucket mybucket \
-  --key docs/readme.txt \
-  --range bytes=0-99 \
-  ./partial.txt
-
-# 删除对象
-aws $EP s3api delete-object --bucket mybucket --key docs/readme.txt
-```
-
-### 支持范围
-
-| 类别 | 操作 |
-|---|---|
-| Service | `GET /`，ListBuckets |
-| Bucket | `PUT /{bucket}`、`DELETE /{bucket}`、`HEAD /{bucket}`、`GET /{bucket}` |
-| Bucket probes | `GET /{bucket}?location`、`GET /{bucket}?versioning` |
-| List objects | `ListObjectsV2`，支持 `prefix`、`delimiter`、`continuation-token`、`max-keys` |
-| Object | `PUT`、`GET`、`HEAD`、`DELETE` |
-| Object copy | `PUT` + `x-amz-copy-source` |
-| Bulk delete | `POST /{bucket}?delete` |
-| Multipart | Create、UploadPart、Complete、Abort、ListParts、ListMultipartUploads |
-| Tagging | `PUT/GET/DELETE /{bucket}/{key}?tagging` |
-| Metadata | `x-amz-meta-*` 自定义 metadata |
-| Integrity | `Content-MD5` 校验，失败返回 `InvalidDigest` 或 `BadDigest` |
-| Auth | Header SigV4 和 query presigned URL;可选 SigV2(`auth.allow_sigv2`,默认关闭) |
-| Anonymous | public-read bucket 的对象级 `GET`/`HEAD` |
-
-不支持或不属于当前目标：
-
-- AWS IAM policy、bucket policy、ACL XML 兼容写接口。
-- S3 versioning 的真实版本存储。
-- Object Lock、SSE、Lifecycle、Replication。
-- 匿名列 bucket、匿名写入、匿名删除。
-
-### 签名版本
-
-默认仅接受 Signature Version 4(header 或 query presigned)。旧客户端若只能发 Signature Version 2,可在配置中显式开启:
-
-```yaml
-auth:
-  allow_sigv2: true   # 默认 false
-```
-
-注意:v2 用 HMAC-SHA1、不签请求体、无 region/service scope,安全性明显弱于 v4;v2 + aws-chunked 的 payload 完整性完全依赖 aws-chunked 解码器校验。仅在必须兼容仅支持 v2 的客户端时开启。
-
-### 预签名 URL
-
-业务服务应优先使用 private bucket 加短 TTL 预签名 URL 暴露用户直链：
-
-```bash
-aws $EP s3 presign s3://mybucket/docs/readme.txt --expires-in 300
-```
-
-服务端会按 query SigV4 校验 `X-Amz-*` 参数。不要把完整预签名 URL 写入日志，因为 query string 中包含签名材料。
-
-### public-read 直链
-
-`public-read` bucket 只允许匿名对象级读取：
-
-```bash
-curl -I http://127.0.0.1:9000/public-bucket/path/file.txt
-curl -o file.txt http://127.0.0.1:9000/public-bucket/path/file.txt
-```
-
-匿名访问矩阵：
-
-| 请求 | private | public-read |
-|---|---:|---:|
-| `GET /bucket/key` | 403 | 200 或对象错误 |
-| `HEAD /bucket/key` | 403 | 200 或对象错误 |
-| `GET /bucket` list | 403 | 403 |
-| `PUT/DELETE/POST` | 403 | 403 |
-| `?tagging`、multipart 子资源 | 403 | 403 |
-
-### 错误格式
-
-S3 API 错误统一返回标准 XML：
-
-```xml
-<Error>
-  <Code>AccessDenied</Code>
-  <Message>access denied</Message>
-  <Resource>/bucket/key</Resource>
-  <RequestId>req-...</RequestId>
-</Error>
-```
-
-每个 S3 响应都会带 `x-amz-request-id`，该 ID 也会出现在错误 XML 和访问日志中。
-
-## 管理后台
-
-浏览器访问 panel 的 `http://127.0.0.1:9001/`。管理后台是单管理员模型，不提供多用户、RBAC 或 OIDC。它管理节点和期望状态，不直接访问 node 的对象目录。
-
-### 登录流程
-
-登录 API：
-
-```http
-POST /api/admin/login
-```
-
-请求体：
-
-```json
-{
-  "password": "admin-password",
-  "totp_code": "123456",
-  "captcha_token": "provider-token"
-}
-```
-
-- `totp_code` 仅在 `webadmin.totp.enabled=true` 时需要。
-- `captcha_token` 仅在 `webadmin.captcha.enabled=true` 时需要。
-- 登录失败、TOTP 错误、captcha 失败都会计入同一来源 IP 的失败锁定。
-- 登录成功后设置 `natives3_admin_session` HTTP-only cookie。
-
-前端可读取非敏感登录设置：
-
-```http
-GET /api/admin/auth-settings
-```
-
-该接口只返回是否需要 TOTP、是否启用 captcha、captcha provider 和 site key，不返回 secret。
-
-### Panel Admin API
-
-除 `/api/admin/login` 和 `/api/admin/auth-settings` 外，所有 `/api/admin/*` API 都需要 session cookie。主要节点作用域接口如下：
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET/POST` | `/api/admin/nodes` | 列出或创建逻辑节点。 |
-| `GET/PATCH/DELETE` | `/api/admin/nodes/{id}` | 查看、启用/禁用或永久退役节点；退役会撤销证书和未使用令牌，但不会自动停止 node 的 S3 进程。 |
-| `POST` | `/api/admin/nodes/{id}/tokens` | 签发一次性、默认 10 分钟有效的注册令牌；明文只返回一次。 |
-| `GET/POST` | `/api/admin/nodes/{id}/credentials` | 列出或创建该节点的 S3 credential；secret 只在创建响应中返回一次。 |
-| `POST` | `/api/admin/nodes/{id}/credentials/{accessKey}/rotate` | 轮换 secret；新 secret 只返回一次。 |
-| `POST` | `/api/admin/nodes/{id}/desired-state` | 从 panel 权威数据生成新版本并在节点在线时尽力立即下发。 |
-| `POST` | `/api/admin/nodes/{id}/desired-state/push` | 向在线节点重推当前期望状态。 |
-| `POST` | `/api/admin/nodes/{id}/tasks` | 下发日志查询、存储扫描或存储对账等一次性任务。 |
-| `GET` | `/api/admin/nodes/{id}/tasks/{taskId}` | 查询任务结果。 |
-| `GET` | `/api/admin/nodes/{id}/certs` | 查看 node 客户端证书，含剩余天数（`days_until_expiry`）与四态状态（active/expiring/expired/revoked）。 |
-| `POST` | `/api/admin/nodes/{id}/certs/revoke` | 撤销该节点的全部证书并断开控制面连接。 |
-| `GET` | `/api/admin/logs` | 查看 Panel 自身的内存 ring、当前日志文件和安全枚举的轮转历史。 |
-
-### 证书生命周期
-
-- node 客户端证书默认 90 天（`pki.client_cert_ttl`），剩余有效期低于 TTL/3（默认 30 天）时自动经 `POST /renew` 续期，无需人工干预；已过期的证书只能令牌重注册，无宽限期。
-- panel 服务端证书默认 825 天，到期用 `install-panel.sh renew-server-cert` 重签（不影响已注册节点，需重启 panel 生效），**不要用 `--force`**。
-- 部署 CA 默认 3650 天，不可轮换，到期只能全网重装（已知限制 L1）。
-
-完整 runbook（到期巡检、过期节点恢复七步、多 SAN 重签、CA 已知限制）见
-[多节点运维文档 §10 Certificate lifecycle operations](docs/multi-node-operations.md#10-certificate-lifecycle-operations)。
-
-### Panel 日志
-
-登录后可从侧栏进入 `/logs` 查看 Panel 自身日志。页面和
-`GET /api/admin/logs` 共用同一契约，支持级别、关键字、条数和日志文件选择；
-轮转历史包括 lumberjack 生成的普通文件与 gzip 文件。该接口只接受服务端枚举的
-文件 ID，不接受路径，也不提供下载、删除或实时流。
-
-Panel 与 Node 始终同时写 stdout 和最近 2000 条内存 ring。配置 `log.dir` 后还会
-写入 `<dir>/natives3bridge.log` 并按 lumberjack 轮转；旧 `log.file` 完整路径仍兼容，
-但不能和 `log.dir` 同时设置。Docker 部署可使用：
-
-```yaml
-log_level: "info"
-log:
-  dir: "/data/logs"
-  max_size_mb: 100
-  max_backups: 5
-  max_age_days: 14
-  compress: false
-```
-
-Panel `/logs` 只查看 Panel 本机文件。Node 的轮转原始文件留在各 Node 主机，不通过
-控制面传输。
-
-### Node 日志拉取
-
-Node 详情页的“节点日志”通过现有 mTLS 控制面发送预定义 `log_query` 任务，只查询
-该 Node 当前进程的内存 ring。查询支持级别、关键字、RFC3339 时间范围和条数过滤，
-结果最新在前，最多 500 条且序列化结果不超过 256 KiB；页面会显示离线、超时、
-控制面断开、失败、空结果和截断状态。新 Node 返回结构化时间/级别/消息/属性，
-Panel 仍能显示旧 Node 的 `log_lines` 文本结果。
-
-远程查询不会读取或传输 Node 当前/轮转日志文件，不提供实时流、下载、删除或任意
-命令执行。查询关键字不会写入 Panel 的任务参数或审计记录，跨控制面前后都会再次
-过滤 secret、token、Authorization、Cookie 和签名类属性。
-
-创建节点和令牌的 Curl 示例：
-
-```bash
-curl -c cookie.txt \
-  -H "Content-Type: application/json" \
-  -X POST http://127.0.0.1:9001/api/admin/login \
-  -d '{"password":"your-password"}'
-
-curl -b cookie.txt \
-  -H "Content-Type: application/json" \
-  -X POST http://127.0.0.1:9001/api/admin/nodes \
-  -d '{"display_name":"node-a"}'
-
-curl -b cookie.txt \
-  -X POST http://127.0.0.1:9001/api/admin/nodes/1/tokens
-```
-
-注册令牌、credential secret 和预签名 URL 都属于敏感材料，不要写入持久日志。节点退役或证书撤销只切断控制面；若需要停止对象访问，还必须停止 node 容器或轮换受影响的 S3 credential。
-
-## 公网安全部署
-
-公网部署要把 S3 API 和管理后台视为不同安全边界。
-
-推荐拓扑：
-
-```text
-Internet
-  |
-  | HTTPS
-  v
-Reverse proxy / CDN / WAF
-  |-- s3.example.com    -> node S3 listener :9000
-  |-- admin.example.com -> panel admin listener :9001
-
-node ──outbound mTLS──▶ panel agent listener :9443
-```
-
-### 基本原则
-
-- 所有公网入口必须使用 HTTPS。
-- S3 API 和管理后台使用不同域名，便于独立 cookie、限流、WAF 和日志策略。
-- 管理后台公网访问不要只依赖单密码。建议启用 TOTP 和 captcha。
-- `admin_addr` 尽量绑定内网地址，公网只通过反向代理访问。
-- `trust_forwarded` 只在可信代理覆盖转发头时启用。
-- 业务直链优先使用 private bucket + 短 TTL presigned URL。
-- `public-read` 只用于明确对所有知道 URL 的人公开的对象。
-- panel 的 9443 端口只用于 node 注册和控制面连接，应使用正确的服务端证书并限制无关来源。
-
-### Nginx 反向代理示例
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name s3.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/s3.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/s3.example.com/privkey.pem;
-
-    client_max_body_size 0;
-
-    location / {
-        proxy_pass http://127.0.0.1:9000;
-        proxy_http_version 1.1;
-        proxy_cache off;
-        proxy_cache_convert_head off;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
-}
-
-server {
-    listen 443 ssl http2;
-    server_name admin.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/admin.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/admin.example.com/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:9001;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
-}
-```
-
-> **已有反向代理部署必须更新配置：** NativeS3-Bridge 镜像或二进制不会自动修改宿主机 Nginx 配置。升级或迁移后，应重新编辑/保存 S3 站点的反向代理块，确保 `location /` 包含 `proxy_cache off`、`proxy_cache_convert_head off` 和 `proxy_set_header Host $http_host`，然后执行 `nginx -t` 并 reload；无需为此重新构建 NativeS3-Bridge 镜像。
-
-S3 SigV4 会把 HTTP method 纳入签名。Nginx 的代理缓存配置可能把客户端 `HEAD` 转成上游 `GET`，导致 `HeadObject`/`HeadBucket` 返回 `SignatureDoesNotMatch`，而 PUT/GET/DELETE 仍然正常。使用宝塔等面板生成配置时，还要检查额外 include 文件是否重新启用了 `proxy_cache` 或覆盖 `proxy_cache_convert_head off`。修复后，Nginx access log 与 NativeS3 `s3 request` 日志应同时记录 `HEAD`。
-
-若下发给 node 的策略启用了 `rate_limit.trust_forwarded`，必须确保 node 不能被绕过代理直接访问。
-
-### 公网生产检查清单
-
-- `panel -check-config -config configs/panel.yaml` 与 `node -check-config -config configs/node.yaml` 均已通过。
-- panel 主密钥、中间 CA、agent 服务端证书和 node CA 信任链均已备份并验证。
-- HTTPS 已在应用或可信反向代理终止。
-- `webadmin.password_hash` 已配置。
-- `webadmin.admin_bootstrap_password` 已清空。
-- `webadmin.session_secret` 已替换为随机值。
-- `webadmin.totp.enabled: true`。
-- `webadmin.captcha.enabled: true`，或有明确的内网/反代替代防护。
-- `rate_limit.trust_forwarded` 仅在可信反代后启用。
-- 日志不记录 Authorization、Cookie、captcha token、session secret、完整 presigned URL 或对象内容。
-- public-read bucket 中只有明确公开的对象。
-
-## 运维端点与监控
-
-当前 panel/node Compose 使用各自二进制的 `-check-config` 作为容器 healthcheck。panel 检查会读取主密钥和在线 CA，node 检查会校验基础设施字段；它们都不是请求级 liveness/readiness 探针，也不能替代完整启动检查。生产监控还应覆盖：
-
-- panel 与 node 容器状态、重启次数和退出码。
-- panel 9001、9443 监听状态，以及 node 9000 S3 探测。
-- panel 中节点的 online、last heartbeat、applied/desired version 和 drift 状态。
-- panel/node 日志中的注册失败、证书错误、任务失败和数据库迁移错误。
-
-不要继续按旧单体 README 暴露 `/healthz`、`/readyz` 或 `/metrics`；当前 panel 管理服务器没有注册这些旧端点。
-
-## 事件钩子
-
-Hook manager 从数据库的 `hook_configs` 表加载启用的 Webhook 配置。对象创建、对象删除和 multipart complete 会投递事件。
-
-事件示例：
-
-```json
-{
-  "type": "ObjectCreated",
-  "bucket": "mybucket",
-  "key": "docs/readme.txt",
-  "size": 1234,
-  "etag": "5d41402abc4b2a76b9719d911017c592",
-  "metadata": {
-    "author": "alice"
-  },
-  "credential_id": 1,
-  "timestamp": "2026-06-19T12:00:00Z"
-}
-```
-
-投递规则：
-
-- 投递为异步后台任务，不阻塞 S3 响应。
-- 队列满会丢弃事件并记录 warning。
-- 非 2xx、连接失败或超时会按 `hooks.max_retry` 指数退避重试。
-- 禁用的 hook config 不会投递。
-
-Panel 节点详情页和 `/api/admin/nodes/{id}/webhooks` 已提供 webhook 草稿 CRUD，事件类型使用 `ObjectCreated` / `ObjectDeleted` 显式选择。修改只有在管理员发布草稿且 node 成功应用后才替换运行时 hook 集合；不要直接修改 node 的 `hook_configs` 绕过 Panel 权威状态。
-
-## Docker 部署
-
-panel 与 node 分别在不同主机上安装，直接拉取 GHCR 的 `latest` 镜像，无需克隆仓库。两种方式任选其一。
-
-### 方式一：一键安装（命令行传参）
-
-通过 `curl | bash` 直接运行，必填参数在命令行给出，未指定的数据库等选项回退默认（SQLite + 默认路径）。适合 CI 或参数已就绪的场景。
+panel 与 node 分别部署在不同主机，直接拉取 GHCR `latest` 镜像，无需克隆仓库：
 
 ```bash
 # Panel 主机：--panel-host 必须是 node 实际连接的域名或 IPv4
@@ -703,122 +79,99 @@ curl -fsSL https://raw.githubusercontent.com/RSJWY/NativeS3-Bridge/main/scripts/
       --ca-file /root/panel-ca.crt
 ```
 
-> `curl | bash` 是非交互管道，不会提示输入。需要外部 MySQL/PostgreSQL 时用 `--db-driver`/`--db-dsn` 显式指定，否则使用默认 SQLite。
+`curl | bash` 不会交互提示；需要外部 MySQL/PostgreSQL 或交互式输入时，先下载脚本再运行 `sudo bash install-panel.sh`。完整参数、生成文件、升级卸载与手动 Compose 部署见 [Docker 部署文档](docs/docker-deployment.md)。
 
-### 方式二：交互式安装
+### 方式二：从源码构建
 
-先下载脚本审阅，再在终端直接运行；未通过命令行给出的参数会逐项提示输入（注册令牌静默读取，数据库密码明文输入、不校验格式）。需要配置外部数据库时优先用这种方式：选 `mysql`/`postgres` 后逐项输入 host、port、库名、用户、密码（postgres 还问 sslmode），脚本自动拼出 DSN，不用手写连接串。`mysql` 驱动同时兼容 MariaDB。
-
-```bash
-curl -fsSL -o install-panel.sh https://raw.githubusercontent.com/RSJWY/NativeS3-Bridge/main/scripts/install-panel.sh
-sudo bash install-panel.sh
-# 数据库驱动直接回车走 sqlite 默认；输入 mysql/postgres 后逐项填写连接信息
-```
-
-Node 同理：下载 `install-node.sh` 后执行 `sudo bash install-node.sh`，按提示填入 panel URL、node ID、注册令牌、CA 文件路径与数据库选项。
-
-### 默认安全边界
-
-panel 管理端口只映射到 `127.0.0.1:9001`，控制面发布 `9443`；node 只发布 S3 端口 `9000`。两端各自使用独立 SQLite 和宿主机持久化目录。
-
-完整的一键参数、生成文件、panel 到 node 的注册交接、升级/卸载、手动 Compose 部署、外部数据库与备份说明见 [Panel/Node Docker 独立部署文档](docs/docker-deployment.md)。仓库可审阅模板为 [`docker-compose.panel.yml`](docker-compose.panel.yml) 和 [`docker-compose.node.yml`](docker-compose.node.yml)。生产 PKI、恢复演练和证书运维见 [多节点运维文档](docs/multi-node-operations.md)。
-
-## 发布流程
-
-创建正式 tag 后，GitHub Actions release workflow 会执行：
-
-- `npm ci && npm run build` 构建 Web 管理后台。
-- Go 1.21 `go vet ./...`、`go test ./...` 和 `go test -race ./...`。
-- 分别交叉编译 panel/node 的 Linux amd64/arm64、macOS amd64/arm64、Windows amd64，共 10 个归档。
-- 每个归档包含对应示例配置与 `docs/multi-node-operations.md`，并上传统一的 `checksums.txt`。
-- 并行构建并推送 panel/node 的 amd64/arm64 多架构镜像到 GHCR。
-
-镜像地址为：
-
-```text
-ghcr.io/rsjwy/natives3-panel:<tag>
-ghcr.io/rsjwy/natives3-node:<tag>
-```
-
-GitHub Release 归档名为 `natives3-panel-<version>-<os>-<arch>.tar.gz` 和 `natives3-node-<version>-<os>-<arch>.tar.gz`。快速部署默认使用 `latest`；需要可重复部署和可控回滚时应固定正式版本 tag。
-
-每个多架构 tag 指向 OCI image index。除 amd64/arm64 的可运行 manifest 外，BuildKit 还会为每个平台发布最小 provenance attestation；GHCR 可能把这些子 manifest/attestation digest 显示为 untagged，这是正常的索引结构，并非重复发布的镜像。workflow 显式使用 `provenance: mode=min`、`sbom: false`，避免 Action 默认值变化影响产物。
-
-手动运行 `Release` workflow 时可以输入发布 tag。若 tag 不存在，workflow 会基于当前构建提交创建该 tag；如需指定源码，可填写 `source_ref`。
-
-## 开发与验证
-
-### 常用命令
+环境要求：Go 1.21+；Node.js 18+（仅重建前端时需要）；OpenSSL（生成本地验证用的主密钥和 PKI）；AWS CLI 可选。
 
 ```bash
-npm ci --prefix pkg/webadmin/ui
-npm run build --prefix pkg/webadmin/ui
-go build ./cmd/panel ./cmd/node
-go vet ./...
-go test ./...
+npm ci --prefix pkg/webadmin/ui && npm run build --prefix pkg/webadmin/ui
+go build -o panel ./cmd/panel
+go build -o node ./cmd/node
+
+cp -n configs/panel.example.yaml configs/panel.yaml
+cp -n configs/node.example.yaml configs/node.yaml
 ```
 
-### 冒烟测试
+示例里的 `/data/...` 是容器内路径；本机直接运行时应改成当前用户可读写的绝对路径。
 
-panel/node 分发合同和本地 PKI 启动路径可用以下脚本验证：
+1. 先启动 panel（缺少主密钥、中间 CA 或 agent 服务端证书时会拒绝启动）：
+
+   ```bash
+   ./panel -check-config -config configs/panel.yaml
+   ./panel -config configs/panel.yaml
+   ```
+
+2. 登录 `http://127.0.0.1:9001/`，创建逻辑节点并签发一次性注册令牌（默认 10 分钟有效、只显示一次），把 `node_id`、令牌、`register_url`、`agent_url` 写入 `configs/node.yaml`。Curl 示例见[管理后台文档](docs/admin-api.md)。
+
+3. 再启动 node。首次启动会本地生成私钥和 CSR，用一次性令牌换取客户端证书，随后使用 mTLS 连接 panel；注册成功后可清空 `registration_token`，node 私钥不会上传到 panel：
+
+   ```bash
+   ./node -check-config -config configs/node.yaml
+   ./node -config configs/node.yaml
+   ```
+
+默认网络边界：
+
+| 进程 | 默认监听 | 用途 |
+|---|---|---|
+| panel admin | `127.0.0.1:9001`（示例容器内为 `0.0.0.0:9001`） | 管理 UI 和 REST |
+| panel agent | `0.0.0.0:9443` | node 首次注册和 mTLS WebSocket |
+| node S3 | `0.0.0.0:9000` | AWS CLI、SDK 和 HTTP 客户端 |
+
+## 配置
+
+全部字段及注释见 [configs/panel.example.yaml](configs/panel.example.yaml) 和 [configs/node.example.yaml](configs/node.example.yaml)，启动前用 `-check-config` 校验。要点：
+
+- `master_key_file`：恰好 32 字节的主密钥，加密 S3 secret；不得与 panel 数据库放在同一备份。
+- `webadmin.admin_bootstrap_password`：仅首次生成 bcrypt hash 用，之后写入 `password_hash` 并清空。
+- credentials、bucket、quota、webhook、rate-limit 等业务配置不写在 node 配置里，由 panel 形成版本化期望状态下发。
+- 数据库均支持 SQLite/MySQL/PostgreSQL，DSN 分别写在各自配置中；启动时自动迁移，失败即退出。
+- 备份红线（数据库与主密钥分域、node 对象目录与私钥、恢复演练）见[多节点运维文档](docs/multi-node-operations.md)。
+
+## S3 API
 
 ```bash
-./scripts/test-release-integrity.sh
-./scripts/test-distribution-contract.sh
-./scripts/test-upgrade-rollback.sh
+export AWS_ACCESS_KEY_ID=TESTKEY AWS_SECRET_ACCESS_KEY=TESTSECRET AWS_DEFAULT_REGION=us-east-1
+EP="--endpoint-url http://127.0.0.1:9000"
+
+aws $EP s3 mb s3://mybucket
+aws $EP s3api put-object --bucket mybucket --key docs/readme.txt --body ./README.md
+aws $EP s3api get-object --bucket mybucket --key docs/readme.txt ./download.txt
+aws $EP s3 presign s3://mybucket/docs/readme.txt --expires-in 300
 ```
 
-真实容器注册流程按 [Docker 部署](#docker-部署) 的顺序执行。需要验证 S3 CRUD 时，先在 panel 为目标节点创建 credential、发布期望状态并等待 node 应用，再把返回的 access/secret 用于 `scripts/smoke-test.sh`；不要再使用单体的 `-seed-access-key` 启动参数。
+支持范围矩阵、SigV2 兼容开关、public-read 匿名访问矩阵、错误格式和对象事件 Webhook 见 [S3 API 文档](docs/s3-api.md)。
 
-### 代码结构
+## 管理后台
 
-```text
-cmd/panel/               # 管理 UI/REST 与 node 控制面入口
-cmd/node/                # S3 数据面与主动连接 panel 的 agent 入口
-pkg/panel/               # 节点、PKI、令牌、期望状态、任务和迁移
-pkg/nodeagent/           # 注册、mTLS 客户端、配置应用和本地任务
-pkg/controlproto/        # panel/node 版本约束的控制面协议
-pkg/config/              # panel/node YAML 配置、默认值和校验
-pkg/db/                  # node 业务数据库连接、模型和迁移
-pkg/server/              # S3 listener、路由、中间件、匿名限流
-pkg/auth/                # Header/query SigV4、credential cache、identity
-pkg/quota/               # quota check 和 usage/stat 事务提交
-pkg/handlers/            # bucket/object/multipart/tagging/presigned handlers
-pkg/storage/             # 原生文件 backend、bucket metadata、sidecar、multipart
-pkg/hooks/               # Webhook event manager
-pkg/webadmin/            # 复用的管理员认证与 embedded SPA
-pkg/webadmin/ui/         # Vue3 + Vite + ECharts 前端
-configs/                 # 示例配置
-scripts/                 # 冒烟测试脚本
-```
+浏览器访问 panel 的 `http://127.0.0.1:9001/`，单管理员模型。登录 API、Admin API 一览（节点、令牌、credential、期望状态、任务、证书、日志）、证书生命周期和日志契约见[管理后台文档](docs/admin-api.md)。
 
-## 仓库文件与忽略规则
+## 安全要点
 
-提交前建议检查：
+- 公网部署时 S3 API 和管理后台是不同安全边界，所有公网入口走 HTTPS。
+- 示例配置未启用 admin TLS，管理后台默认以明文 HTTP 提供，只能在内网或可信反向代理后使用。
+- 管理后台不要只依赖单密码，建议启用 TOTP 和 captcha；`session_secret` 生产必须替换为随机值。
+- 业务直链用 private bucket + 短 TTL presigned URL；`public-read` 只用于真正公开的对象。
+- Nginx 反代配置、代理缓存导致的 HEAD 签名失败、公网生产检查清单和监控项见[公网部署文档](docs/public-deployment.md)。
+
+## 文档
+
+- [Docker 部署](docs/docker-deployment.md) — 一键/交互安装、手动 Compose、升级卸载、外部数据库
+- [多节点运维](docs/multi-node-operations.md) — 拓扑、注册流程、备份恢复、证书生命周期
+- [S3 API](docs/s3-api.md) — 支持范围、签名版本、presigned、匿名访问、Webhook 事件
+- [管理后台](docs/admin-api.md) — 登录、Panel Admin API、日志
+- [公网部署](docs/public-deployment.md) — 反向代理、检查清单、监控
+- [开发与发布](docs/contributing.md) — 构建、冒烟测试、代码结构、发布流程、仓库规则
+
+## 开发
 
 ```bash
-git status --short
-git status --ignored --short
+go vet ./... && go test ./...
 ```
 
-应提交：
-
-- 业务代码：`cmd/`、`pkg/`、`configs/*.example.yaml`、`scripts/`。
-- 文档：`README.md`、`AGENTS.md`、`.trellis/spec/`、已归档任务记录。
-- 项目级 AI 工作流配置：`.agents/`、`.codex/`。
-- 前端源码和锁文件：`pkg/webadmin/ui/src/`、`package.json`、`package-lock.json`。
-
-不应提交：
-
-- 真实配置：`configs/panel.yaml`、`configs/node.yaml`。
-- 本地数据：`panel-data/`、`node-data/`、`data/`、`state/`。
-- 本地数据库：`*.db`、`*.sqlite`、`*.sqlite3`。
-- SQLite 升级备份：`*.pre-upgrade-*.bak*`。
-- 构建产物：`panel`、`node`、`bin/`、`*.tar.gz`。
-- 前端依赖和产物：`pkg/webadmin/ui/node_modules/`、`pkg/webadmin/ui/dist/assets/`、`pkg/webadmin/ui/dist/index.html`。
-- Trellis 运行态：`.trellis/.developer`、`.trellis/.runtime/`、`__pycache__/`、`.trellis/.template-hashes.json` 的本地模板哈希改动。
-
-`.trellis/.template-hashes.json` 当前在仓库中已跟踪，但它容易记录本地模板刷新、runtime session 和 Python cache 哈希。除非明确在升级 Trellis 模板并审查了 diff，否则不要把它和业务或文档提交混在一起。
+冒烟测试脚本、代码结构导览和发布流程见[开发与发布文档](docs/contributing.md)。
 
 ## License
 
