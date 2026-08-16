@@ -398,17 +398,55 @@
   font-size: 12px;
 }
 
-.health-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 24px;
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* 仪表盘等内容型面板:h2/说明文字有 18px 内边距,表格通过负边距全出血,
+ 与 .panel-detail-section + .panel-section-table 的既有模式保持一致。 */
+.panel-content-section {
+  padding: 18px;
 }
 
-.health-list li {
+/* 双写类名抬高优先级,避免后续单类 margin 重置(如 .health-groups 的 margin: 0)
+ 覆盖掉标题与内容之间的垂直间距。 */
+.panel-content-section.panel-content-section > * + * {
+  margin-top: 12px;
+}
+
+.panel-content-section > .table-scroll {
+  margin-right: -18px;
+  margin-left: -18px;
+}
+
+.panel-content-section > .table-scroll:last-child {
+  margin-bottom: -18px;
+}
+
+.health-groups {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.health-groups > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+}
+
+.health-groups dt {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.health-groups dd {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 0;
+}
+
+.health-item {
+  display: inline-flex;
   align-items: center;
   gap: 8px;
 }
@@ -420,9 +458,16 @@
 }
 
 .panel-attention-table {
-  min-width: 1080px;
+  min-width: 900px;
+}
+
+.panel-telemetry-table {
+  min-width: 720px;
 }
 
 .attention-error {
   max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
