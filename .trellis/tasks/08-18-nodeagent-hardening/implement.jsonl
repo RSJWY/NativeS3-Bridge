@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/tasks/08-18-panel-node-interface-fixes/prd.md", "reason": "父任务 PRD:审计总表、部署安全红线、跨子任务验收"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端包规范入口与 Pre-Development Checklist"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "哨兵错误/错误分级约定(R4/R6 等依赖)"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门与测试约定"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "R4/R5 日志级别与脱敏约定"}
