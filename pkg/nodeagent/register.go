@@ -3,6 +3,7 @@ package nodeagent
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	mathrand "math/rand"
 	"net/http"
 	"os"
@@ -259,10 +261,27 @@ func RegisterContext(ctx context.Context, id Identity, params RegisterParams) er
 		return fmt.Errorf("panel returned an empty certificate")
 	}
 
+	// R1:落盘前校验 panel 返回的证书,任一失败保留旧文件不动。
+	cert, err := validateIssuedCert(issued.CertPEM, key, []byte(issued.CACertPEM), time.Now())
+	if err != nil {
+		return fmt.Errorf("validate issued certificate: %w", err)
+	}
+	// R1.2:not_after 字段与证书实际值交叉核对,不一致以证书为准并 Warn,不阻断。
+	if issued.NotAfter != "" {
+		notAfter, parseErr := time.Parse(time.RFC3339, issued.NotAfter)
+		if parseErr != nil {
+			slog.Warn("panel returned unparsable not_after, using certificate value", "not_after", issued.NotAfter, "error", parseErr)
+		} else if !notAfter.Equal(cert.NotAfter) {
+			slog.Warn("panel not_after disagrees with issued certificate, trusting certificate value",
+				"panel_not_after", notAfter, "cert_not_after", cert.NotAfter)
+		}
+	}
+
 	if err := persistPEM(id.CertFile, []byte(issued.CertPEM), 0o644); err != nil {
 		return fmt.Errorf("write client cert: %w", err)
 	}
-	if issued.CACertPEM != "" {
+	// CA 文件路径未配置时(测试或极简部署)跳过落盘,但已用返回的 CA 完成校验。
+	if issued.CACertPEM != "" && id.CAFile != "" {
 		if err := persistPEM(id.CAFile, []byte(issued.CACertPEM), 0o644); err != nil {
 			return fmt.Errorf("write panel CA: %w", err)
 		}
@@ -315,9 +334,99 @@ func transientRegistrationError(err error) error {
 	return &RegistrationError{Retryable: true, Err: err}
 }
 
+// persistPEM 以原子方式写入 PEM 文件:同目录临时文件 → fsync → rename。
+// 写新内容前先把旧文件备份为 <path>.bak(单份覆盖),rename 成功后保留 .bak。
+// 私钥仍保持 0600、证书 0644 的权限语义。
 func persistPEM(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, perm)
+
+	// 备份旧文件(若存在):为人工恢复留一条路,原子写本身已消除截断损坏。
+	if _, err := os.Stat(path); err == nil {
+		_ = os.Rename(path, path+".bak")
+	}
+
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("fsync temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	return nil
+}
+
+// issuedCertMaxTTL 是 panel 签发给节点证书的可接受最大有效期。
+// 超过该上界视为异常/恶意签发,拒绝落盘。
+const issuedCertMaxTTL = 10 * 365 * 24 * time.Hour
+
+// validateIssuedCert 在把 panel 返回的证书落盘前做四项校验:
+//   1. 可解析为 X.509;
+//   2. 证书公钥与本次 CSR 所用私钥匹配;
+//   3. 能被给定 CA 池验证链;
+//   4. NotAfter 在未来且不超过合理上界。
+// 任一失败都返回错误,调用方应保留旧证书文件不动。成功时返回解析后的证书,
+// 供 R1.2 的 not_after 交叉核对复用。
+func validateIssuedCert(certPEM string, key crypto.Signer, caPEM []byte, now time.Time) (*x509.Certificate, error) {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("issued cert is not a valid PEM certificate")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse issued cert: %w", err)
+	}
+
+	// 公钥必须与本地私钥匹配,否则落盘后 TLS 握手会失败。
+	equal, ok := cert.PublicKey.(interface{ Equal(x crypto.PublicKey) bool })
+	if !ok {
+		return nil, fmt.Errorf("issued cert public key is not comparable")
+	}
+	if !equal.Equal(key.Public()) {
+		return nil, fmt.Errorf("issued cert public key does not match node private key")
+	}
+
+	pool := x509.NewCertPool()
+	if len(caPEM) > 0 {
+		caBlock, _ := pem.Decode(caPEM)
+		if caBlock == nil || (caBlock.Type != "CERTIFICATE" && caBlock.Type != "TRUSTED CERTIFICATE") {
+			return nil, fmt.Errorf("CA cert is not valid PEM")
+		}
+		caCert, err := x509.ParseCertificate(caBlock.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse CA cert: %w", err)
+		}
+		pool.AddCert(caCert)
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots:     pool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return nil, fmt.Errorf("verify issued cert chain: %w", err)
+	}
+
+	if !now.Before(cert.NotAfter) {
+		return nil, fmt.Errorf("issued cert already expired at %s", cert.NotAfter.Format(time.RFC3339))
+	}
+	if cert.NotAfter.Sub(now) > issuedCertMaxTTL {
+		return nil, fmt.Errorf("issued cert TTL %v exceeds maximum %v", cert.NotAfter.Sub(now), issuedCertMaxTTL)
+	}
+	return cert, nil
 }
