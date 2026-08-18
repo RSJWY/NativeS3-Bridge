@@ -460,7 +460,11 @@ func (s *TransportServer) handleHeartbeat(ctx context.Context, conn *AgentConn, 
 		return err
 	}
 	s.touchHeartbeat(conn.NodeID, hb)
-	return conn.sendMessage(ctx, controlproto.TypeHeartbeatAck, env.ID, controlproto.HeartbeatAckPayload{
+	// ack 回写必须带超时:serve ctx 只在连接关闭时取消,拿它当写 ctx 会让一个
+	// "不读"的节点把心跳处理 goroutine 永久钉住。
+	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+	return conn.sendMessage(writeCtx, controlproto.TypeHeartbeatAck, env.ID, controlproto.HeartbeatAckPayload{
 		ServerTime: nowUTC().Format(time.RFC3339),
 	})
 }
@@ -621,7 +625,11 @@ func (s *TransportServer) PushDesiredState(ctx context.Context, nodeID uint) err
 	_ = s.upsertNodeState(nodeID, map[string]any{
 		"sync_state": SyncStateWaiting, "last_error": "", "updated_at": nowUTC(),
 	})
-	if err := conn.sendMessage(ctx, controlproto.TypeDesiredState, "", payload); err != nil {
+	// 推送同样要有写超时:管理员触发的推送不能因为某个节点不读而挂住调用方
+	// (HTTP handler 或自动 reconcile 路径)。
+	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+	if err := conn.sendMessage(writeCtx, controlproto.TypeDesiredState, "", payload); err != nil {
 		s.recordSyncFailure(nodeID, "send desired state failed")
 		return fmt.Errorf("send desired state: %w", err)
 	}

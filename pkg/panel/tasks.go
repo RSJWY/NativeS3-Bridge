@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -219,9 +220,14 @@ func (o *TaskOrchestrator) FailInFlightForConn(conn *AgentConn) {
 	}
 }
 
-// markState updates a task's terminal/transitional state. result and errMsg are
-// optional; empty strings leave the respective columns unchanged only for the
-// error (result is written as-is). Kept small and side-effect-local.
+// markState updates a task's transitional/terminal state. It only ever moves a
+// task forward out of `pending`: 节点的执行结果可能先于本地 markState 落库
+// (handleTaskResult 与 Dispatch 是两条并发路径),没有守卫时一次迟到的
+// markState(running) 会把已经写好的 success/failed 终态连同 result 一起冲掉,
+// 并把 error 列清空。三个调用点(Dispatch 的两处失败回滚与成功后的 running)
+// 触发时任务都必然还是 pending,所以这个前置条件不会挡住任何正常迁移。
+// 超时/断连路径不走这里:expireTask 与 FailInFlightForConn 各自带
+// `state IN (pending, running)` 守卫的独立 UPDATE。
 func (o *TaskOrchestrator) markState(taskID string, state controlproto.TaskState, resultJSON, errMsg string) {
 	updates := map[string]any{
 		"state":      string(state),
@@ -230,8 +236,23 @@ func (o *TaskOrchestrator) markState(taskID string, state controlproto.TaskState
 	if resultJSON != "" {
 		updates["result_json"] = resultJSON
 	}
-	updates["error"] = errMsg
-	_ = o.db.Model(&Task{}).Where("task_id = ?", taskID).Updates(updates).Error
+	// 与 result_json 同口径:空错误信息表示"本次迁移没有错误要记",而不是"把之前
+	// 记录的错误抹掉"——无条件清空会擦掉节点已上报的失败原因。
+	if errMsg != "" {
+		updates["error"] = errMsg
+	}
+	res := o.db.Model(&Task{}).
+		Where("task_id = ? AND state = ?", taskID, string(controlproto.TaskStatePending)).
+		Updates(updates)
+	if res.Error != nil {
+		slog.Error("task state update failed", "task", taskID, "state", state, "error", res.Error)
+		return
+	}
+	if res.RowsAffected == 0 {
+		// 竞态的正常结局:结果已经先落库了。保留既有终态,不是错误。
+		slog.Info("task state update skipped; task already left pending",
+			"task", taskID, "attempted_state", state)
+	}
 }
 
 func (o *TaskOrchestrator) audit(action string, nodeID uint, resource, detail, source string) {

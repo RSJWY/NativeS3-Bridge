@@ -22,7 +22,7 @@ const DefaultMaxMessageBytes = 1 << 20 // 1 MiB
 const DefaultMaxInFlightTasks = 16
 
 // AgentConn wraps a single node's WebSocket connection. Writes are serialized
-// through a mutex because gorilla-style concurrent writes are unsafe; reads are
+// through a ctx-aware semaphore because concurrent writes are unsafe; reads are
 // driven by the single serve loop, so no read lock is needed. AgentConn carries
 // the negotiated protocol version and the authenticated node identity resolved
 // from the mTLS certificate.
@@ -37,7 +37,11 @@ type AgentConn struct {
 
 	ws *websocket.Conn
 
-	writeMu sync.Mutex
+	// writeSem 串行化写操作。用容量 1 的 channel 而不是 sync.Mutex:互斥锁的等待
+	// 不可中断,一个"不读"的对端会让后续写方永久卡在 Lock() 上(连 ctx 超时也救不
+	// 回来,因为超时只覆盖拿到锁之后的 Write)。channel 信号量让锁等待本身也能被
+	// ctx 取消。
+	writeSem chan struct{}
 
 	// inFlight guards the set of dispatched-but-unacknowledged task IDs for
 	// backpressure accounting.
@@ -61,26 +65,50 @@ func newAgentConn(nodeID uint, fingerprint string, ws *websocket.Conn) *AgentCon
 		NodeID:      nodeID,
 		Fingerprint: fingerprint,
 		ws:          ws,
+		writeSem:    make(chan struct{}, 1),
 		inFlight:    make(map[string]struct{}),
 		maxInFlight: DefaultMaxInFlightTasks,
 		lastSeen:    nowUTC(),
 	}
 }
 
-// send marshals and writes an envelope. Writes are serialized; the context
-// bounds how long a single write may block so a stuck node cannot wedge the
-// panel's goroutine forever.
+// send marshals and writes an envelope. Writes are serialized; ctx bounds both
+// the wait for the write slot and the write itself, so a stuck node cannot wedge
+// the panel's goroutine forever.
 func (c *AgentConn) send(ctx context.Context, env controlproto.Envelope) error {
 	data, err := env.Encode()
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", env.Type, err)
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	if err := c.acquireWrite(ctx); err != nil {
+		return fmt.Errorf("write %s: %w", env.Type, err)
+	}
+	defer c.releaseWrite()
 	if err := c.ws.Write(ctx, websocket.MessageText, data); err != nil {
 		return fmt.Errorf("write %s: %w", env.Type, err)
 	}
 	return nil
+}
+
+// acquireWrite 取得写序列化槽位。ctx 取消/超时时立即返回,不再无限等待前一个写完成。
+// writeSem 为 nil 时(测试里直写字面量构造的 AgentConn)退化为不加锁,与旧行为一致。
+func (c *AgentConn) acquireWrite(ctx context.Context) error {
+	if c.writeSem == nil {
+		return nil
+	}
+	select {
+	case c.writeSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *AgentConn) releaseWrite() {
+	if c.writeSem == nil {
+		return
+	}
+	<-c.writeSem
 }
 
 // sendMessage builds an envelope for msgType/payload and sends it.
