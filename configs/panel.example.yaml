@@ -55,6 +55,9 @@ log:
 
 heartbeat_interval: 15s
 offline_multiplier: 3
+# panel 下发任务后等待 task_result 的超时。默认 60s;非正值回落默认。
+# 合法长任务(如大桶全量扫描)可调大,但 node 侧会硬编码钳制在 10 分钟以内。
+task_timeout: 60s
 
 webadmin:
   # bcrypt hash of the admin password. Generate with admin_bootstrap_password on

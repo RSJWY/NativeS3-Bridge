@@ -19,9 +19,15 @@ import (
 // Protocol version constants. ProtocolVersion is the version this build speaks.
 // MinCompatibleVersion is the oldest peer version this build can interoperate
 // with. Version negotiation happens in the hello/hello_ack handshake.
+//
+// v2 新增能力:
+//   - 心跳间隔协商(HelloPayload.HeartbeatIntervalMS)
+//   - import_report 分页传输(TypeImportReportChunk)
+//   - node 执行 panel 下发的任务 timeout_ms
+// v1 已不再受支持;panel 与 node 必须同步升级,成对回滚。
 const (
-	ProtocolVersion      = 1
-	MinCompatibleVersion = 1
+	ProtocolVersion      = 2
+	MinCompatibleVersion = 2
 )
 
 // MessageType enumerates the envelope discriminators. Unknown types must be
@@ -43,8 +49,11 @@ const (
 	// connected, not-yet-imported node to report its existing local business
 	// config; the node replies read-only. No config is written to the node until
 	// an admin confirms the import on the panel (design §8.3).
-	TypeImportRequest MessageType = "import_request"
-	TypeImportReport  MessageType = "import_report"
+	//
+	// v2 起 import 报告改走 TypeImportReportChunk 分页传输,单帧不再使用。
+	TypeImportRequest      MessageType = "import_request"
+	TypeImportReport       MessageType = "import_report"        // 已弃用(v2 起仅保留常量)
+	TypeImportReportChunk  MessageType = "import_report_chunk" // v2 分页
 )
 
 // Envelope is the uniform wrapper for every control-plane message. Type drives

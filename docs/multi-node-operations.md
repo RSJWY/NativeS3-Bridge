@@ -144,15 +144,17 @@ bypass mTLS or export plaintext secrets.
 
 ## 7. Upgrade and rollback (hard cutover)
 
-- The panel and node images build/upgrade/roll back independently but share the
-  version-constrained `pkg/controlproto`; incompatible versions are rejected at
-  the hello handshake rather than mis-parsed.
-- **Rolling back the multi-node change entirely** = replacing the node image with
-  the pre-multinode single binary. Safety net C (strictly additive node-DB
-  migration) makes this safe: the old binary ignores the agent's added tables and
-  keeps using the unchanged `credentials`/`buckets`/`request_stats`. Before
-  rolling back, **disable the node in the panel** first so no desired state is
-  pushed to a node about to run old code.
+- Panel 与 Node 的 control-plane 协议当前版本为 **v2**。v2 新增能力:
+  - 心跳间隔协商(`heartbeat_interval_ms`),离线阈值与读超时随节点自报值走。
+  - `import_report` 分页传输(`import_report_chunk`),避免大节点导入时单帧超 1 MiB。
+  - Node 真正执行 Panel 下发的任务 `timeout_ms`。
+- **v1 已不再受支持**。Panel 与 Node 必须**同步升级**;任一側仍为 v1 时,hello
+  握手会立即失败断连,两侧日志打印本端/对端版本并提示"需同步升级"。Node 会
+  带退避持续重连,不会降级、不会静默。
+- 升级窗口内控制面可能失联,但 Node 的 S3 数据面继续用最后一次落地的本地配置
+  服务,业务不中断。
+- **回滚必须两侧成对执行**:只回滚一侧会导致协议不匹配、控制面持续失联。
+  无 DB schema 变更/迁移,二进制回退即可。
 - Desired state is versioned; a bad publish is corrected by publishing a new
   version (no automatic rollback, to avoid fighting drift detection).
 

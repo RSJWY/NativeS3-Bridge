@@ -10,6 +10,10 @@ import "fmt"
 // It returns an error when the versions are incompatible (peer too old for this
 // build, or this build too old for the peer). The caller must send an error
 // message and close the connection on failure rather than retrying blindly.
+//
+// 2026-08-18 部署策略:panel 与 node 同步升级,v1 不再受支持。任一侧为 v1 时
+// 协商失败,双方日志打印本端与对端版本并提示"需同步升级";node 退避重连,
+// 不降级、不静默。
 func NegotiateVersion(peerVersion int) (int, error) {
 	if peerVersion <= 0 {
 		return 0, fmt.Errorf("invalid peer protocol version %d", peerVersion)
