@@ -911,3 +911,30 @@ Implemented and hardened node storage telemetry end to end: persistent counters,
 ### Next Steps
 
 - None - task complete
+
+
+## Session 28: 完成 08-18-panel-node-interface-fixes 剩余子任务(nodeagent-hardening + controlproto 归档清理)
+
+**Date**: 2026-08-18
+**Task**: 完成 08-18-panel-node-interface-fixes 剩余子任务(nodeagent-hardening + controlproto 归档清理)
+**Branch**: `main`
+
+### Summary
+
+实现 nodeagent 控制面连接加固:R1 证书落盘前校验、R2 PEM 原子写、R3 握手超时/看门狗/心跳失败断连、R4 续期重连哨兵、R5 task 校验、R6 单帧 version 校验、R7 health 探针修正;补齐单测并做临时改坏→变红→恢复验证;更新 PRD/design/implement/spec 以反映同步升级策略;归档 nodeagent-hardening 与父任务,清理 controlproto 源文件残留。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c4cf197` | (see git log) |
+| `433150b` | (see git log) |
+| `67d1611` | (see git log) |
+| `1e65bb5` | (see git log) |
+| `aec97bf` | (see git log) |
+| `c3364f4` | (see git log) |
+| `f3cad30` | (see git log) |
+
+### Status
+
+[OK] **Completed**
