@@ -55,6 +55,9 @@ webadmin:
   # first boot, then copy the logged hash here and clear the bootstrap password.
   password_hash: ""
   admin_bootstrap_password: ""
+  # 会话 cookie 的 HMAC 密钥。下面这行是占位符,直接复制将无法通过启动校验
+  # (panel 会拒绝启动并指名 session_secret)。用随机值替换:
+  #   openssl rand -base64 32
   session_secret: "replace-with-a-random-32-byte-secret-value"
   session_ttl_minutes: 720
   login_max_failures: 5

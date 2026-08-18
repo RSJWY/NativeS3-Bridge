@@ -3,7 +3,7 @@
   "name": "config-validation-hardening",
   "title": "配置校验加固(弱密钥/scheme/默认值)",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

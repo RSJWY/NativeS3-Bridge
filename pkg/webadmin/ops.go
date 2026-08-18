@@ -24,19 +24,20 @@ type OpsHandler struct {
 }
 
 func NewOpsHandler(gdb *gorm.DB, cfgs ...config.OpsConfig) *OpsHandler {
-	cfg := config.OpsConfig{PublicHealthz: true, PublicReadyz: true, PublicMetrics: true}
+	// PublicHealthz 留 nil:OpsConfig.HealthzPublic() 把 nil 当 true,零值
+	// OpsConfig 因此自然拿到"公开 /healthz"的历史默认。旧代码在这里还有一段
+	// "三项全 false 且无 token 就把 healthz 掰回 true"的兜底,它会把用户显式写的
+	// public_healthz: false 再次吞掉(panel 配置正好是这个形状),已随指针语义删除。
+	cfg := config.OpsConfig{PublicReadyz: true, PublicMetrics: true}
 	if len(cfgs) > 0 {
 		cfg = cfgs[0]
-		if !cfg.PublicHealthz && !cfg.PublicReadyz && !cfg.PublicMetrics && cfg.MetricsToken == "" {
-			cfg.PublicHealthz = true
-		}
 	}
 	return &OpsHandler{db: gdb, cfg: cfg}
 }
 
 // Healthz is a liveness probe: the process is up and serving.
 func (o *OpsHandler) Healthz(w http.ResponseWriter, r *http.Request) {
-	if !o.allowPublic(w, r, o.cfg.PublicHealthz) {
+	if !o.allowPublic(w, r, o.cfg.HealthzPublic()) {
 		return
 	}
 	if !requireGet(w, r) {

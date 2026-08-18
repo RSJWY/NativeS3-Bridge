@@ -178,11 +178,23 @@ type CaptchaConfig struct {
 }
 
 type OpsConfig struct {
-	PublicHealthz bool   `yaml:"public_healthz"`
+	// PublicHealthz 用指针以区分「未配置」与「显式 false」。yaml 里不写这一项时为
+	// nil,沿用历史默认(公开 /healthz);写了 public_healthz: false 才真正关掉。
+	// 读取一律走 HealthzPublic(),不要直接解引用。
+	PublicHealthz *bool  `yaml:"public_healthz"`
 	PublicReadyz  bool   `yaml:"public_readyz"`
 	PublicMetrics bool   `yaml:"public_metrics"`
 	MetricsToken  string `yaml:"metrics_token"`
 }
+
+// HealthzPublic 返回 /healthz 是否免鉴权。nil(未配置)按历史默认 true 处理,
+// 因此直接构造 OpsConfig{} 的调用方也能拿到与升级前一致的行为。
+func (o OpsConfig) HealthzPublic() bool {
+	return o.PublicHealthz == nil || *o.PublicHealthz
+}
+
+// boolPtr 供 applyDefaults 填充可选布尔项的默认值。
+func boolPtr(v bool) *bool { return &v }
 
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -268,7 +280,11 @@ func (c *Config) applyDefaults() {
 	if c.WebAdmin.Captcha.Timeout == 0 {
 		c.WebAdmin.Captcha.Timeout = 3 * time.Second
 	}
-	c.WebAdmin.Ops.PublicHealthz = true
+	// 未配置时才填默认值。旧代码在这里无条件赋 true,把用户显式写的
+	// public_healthz: false 静默吞掉,/healthz 始终裸奔。
+	if c.WebAdmin.Ops.PublicHealthz == nil {
+		c.WebAdmin.Ops.PublicHealthz = boolPtr(true)
+	}
 	if c.RateLimit.AnonymousRPS <= 0 {
 		c.RateLimit.AnonymousRPS = DefaultAnonymousRPS
 	}
@@ -396,27 +412,71 @@ func isExampleSecret(value string) bool {
 	}
 }
 
-func validateSessionSecret(value string) error {
-	if strings.TrimSpace(value) == "" {
-		return fmt.Errorf("webadmin.session_secret is required")
+// minSessionSecretBytes 是 session_secret 的最小长度。该值直接用作会话 cookie 的
+// HMAC 密钥(pkg/webadmin/auth.go),短于此长度不足以抵抗离线爆破。
+const minSessionSecretBytes = 32
+
+// placeholderSecretMarkers 是示例/占位密钥的特征词(小写比较)。
+//
+// 逐串精确匹配挡不住占位值的变体:configs/panel.example.yaml 的
+// "replace-with-a-random-32-byte-secret-value" 只比旧黑名单里的条目多了 `-value`
+// 后缀,长度又足够(42 字节),于是占位密钥一路通过校验直达生产——任何读过本仓库
+// 的人都能据此伪造管理员会话。改为特征词包含匹配,让下一个变体也进不来。
+var placeholderSecretMarkers = []string{
+	"replace-with", "replace_with", "replacewith",
+	"change-me", "change_me", "changeme",
+	"example", "todo", "placeholder",
+	"your-secret", "your_secret", "yoursecret",
+}
+
+// exactWeakSessionSecrets 是历史示例值的精确兜底名单:即使某个值不含上面的特征词,
+// 只要它在仓库示例配置里出现过就必须继续被拒。
+var exactWeakSessionSecrets = []string{
+	"change-me-32bytes-random",
+	"replace-with-random-secret-at-least-32-bytes",
+	"replace-with-a-random-32-byte-secret",
+	"replace-with-a-random-32-byte-secret-value",
+}
+
+// sessionSecretPlaceholderMarker 返回命中的占位特征;未命中返回空串。
+// 命中精确名单时返回整串,便于报错文案指名道姓。
+func sessionSecretPlaceholderMarker(value string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	for _, exact := range exactWeakSessionSecrets {
+		if trimmed == exact {
+			return exact
+		}
 	}
-	if isWeakSessionSecret(value) {
-		return fmt.Errorf("webadmin.session_secret must be a random secret of at least 32 bytes and must not use an example value")
+	for _, marker := range placeholderSecretMarkers {
+		if strings.Contains(trimmed, marker) {
+			return marker
+		}
+	}
+	return ""
+}
+
+func validateSessionSecret(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fmt.Errorf("webadmin.session_secret is required; generate one with `openssl rand -base64 32`")
+	}
+	// 占位符检查先于长度检查:占位值往往长度达标,先报长度会给出误导性指引。
+	if marker := sessionSecretPlaceholderMarker(trimmed); marker != "" {
+		return fmt.Errorf("webadmin.session_secret looks like an example placeholder (matched %q); "+
+			"a placeholder secret lets anyone who has read this repository forge an admin session. "+
+			"Replace it with a random value: `openssl rand -base64 32`", marker)
+	}
+	if len([]byte(trimmed)) < minSessionSecretBytes {
+		return fmt.Errorf("webadmin.session_secret must be at least %d bytes (got %d); generate one with `openssl rand -base64 32`",
+			minSessionSecretBytes, len([]byte(trimmed)))
 	}
 	return nil
 }
 
+// isWeakSessionSecret 是 ProductionWarnings 用的判定入口:与启动校验同源,
+// 避免"警告说没问题、启动却被拒"这类两套标准。
 func isWeakSessionSecret(value string) bool {
-	trimmed := strings.TrimSpace(value)
-	if len([]byte(trimmed)) < 32 {
-		return true
-	}
-	switch trimmed {
-	case "change-me-32bytes-random", "replace-with-random-secret-at-least-32-bytes", "replace-with-a-random-32-byte-secret":
-		return true
-	default:
-		return false
-	}
+	return validateSessionSecret(value) != nil
 }
 
 func isPublicListenAddr(addr string) bool {

@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net/url"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -61,6 +63,11 @@ type PanelClientConfig struct {
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
 	CAFile   string `yaml:"ca_file"`
+
+	// AllowInsecureTransport 是本地开发/同机回环测试的显式逃生门。默认 false:
+	// AgentURL 必须是 wss://、RegisterURL 必须是 https://。显式置 true 才放行
+	// ws:// / http://,此时 mTLS 不生效,启动时会打 Warn。
+	AllowInsecureTransport bool `yaml:"allow_insecure_transport"`
 
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
 }
@@ -150,6 +157,15 @@ func (c *NodeConfig) Validate() error {
 	if strings.TrimSpace(c.Panel.AgentURL) == "" {
 		return fmt.Errorf("panel.agent_url is required")
 	}
+	if err := validateControlPlaneURL("panel.agent_url", c.Panel.AgentURL, "wss", "ws", c.Panel.AllowInsecureTransport); err != nil {
+		return err
+	}
+	// register_url 只在首次注册用,允许留空(已注册的节点会清掉它)。
+	if strings.TrimSpace(c.Panel.RegisterURL) != "" {
+		if err := validateControlPlaneURL("panel.register_url", c.Panel.RegisterURL, "https", "http", c.Panel.AllowInsecureTransport); err != nil {
+			return err
+		}
+	}
 	if strings.TrimSpace(c.Panel.CertFile) == "" || strings.TrimSpace(c.Panel.KeyFile) == "" {
 		return fmt.Errorf("panel.cert_file and panel.key_file are required")
 	}
@@ -175,4 +191,64 @@ func joinDataRoot(dataRoot string) string {
 		return dataRoot + ".multipart"
 	}
 	return dataRoot + "/.multipart"
+}
+
+// validateControlPlaneURL 强制控制面 URL 使用加密 scheme。
+//
+// 明文 scheme 下 mTLS 整个消失:节点不再验证 panel 身份,panel 也拿不到客户端
+// 证书;更糟的是注册响应里的 CA 会被节点当作信任根落盘(pkg/nodeagent/register.go),
+// 一次 MITM 就能把攻击者的 CA 永久装进节点。因此默认拒绝明文,只有显式打开
+// allow_insecure_transport 才放行。
+func validateControlPlaneURL(field, raw, secureScheme, insecureScheme string, allowInsecure bool) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL: %w", field, err)
+	}
+	switch u.Scheme {
+	case secureScheme:
+		return nil
+	case insecureScheme:
+		if allowInsecure {
+			return nil
+		}
+		return fmt.Errorf("%s uses the cleartext scheme %q, which disables mTLS: the node stops verifying the panel, "+
+			"and the CA returned by registration can be swapped by a man in the middle and is written to disk as a trust root. "+
+			"Use %s:// instead, or set panel.allow_insecure_transport: true if this really is a same-host loopback test",
+			field, u.Scheme, secureScheme)
+	case "":
+		return fmt.Errorf("%s must include a scheme, e.g. %s://panel.example.com:9443/...", field, secureScheme)
+	default:
+		return fmt.Errorf("%s has unsupported scheme %q; use %s:// (or %s:// together with panel.allow_insecure_transport: true)",
+			field, u.Scheme, secureScheme, insecureScheme)
+	}
+}
+
+// nodeConfigLeakBits 是真的会让别人读到或改写这份文件的权限位:group 写 +
+// other 读写。
+//
+// 刻意不按「宽于 0640」做字面位比较:那样会把属主位和执行位也算进暴露面,
+// `chmod 0700`(rwx------,别人根本读不到,在"谁能读"上比 0640 更严)会被倒过来
+// 警告成「权限过宽」。属主位与执行位都不影响谁能读到内容,不纳入判定。
+const nodeConfigLeakBits os.FileMode = 0o026
+
+// InsecureNodeConfigMode 检查 node 配置文件权限是否放任他人读写。node.yaml 里带着
+// 注册令牌和数据库 DSN,同机任何用户可读就等于泄露、可写就能被篡改。
+//
+// 返回实际权限位表示应当告警,返回 0 表示无需告警。只做判定不打日志:pkg/config
+// 全包无日志依赖,而且调用方要等日志配置好之后再告警(否则告警落不进日志文件)。
+// 调用方只应告警、不得拒绝启动——存量部署普遍是 0644,升级不该被这个挡在门外。
+// Windows 没有可用的 Unix 权限位,静默跳过而不是误报。
+func InsecureNodeConfigMode(path string) os.FileMode {
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	mode := info.Mode().Perm()
+	if mode&nodeConfigLeakBits != 0 {
+		return mode
+	}
+	return 0
 }

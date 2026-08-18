@@ -116,7 +116,10 @@ func (c *PanelConfig) applyDefaults() {
 	if c.WebAdmin.Captcha.Timeout == 0 {
 		c.WebAdmin.Captcha.Timeout = 3 * time.Second
 	}
-	c.WebAdmin.Ops.PublicHealthz = true
+	// 与 Config.applyDefaults 同一语义:仅在未配置时填 true,显式 false 必须生效。
+	if c.WebAdmin.Ops.PublicHealthz == nil {
+		c.WebAdmin.Ops.PublicHealthz = boolPtr(true)
+	}
 	if c.HeartbeatInterval == 0 {
 		c.HeartbeatInterval = 15 * time.Second
 	}

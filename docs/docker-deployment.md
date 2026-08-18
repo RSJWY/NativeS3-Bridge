@@ -394,6 +394,26 @@ sudo docker compose --project-directory /opt/natives3-node \
 
 ## 6. 升级、日志和停止
 
+### 升级前配置自查（配置校验加严后必读）
+
+新版本收紧了两处启动校验，**命中即拒绝启动**。升级前先在两台主机上各跑一次自查，避免 `docker compose up` 后服务起不来：
+
+```bash
+# panel 主机：session_secret 是否仍是示例占位值
+grep session_secret /opt/natives3-panel/panel.yaml
+# node 主机：控制面 URL 的 scheme
+grep -E 'agent_url|register_url' /opt/natives3-node/node.yaml
+```
+
+| 检查项 | 命中表现 | 处理 |
+|---|---|---|
+| `session_secret` 含 `replace-with` / `change-me` / `example` / `todo` / `placeholder` 等占位词 | panel 拒绝启动，报错点名 `webadmin.session_secret` | 换成 `openssl rand -base64 32` 的输出后重启。**注意：换 secret 会让所有已登录管理员会话失效，需重新登录** |
+| `agent_url` 不是 `wss://`，或 `register_url` 不是 `https://` | node 拒绝启动，报错说明 mTLS 会失效 | 改用加密 scheme 并确认证书链；确属同机回环调试才在 `panel:` 块下加 `allow_insecure_transport: true` |
+
+另有一项默认值语义修正：显式写了 `webadmin.ops.public_healthz: false` 的配置，升级后该设置**才会真正生效**（此前被无条件覆盖为 true，`/healthz` 始终公开）。若监控探针依赖匿名访问 `/healthz`，升级前确认该值不是 false。
+
+顺带建议：`node.yaml` 含注册令牌与数据库 DSN，权限宽于 `0640` 时 node 启动会打 Warn（只告警不拦截），可 `chmod 0600 /opt/natives3-node/node.yaml` 消除。
+
 ### 升级到最新镜像
 
 分别在对应主机执行：

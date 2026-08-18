@@ -50,6 +50,19 @@ func main() {
 		os.Exit(1)
 	}
 	db.SetLogLevel(cfg.LogLevel)
+	// 配置类告警统一放在日志配置完成之后,否则会落到默认 stderr 而不是配置的日志目的地。
+	// --check-config 也要打:它正是升级前的自查入口。
+	if mode := config.InsecureNodeConfigMode(*cfgPath); mode != 0 {
+		slog.Warn("node config file permissions are too permissive",
+			"path", *cfgPath,
+			"mode", fmt.Sprintf("%04o", mode),
+			"hint", "this file holds the registration token and database DSN; run chmod 0600")
+	}
+	if cfg.Panel.AllowInsecureTransport {
+		slog.Warn("panel.allow_insecure_transport is enabled: cleartext control-plane URLs are accepted and mTLS is NOT in effect",
+			"agent_url", cfg.Panel.AgentURL,
+			"hint", "use wss:// / https:// outside same-host loopback tests")
+	}
 	if *checkConfig {
 		slog.Info("node config check passed")
 		return

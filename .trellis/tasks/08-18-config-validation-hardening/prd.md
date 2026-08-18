@@ -53,14 +53,33 @@
 
 ## Acceptance Criteria
 
-- [ ] AC1 用 `configs/panel.example.yaml` 原样(仅改路径类字段)启动新 panel → 拒绝启动,错误信息明确指向 `session_secret` 为占位符并给出生成方法。
-- [ ] AC2 把占位值改成 `openssl rand -base64 32` 的输出 → 正常启动(回归保护:合法值不被误杀)。
-- [ ] AC3 node 配置 `agent_url: ws://127.0.0.1:9000/agent` 且未设逃生门 → 拒绝启动,报错含「mTLS 失效」说明;设 `allow_insecure_transport: true` → 启动成功并打 Warn。
-- [ ] AC4 node 配置 `agent_url: wss://...`(存量正常配置)→ 正常启动,行为与升级前一致。
-- [ ] AC5 yaml 显式写 `public_healthz: false` → 生效(healthz 需鉴权);不写 → 默认 true,与升级前一致。
-- [ ] AC6 `go test ./pkg/panel/... ./pkg/config/...` 全绿;把系统时钟意念调整到任意未来日期,`TestCertsRouteReturnsSnakeCaseDTO` 仍通过(即断言不依赖具体日历日)。
-- [ ] AC7 node.yaml 权限 0644 启动 → 有 Warn 日志;0600 → 无 Warn;两种情况下都正常启动。
-- [ ] AC8 无 DB schema 变更、无 wire 协议变更、无既有配置键删除或改名。
+- [x] AC1 用 `configs/panel.example.yaml` 原样(仅改路径类字段)启动新 panel → 拒绝启动,错误信息明确指向 `session_secret` 为占位符并给出生成方法。
+      **实测**:`panel -check-config` exit=1,报错 `webadmin.session_secret looks like an example placeholder (matched "replace-with-a-random-32-byte-secret-value"); ... Replace it with a random value: \`openssl rand -base64 32\``。
+- [x] AC2 把占位值改成 `openssl rand -base64 32` 的输出 → 正常启动(回归保护:合法值不被误杀)。
+      **实测**:同一份配置换随机 secret 后 exit=0 / `panel config check passed`。另有单测 `TestValidateAcceptsRandomSessionSecrets` 覆盖 base64/hex 两种生成形状。
+- [x] AC3 node 配置 `agent_url: ws://127.0.0.1:9000/agent` 且未设逃生门 → 拒绝启动,报错含「mTLS 失效」说明;设 `allow_insecure_transport: true` → 启动成功并打 Warn。
+      **实测**:无逃生门 exit=1,报错含 `which disables mTLS` 与 MITM 落盘信任根的说明;加逃生门后 exit=0 且打出 `level=WARN msg="panel.allow_insecure_transport is enabled..."`。
+- [x] AC4 node 配置 `agent_url: wss://...`(存量正常配置)→ 正常启动,行为与升级前一致。
+      **实测**:exit=0、无任何新增 Warn。全仓库脚本/测试的 agent_url/register_url 已 grep 核对,无一使用 `ws://`/`http://`(R2.3 因此无需改动任何测试)。
+- [x] AC5 yaml 显式写 `public_healthz: false` → 生效(healthz 需鉴权);不写 → 默认 true,与升级前一致。
+      **实测**(单体 `natives3bridge` 真实起进程 + curl):显式 false → `GET /healthz` 404;不写 ops 块 → 200 `ok`。
+      **注**:panel 二进制当前根本不挂载 `/healthz`(`cmd/panel/main.go` 与 `pkg/panel/adminserver.go` 无 ops 路由),故 `pkg/config/panel.go` 那处修复今天是防御性的,真正可观测的是单体路径。
+- [x] AC6 `go test ./pkg/panel/... ./pkg/config/...` 全绿;把系统时钟意念调整到任意未来日期,`TestCertsRouteReturnsSnakeCaseDTO` 仍通过(即断言不依赖具体日历日)。
+      **实测**:全套 `go test ./...` 绿。日期无关性由构造保证——fixture 全部相对 `time.Now()` 生成,且刻意把过期量取在 15.5 天(整天桶中间)使断言恒为 -16,不再有日历字面量。
+      **未做**:本机无 `faketime`,没有在真实改期的时钟下跑过。
+- [x] AC7 node.yaml 权限 0644 启动 → 有 Warn 日志;0600 → 无 Warn;两种情况下都正常启动。
+      **实测**:0644 → `level=WARN msg="node config file permissions are too permissive" mode=0644`、exit=0;0600 与边界值 0640 → 无 Warn、exit=0。
+- [x] AC8 无 DB schema 变更、无 wire 协议变更、无既有配置键删除或改名。
+      **核对**:diff 未触碰任何 migration/controlproto 文件;`public_healthz` 键名不变(仅 Go 类型 bool→*bool,YAML 表示不变);唯一新增键为 `panel.allow_insecure_transport`,在父任务冻结集合内。
+
+## 实施记录(2026-08-18)
+
+- 落盘范围与 R1-R5 一一对应,无超范围改动。
+- **额外必需改动(超出 PRD 字面但为 AC5 所必需)**:`pkg/webadmin/ops.go` 的 `NewOpsHandler` 里还有第二处 healthz 覆盖——「三项全 false 且无 metrics token 就把 healthz 掰回 true」。panel/单体配置只写 `public_healthz: false` 时正好命中这个形状,会二次吞掉用户的显式 false。指针语义已使该兜底冗余,故删除。
+- **红线 #2 的例外**:`allow_insecure_transport` 默认 false 意味着 `ws://` 存量配置升级后会被拒绝启动,这与「新增键默认值等于现状行为」字面冲突,但正是 H2 要求的加严,由红线 #3(加严类改动需配升级前自查步骤)授权。自查步骤见上。
+- **复核阶段自查出并修掉的误报**:R5 的权限判定最初写成 `mode &^ 0640 != 0`,把属主位/执行位也算进暴露面,`chmod 0700`(rwx------,别人根本读不到,比 0640 更严)会被倒过来警告成「权限过宽」。改为只看真正造成暴露的位 `0o026`(组可写 + 其他用户可读写),并把 `{0o700, false}`、`{0o750, false}` 钉进测试表防回归。
+- 未运行 `scripts/test-panel-node-e2e.sh`(耗时过长);`scripts/test-distribution-contract.sh` 已跑通。
+- **spec 沉淀**:三条可复用教训写入 `.trellis/spec/backend/quality-guidelines.md`(此前是空模板)——F1 日期炸弹判定规则、F2 可选布尔配置项必须查第二处覆盖点、F3 权限检查看暴露位而非模式上限;另有 R1 占位值特征词匹配、R2 启动期告警时序、R3 运行时字符串用英文。
 
 ## 复杂度判定
 

@@ -13,6 +13,10 @@ import (
 	"github.com/RSJWY/NativeS3-Bridge/pkg/storage"
 )
 
+// boolPtr 构造 OpsConfig.PublicHealthz 这类可选布尔项。nil 表示"未配置",
+// 与显式 false 语义不同,所以测试里要显式取址而不是写字面量。
+func boolPtr(v bool) *bool { return &v }
+
 func TestOpsHealthzAndReadyz(t *testing.T) {
 	gdb := newWebadminTestDB(t)
 	ops := NewOpsHandler(gdb)
@@ -208,7 +212,7 @@ func TestNewServerAllowsConfiguredOpsEndpoints(t *testing.T) {
 		SessionSecret:     "test-session-secret",
 		SessionTTLMinutes: 10,
 		Ops: config.OpsConfig{
-			PublicHealthz: true,
+			PublicHealthz: boolPtr(true),
 			PublicReadyz:  true,
 			PublicMetrics: true,
 		},
@@ -230,9 +234,31 @@ func TestNewServerAllowsConfiguredOpsEndpoints(t *testing.T) {
 	}
 }
 
+// R3 端到端:显式关掉 public_healthz 后 /healthz 必须真的不可匿名访问。
+// NewOpsHandler 里原本还有一段"三项全 false 且无 metrics token 就把 healthz 掰回
+// true"的兜底,它会二次吞掉用户的显式 false——而 panel 配置正好是这个形状。
+func TestHealthzRespectsExplicitlyDisabledPublicAccess(t *testing.T) {
+	gdb := newWebadminTestDB(t)
+	ops := NewOpsHandler(gdb, config.OpsConfig{PublicHealthz: boolPtr(false)})
+
+	rr := httptest.NewRecorder()
+	ops.Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("disabled /healthz status = %d, want 404; body=%s", rr.Code, rr.Body.String())
+	}
+
+	// 未配置(nil)沿用历史默认:公开可访问。
+	ops = NewOpsHandler(gdb, config.OpsConfig{})
+	rr = httptest.NewRecorder()
+	ops.Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("default /healthz status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestMetricsTokenAllowsPrivateScrape(t *testing.T) {
 	gdb := newWebadminTestDB(t)
-	ops := NewOpsHandler(gdb, config.OpsConfig{PublicHealthz: true, MetricsToken: "test-token"})
+	ops := NewOpsHandler(gdb, config.OpsConfig{PublicHealthz: boolPtr(true), MetricsToken: "test-token"})
 
 	rr := httptest.NewRecorder()
 	ops.Metrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))

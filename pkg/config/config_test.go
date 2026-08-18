@@ -74,7 +74,7 @@ func TestLoadParsesMultipartDurations(t *testing.T) {
 	if cfg.RateLimit.TrustForwarded {
 		t.Fatal("trust_forwarded default/example should be false")
 	}
-	if !cfg.WebAdmin.Ops.PublicHealthz {
+	if !cfg.WebAdmin.Ops.HealthzPublic() {
 		t.Fatal("public_healthz default/example should be true")
 	}
 	if cfg.WebAdmin.Ops.PublicReadyz {
@@ -240,6 +240,99 @@ func TestValidateRejectsWeakSessionSecrets(t *testing.T) {
 	cfg.WebAdmin.SessionSecret = validTestSessionSecret
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid session secret returned error: %v", err)
+	}
+}
+
+// H1 回归:configs/panel.example.yaml 的占位值只比旧黑名单条目多了 `-value`
+// 后缀,长度又达标(42 字节),旧的逐串精确匹配放它过关——占位密钥可以一路进生产,
+// 而它就写在公开仓库里,等于任何人都能伪造管理员会话 cookie。
+func TestValidateRejectsPlaceholderSessionSecretVariants(t *testing.T) {
+	base := Config{
+		Storage:  StorageConfig{DataRoot: t.TempDir()},
+		Database: DatabaseConfig{Driver: "sqlite", DSN: "test.db"},
+	}
+
+	for _, secret := range []string{
+		"replace-with-a-random-32-byte-secret-value", // panel.example.yaml 原值(H1)
+		"replace-with-a-random-32-byte-secret-VALUE", // 大小写变体
+		"Replace-With-Yet-Another-Long-Enough-Value", // 前缀变体
+		"change-me-please-this-is-long-enough-abcde",
+		"this-is-an-example-secret-long-enough-xxxx",
+		"todo-generate-a-real-secret-before-shipping",
+		"my-placeholder-session-secret-32-bytes-plus",
+		"your-secret-goes-here-and-is-long-enough-ok",
+	} {
+		cfg := base
+		cfg.WebAdmin.SessionSecret = secret
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("placeholder session secret %q was accepted", secret)
+		}
+		if !strings.Contains(err.Error(), "webadmin.session_secret") {
+			t.Fatalf("session secret %q error = %v, want webadmin.session_secret error", secret, err)
+		}
+		// R1.2:光说"不合法"会让运维把占位值改得更长而不是换成随机值,
+		// 所以报错必须自解释并直接给出生成命令。
+		if !strings.Contains(err.Error(), "placeholder") || !strings.Contains(err.Error(), "openssl rand -base64 32") {
+			t.Fatalf("session secret %q error lacks placeholder wording or openssl hint: %v", secret, err)
+		}
+	}
+}
+
+// 回归保护:特征词匹配不得误杀真随机密钥,否则加严校验会把正常部署挡在门外。
+func TestValidateAcceptsRandomSessionSecrets(t *testing.T) {
+	base := Config{
+		Storage:  StorageConfig{DataRoot: t.TempDir()},
+		Database: DatabaseConfig{Driver: "sqlite", DSN: "test.db"},
+	}
+
+	for _, secret := range []string{
+		validTestSessionSecret,
+		"kQ8xN2vR7pL4mT9wZ1cY6bH3sD5fG0jA8eU2iO4nK7Q=",                     // openssl rand -base64 32 形状
+		"9f3c1a7e5b2d8046af91c3e7d5b0a2648f1e9c3a7b5d20468e1f9c3a7b5d2046", // openssl rand -hex 32 形状(安装脚本用的就是它)
+	} {
+		cfg := base
+		cfg.WebAdmin.SessionSecret = secret
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("random session secret %q rejected: %v", secret, err)
+		}
+	}
+}
+
+// R3/L4 回归:显式写 public_healthz: false 必须生效。旧代码在 applyDefaults 里
+// 无条件赋 true,把用户的选择静默吞掉,/healthz 在任何配置下都是裸奔的。
+func TestPublicHealthzHonoursExplicitFalse(t *testing.T) {
+	write := func(t *testing.T, opsBlock string) *Config {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		content := `
+storage:
+  data_root: "` + filepath.ToSlash(t.TempDir()) + `"
+database:
+  driver: sqlite
+  dsn: test.db
+webadmin:
+  session_secret: "` + validTestSessionSecret + `"
+` + opsBlock
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		return cfg
+	}
+
+	if got := write(t, "  ops:\n    public_healthz: false\n"); got.WebAdmin.Ops.HealthzPublic() {
+		t.Fatal("explicit public_healthz: false was overridden to true")
+	}
+	if got := write(t, "  ops:\n    public_healthz: true\n"); !got.WebAdmin.Ops.HealthzPublic() {
+		t.Fatal("explicit public_healthz: true should stay true")
+	}
+	// 不写 ops 块:沿用历史默认 true,升级前后行为一致。
+	if got := write(t, ""); !got.WebAdmin.Ops.HealthzPublic() {
+		t.Fatal("unset public_healthz should default to true")
 	}
 }
 

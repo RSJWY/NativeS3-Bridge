@@ -119,12 +119,17 @@ func TestDaysUntilExpiryNegativeWhenExpired(t *testing.T) {
 func TestCertsRouteReturnsSnakeCaseDTO(t *testing.T) {
 	api, _ := newTestAdminAPI(t)
 	nodeID := createDashboardNode(t, api, "cert-node")
-	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	// 基准必须跟随真实时钟:handler 走 nowUTC(),fixture 若钉死日历日,
+	// 过了那天断言就会漂移(本测试曾硬编码 2026-08-16 并在 2026-08-18 挂掉)。
+	now := time.Now().UTC()
 	revokedAt := now.Add(-48 * time.Hour)
+	// 过期 15.5 天:daysUntilExpiry 把不足一天的零头向上取整为整天,15.5 天稳定
+	// 落在 -16。刻意避开整天边界,测试执行耗时(乃至几小时)都不会让它跳到 -15。
+	expiredAt := now.Add(-15*24*time.Hour - 12*time.Hour)
 	certs := []NodeCert{
 		{
 			NodeID: nodeID, Fingerprint: "fp-expired", Serial: "1",
-			NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: now.Add(-15 * 24 * time.Hour),
+			NotBefore: now.Add(-90 * 24 * time.Hour), NotAfter: expiredAt,
 			Revoked: false,
 		},
 		{
@@ -166,9 +171,9 @@ func TestCertsRouteReturnsSnakeCaseDTO(t *testing.T) {
 		t.Fatalf("expired-but-not-revoked status = %v, want %q", first["status"], certStatusExpired)
 	}
 	days, ok := first["days_until_expiry"].(float64)
-	if !ok || days >= 0 || days < -16 {
-		// 过期 15 天余量 1 天:过期于测试运行前,负数且量级正确即可。
-		t.Fatalf("days_until_expiry = %v, want negative ~-15", first["days_until_expiry"])
+	if !ok || days != -16 {
+		// 过期 15.5 天 -> 向上取整到已流逝的第 16 个整天,与运行日期无关。
+		t.Fatalf("days_until_expiry = %v, want -16", first["days_until_expiry"])
 	}
 	second := raw[1]
 	if second["status"] != certStatusRevoked {
