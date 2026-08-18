@@ -1,10 +1,12 @@
 # NodeAgent 控制面连接加固
 
-> 父任务:`.trellis/tasks/08-18-panel-node-interface-fixes`(部署安全红线见父任务 PRD)。本任务**只改 node 二进制**,不改 wire 协议、不改 DB schema,panel 侧零感知、新旧 panel 均兼容。
+> 父任务:`.trellis/tasks/08-18-panel-node-interface-fixes`。**部署策略变更(2026-08-18,用户裁决,覆盖本文件与父任务 PRD 的原兼容性要求):panel 与 node 同步升级,不做新旧混跑兼容。**
+>
+> 原先要求"只改 node 二进制、panel 侧零感知、新旧 panel 均兼容"**已作废**。本任务仍只改 node 二进制,但协议版本不匹配时快速失败断连,不保留兼容分支。回滚须两侧成对执行;无 DB schema 变更。
 
 ## Goal
 
-修复 nodeagent 的 2 个中危(证书落盘不校验/非原子、连接无读超时)与 4 个低危(续期断连误报、畸形 task 污染台账、envelope version 不校验、health 探针失真),保证节点在 panel 异常/网络半开时能自愈,在 panel 返回坏数据时不自残。
+修复 nodeagent 的 2 个中危(证书落盘不校验/非原子、连接无读超时)与 4 个低危(续期断连误报、畸形 task 污染台账、envelope version 不校验、health 探针失真),保证节点在 panel 异常/网络半开时能自愈,在 panel 返回坏数据时不自残。同步升级策略下,版本不匹配即断连重试,不降级、不静默。
 
 ## 现状(实现前必读)
 
@@ -56,20 +58,23 @@
 - R7.2 探针必须能区分「我们的 S3 网关」与「占用端口的别的 HTTP 服务」:对 `GET /` 的响应校验是否为本网关的 S3 XML 错误结构(`<Error>` 且含预期 Code,如 AccessDenied/InvalidRequest——以当前 gateway 实际返回为准);不匹配则探针失败。实现时先在 design.md 记录当前 `GET /` 的真实响应体样例。
 - R7.3 仅当监听地址为通配符时归一到 127.0.0.1;绑定具体地址时向该地址探测,并移除 `InsecureSkipVerify`(若 S3 监听是 https 且证书对探测地址不可验,则在 design.md 记录后允许对 loopback 保留跳过,公网地址不允许)。
 
-## 兼容性论证
+## 部署与协议不匹配语义
 
-全部改动在 node 进程内部:对 panel 的 wire 行为只有两处可观察变化——(a) 静默/故障连接重连更及时(对 panel 是减负);(b) 畸形 task 会收到 failed 结果而不是被静默执行(panel 对 failed 结果已有处理路径)。新旧 panel 任意组合均兼容;部署顺序无要求,node 独立滚动即可。
+- **升级方式**:panel 与全部 node 同步升级,不承诺混跑期行为。控制面在升级窗口内可能失联,但各 node 继续用最后一次落地的本地配置服务 S3,业务不中断。
+- **不匹配时快速失败**:版本协商失败即断开,node 侧带退避持续重连,日志必须明确写出"panel 与 node 协议版本不匹配,需同步升级"(含两侧版本号),不允许静默重试、不降级。
+- **回滚**:两侧二进制同时回退。无 DB schema 变更,无状态残留。只回滚一侧会导致协议不匹配、控制面持续失联(数据面仍在服务),因此回滚必须成对执行。
+- **仍然必须保留的防护**(与版本无关,防的是恶意或故障对端):R1 证书校验、R3.5 node 侧 `timeout_ms` 十分钟上界钳制、R4.3 重组缓存上限(由 controlproto 子任务负责)。这些不能因"兼容"而删除。
 
 ## Acceptance Criteria
 
-- [ ] AC1 `go build ./...`、`go vet ./...` 干净;`go test -race ./pkg/nodeagent/... ./pkg/controlproto/... ./cmd/node/...` 全绿。
-- [ ] AC2 构造 mock panel 返回坏证书(不可解析/公钥不匹配/链不合法,各一例):节点拒绝落盘,旧证书文件逐字节不变,错误日志明确。
-- [ ] AC3 `kill -9` 于写盘时机无法用单测模拟,改为:构造临时目录,断言 `persistPEM` 写完后存在完整 PEM 且过程中出现过的临时文件已清理;`.bak` 策略按 R2.2 决策验证。
-- [ ] AC4 mock panel 接受 WS 后不应答 hello → 节点在握手超时内放弃并重连(测试断言耗时 < 超时上限)。
-- [ ] AC5 mock panel 建立连接后完全静默 → 节点在看门狗阈值内断开重连;正常每 15s 心跳+ack 的连接永不误杀(跑 3 分钟以上模拟或时钟注入)。
-- [ ] AC6 心跳发送注入失败 → 连接立即关闭并进入重连。
-- [ ] AC7 续期成功路径日志为 Info,且从断连到用新证重连的间隔 ≈ 最小退避(非最长 90s)。
-- [ ] AC8 无 task_id 的 task:不执行、台账无 `""` 记录、有 Warn;同 id 换 type:不被缓存命中跳过。
-- [ ] AC9 高于支持版本的 envelope 被 Warn+丢弃,连接保持。
-- [ ] AC10 端口被普通 HTTP 服务(如 `python3 -m http.server`)占用时 `node --health` 返回非零;被真实网关监听时返回 0。
-- [ ] AC11 `git diff` 不涉及 `pkg/panel/`、`pkg/controlproto/` 的 wire 字段、任何 DB schema。
+- [x] AC1 `go build ./...`、`go vet ./...` 干净;`go test -race ./pkg/nodeagent/... ./pkg/controlproto/... ./cmd/node/...` 全绿。
+- [x] AC2 构造 mock panel 返回坏证书(不可解析/公钥不匹配/链不合法,各一例):节点拒绝落盘,旧证书文件逐字节不变,错误日志明确。
+- [x] AC3 `kill -9` 于写盘时机无法用单测模拟,改为:构造临时目录,断言 `persistPEM` 写完后存在完整 PEM 且过程中出现过的临时文件已清理;`.bak` 策略按 R2.2 决策验证。
+- [x] AC4 mock panel 接受 WS 后不应答 hello → 节点在握手超时内放弃并重连(测试断言耗时 < 超时上限)。
+- [x] AC5 mock panel 建立连接后完全静默 → 节点在看门狗阈值内断开重连;正常每 15s 心跳+ack 的连接永不误杀(跑 3 分钟以上模拟或时钟注入)。
+- [ ] AC6 心跳发送注入失败 → 连接立即关闭并进入重连。(注:真实 WebSocket 写失败难以注入,已在实现层保证发送失败即 Close+return;留待后续集成测试覆盖。)
+- [ ] AC7 续期成功路径日志为 Info,且从断连到用新证重连的间隔 ≈ 最小退避(非最长 90s)。(注:已在实现层引入 errRenewedReconnect 哨兵与退避清零;留待后续集成测试覆盖完整路径。)
+- [x] AC8 无 task_id 的 task:不执行、台账无 `""` 记录、有 Warn;同 id 换 type:不被缓存命中跳过。
+- [x] AC9 高于支持版本的 envelope 被 Warn+丢弃,连接保持。
+- [x] AC10 端口被普通 HTTP 服务(如 `python3 -m http.server`)占用时 `node --health` 返回非零;被真实网关监听时返回 0。
+- [x] AC11 `git diff` 不涉及 `pkg/panel/`、`pkg/controlproto/` 的 wire 字段、任何 DB schema。
