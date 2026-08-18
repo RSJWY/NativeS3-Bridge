@@ -9,8 +9,10 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/xml"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -160,35 +162,70 @@ func main() {
 	<-agentDone
 }
 
+// s3ErrorResponse 是网关返回的 S3 XML 错误结构,用于 health 探针区分
+// "我们的 S3 网关"与"占用端口的其他 HTTP 服务"。
+type s3ErrorResponse struct {
+	XMLName xml.Name `xml:"Error"`
+	Code    string   `xml:"Code"`
+}
+
 func probeS3Listener(cfg *config.NodeConfig) error {
 	host, port, err := net.SplitHostPort(cfg.Server.S3Addr)
 	if err != nil {
 		return fmt.Errorf("parse server.s3_addr: %w", err)
 	}
+	// net.SplitHostPort 返回的 host 不含方括号,"[::]" 死分支删除。
 	switch host {
-	case "", "0.0.0.0":
+	case "", "0.0.0.0", "::":
 		host = "127.0.0.1"
-	case "::", "[::]":
-		host = "::1"
 	}
+
 	scheme := "http"
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if cfg.Server.TLS.Enabled {
 		scheme = "https"
-		// This is a loopback-only reachability probe. The serving certificate may
-		// be issued for the public S3 hostname rather than the normalized bind IP.
-		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec
+		// R7.3:仅当探测目标是 loopback 且证书对探测地址不可验时才允许跳过验证。
+		// 公网地址必须可验,避免把任意 HTTPS 服务误判为健康。
+		if isLoopback(host) {
+			transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec
+		} else {
+			transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
 	}
+
 	client := &http.Client{Timeout: 5 * time.Second, Transport: transport}
 	resp, err := client.Get(scheme + "://" + net.JoinHostPort(host, port) + "/")
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 100 || resp.StatusCode > 599 {
-		return fmt.Errorf("invalid HTTP status %d", resp.StatusCode)
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	if err != nil {
+		return fmt.Errorf("read probe response: %w", err)
+	}
+
+	// 我们的 S3 网关对无签名的 GET / 返回 403 AccessDenied 的 XML 错误。
+	// 普通 http.server 会返回 HTML 目录页或 200,不会命中该结构。
+	if resp.StatusCode != http.StatusForbidden {
+		return fmt.Errorf("probe returned status %d, expected 403 AccessDenied", resp.StatusCode)
+	}
+	var s3Err s3ErrorResponse
+	if err := xml.Unmarshal(body, &s3Err); err != nil {
+		return fmt.Errorf("probe response is not S3 XML error: %w", err)
+	}
+	if s3Err.XMLName.Local != "Error" || s3Err.Code == "" {
+		return fmt.Errorf("probe response missing S3 Error/Code")
 	}
 	return nil
+}
+
+func isLoopback(host string) bool {
+	if host == "" || host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // startAgent registers the node on first boot (if a token is configured and no

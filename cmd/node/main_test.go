@@ -30,9 +30,11 @@ func TestSetupSlogUsesSharedFileAndRingContract(t *testing.T) {
 	}
 }
 
-func TestProbeS3ListenerAcceptsHTTPErrorResponse(t *testing.T) {
+func TestProbeS3ListenerAcceptsS3ErrorResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "AccessDenied", http.StatusForbidden)
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>`))
 	}))
 	defer server.Close()
 	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
@@ -42,6 +44,24 @@ func TestProbeS3ListenerAcceptsHTTPErrorResponse(t *testing.T) {
 	cfg := &config.NodeConfig{Server: config.NodeServerConfig{S3Addr: net.JoinHostPort("0.0.0.0", port)}}
 	if err := probeS3Listener(cfg); err != nil {
 		t.Fatalf("probe running S3 listener: %v", err)
+	}
+}
+
+func TestProbeS3ListenerRejectsPlainHTTPService(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// 普通 HTTP 服务返回 200 HTML 目录页,不是 S3 XML 错误。
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html><body>hello</body></html>"))
+	}))
+	defer server.Close()
+	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.NodeConfig{Server: config.NodeServerConfig{S3Addr: net.JoinHostPort("0.0.0.0", port)}}
+	if err := probeS3Listener(cfg); err == nil {
+		t.Fatal("probe unexpectedly passed for plain HTTP service")
 	}
 }
 
