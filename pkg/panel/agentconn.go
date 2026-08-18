@@ -34,8 +34,14 @@ type AgentConn struct {
 	AppliedVersion  int64
 	ContentHash     string
 	NeedsSync       bool
+	// HeartbeatInterval 是节点在 hello 中自报的心跳间隔(已按 R1.3 钳制/回落),
+	// 用于计算离线阈值与读超时。零值表示未协商到有效值(同步升级后不应出现)。
+	HeartbeatInterval time.Duration
 
 	ws *websocket.Conn
+
+	// importReassembler 重组本连接上 v2 import_report_chunk。
+	importReassembler *importReassembler
 
 	// writeSem 串行化写操作。用容量 1 的 channel 而不是 sync.Mutex:互斥锁的等待
 	// 不可中断,一个"不读"的对端会让后续写方永久卡在 Lock() 上(连 ctx 超时也救不
@@ -102,14 +108,24 @@ func (c *AgentConn) Supports(capability string) bool {
 // newAgentConn wraps an accepted websocket connection for a node.
 func newAgentConn(nodeID uint, fingerprint string, ws *websocket.Conn) *AgentConn {
 	return &AgentConn{
-		NodeID:      nodeID,
-		Fingerprint: fingerprint,
-		ws:          ws,
-		writeSem:    make(chan struct{}, 1),
-		inFlight:    make(map[string]struct{}),
-		maxInFlight: DefaultMaxInFlightTasks,
-		lastSeen:    nowUTC(),
+		NodeID:            nodeID,
+		Fingerprint:       fingerprint,
+		ws:                ws,
+		writeSem:          make(chan struct{}, 1),
+		inFlight:          make(map[string]struct{}),
+		maxInFlight:       DefaultMaxInFlightTasks,
+		lastSeen:          nowUTC(),
+		HeartbeatInterval: DefaultHeartbeatInterval,
+		importReassembler: newImportReassembler(),
 	}
+}
+
+// heartbeatInterval 返回本连接实际使用的心跳间隔(已钳制/回落);零值时取 panel 默认。
+func (c *AgentConn) heartbeatInterval() time.Duration {
+	if c.HeartbeatInterval > 0 {
+		return c.HeartbeatInterval
+	}
+	return DefaultHeartbeatInterval
 }
 
 // send marshals and writes an envelope. Writes are serialized; ctx bounds both
@@ -236,4 +252,120 @@ func (c *AgentConn) close(reason string) {
 // closeError terminates the websocket with a protocol-error status.
 func (c *AgentConn) closeError(reason string) {
 	_ = c.ws.Close(websocket.StatusProtocolError, reason)
+}
+
+// --- v2 import_report_chunk 重组器 ---
+
+const (
+	// importReassemblyMaxChunks 单 request 最多接受的 chunk 数,防恶意节点用大量
+	// 不收尾分块占内存。
+	importReassemblyMaxChunks = 32
+	// importReassemblyMaxBytes 单 request 重组后总字节上限。
+	importReassemblyMaxBytes = 16 << 20
+	// importReassemblyTimeout 重组最长等待时间,超时丢弃。
+	importReassemblyTimeout = 5 * time.Minute
+)
+
+// importReassembler 按 request_id 重组 v2 import_report_chunk。
+type importReassembler struct {
+	mu     sync.Mutex
+	states map[string]*importReassemblyState
+}
+
+type importReassemblyState struct {
+	requestID   string
+	total       int
+	received    map[int]controlproto.ImportReportChunkPayload
+	bytes       int
+	deadline    time.Time
+	delivered   bool
+}
+
+func newImportReassembler() *importReassembler {
+	return &importReassembler{states: make(map[string]*importReassemblyState)}
+}
+
+// ingest 喂入一块,返回 (收齐?, 完整 report, error)。
+// 错误表示应断连(超限)。
+func (r *importReassembler) ingest(chunk controlproto.ImportReportChunkPayload, now time.Time) (bool, controlproto.ImportReportPayload, error) {
+	if chunk.RequestID == "" || chunk.Total <= 0 || chunk.Seq < 0 || chunk.Seq >= chunk.Total {
+		return false, controlproto.ImportReportPayload{}, fmt.Errorf("invalid import report chunk: request_id=%q seq=%d total=%d", chunk.RequestID, chunk.Seq, chunk.Total)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	state, ok := r.states[chunk.RequestID]
+	if !ok {
+		state = &importReassemblyState{
+			requestID: chunk.RequestID,
+			total:     chunk.Total,
+			received:  make(map[int]controlproto.ImportReportChunkPayload),
+			deadline:  now.Add(importReassemblyTimeout),
+		}
+		r.states[chunk.RequestID] = state
+	}
+
+	if state.delivered {
+		return true, controlproto.ImportReportPayload{}, nil
+	}
+	if chunk.Total != state.total {
+		return false, controlproto.ImportReportPayload{}, fmt.Errorf("import chunk total mismatch: expected %d, got %d", state.total, chunk.Total)
+	}
+	if now.After(state.deadline) {
+		delete(r.states, chunk.RequestID)
+		return false, controlproto.ImportReportPayload{}, fmt.Errorf("import reassembly timed out for request %s", chunk.RequestID)
+	}
+	if len(state.received) >= importReassemblyMaxChunks || len(state.received)+1 > importReassemblyMaxChunks {
+		delete(r.states, chunk.RequestID)
+		return false, controlproto.ImportReportPayload{}, fmt.Errorf("import reassembly chunk limit exceeded for request %s", chunk.RequestID)
+	}
+
+	chunkBytes := estimateChunkBytes(chunk)
+	if state.bytes+chunkBytes > importReassemblyMaxBytes {
+		delete(r.states, chunk.RequestID)
+		return false, controlproto.ImportReportPayload{}, fmt.Errorf("import reassembly byte limit exceeded for request %s", chunk.RequestID)
+	}
+
+	if _, exists := state.received[chunk.Seq]; exists {
+		// 重复块忽略,不算错误。
+		return false, controlproto.ImportReportPayload{}, nil
+	}
+	state.received[chunk.Seq] = chunk
+	state.bytes += chunkBytes
+
+	if len(state.received) < state.total {
+		return false, controlproto.ImportReportPayload{}, nil
+	}
+
+	// 收齐,组装成完整 ImportReportPayload。
+	report := controlproto.ImportReportPayload{}
+	for i := 0; i < state.total; i++ {
+		c := state.received[i]
+		report.State.Credentials = append(report.State.Credentials, c.Credentials...)
+		report.State.Buckets = append(report.State.Buckets, c.Buckets...)
+		report.State.Webhooks = append(report.State.Webhooks, c.Webhooks...)
+	}
+	report.CredentialCount = len(report.State.Credentials)
+	report.BucketCount = len(report.State.Buckets)
+	report.WebhookCount = len(report.State.Webhooks)
+	report.LocalContentHash = report.State.ContentHash()
+	state.delivered = true
+	delete(r.states, chunk.RequestID)
+	return true, report, nil
+}
+
+// estimateChunkBytes 估算 chunk 的内存占用(近似 JSON 字节数)。
+func estimateChunkBytes(chunk controlproto.ImportReportChunkPayload) int {
+	n := len(chunk.RequestID) + 32 // 元数据开销近似
+	for _, c := range chunk.Credentials {
+		n += len(c.AccessKey) + len(c.SecretKey) + len(c.Name) + len(c.Bucket) + len(c.Status) + 64
+	}
+	for _, b := range chunk.Buckets {
+		n += len(b.Name) + len(b.ACL) + 32
+	}
+	for _, h := range chunk.Webhooks {
+		n += len(h.URL) + len(h.Events) + 32
+	}
+	return n
 }

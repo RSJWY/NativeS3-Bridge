@@ -362,13 +362,14 @@ func (c *Client) handshake(ctx context.Context, ws *websocket.Conn) error {
 		return fmt.Errorf("compute local hash: %w", err)
 	}
 	hello := controlproto.HelloPayload{
-		ProtocolVersion: controlproto.ProtocolVersion,
-		NodeID:          fmt.Sprintf("%d", c.cfg.NodeID),
-		AgentVersion:    AgentVersion,
-		AppliedVersion:  meta.AppliedVersion,
-		ContentHash:     localHash,
-		Capabilities:    []string{controlproto.CapabilityAuthoritativeConfigV1},
-		Region:          c.cfg.Region,
+		ProtocolVersion:     controlproto.ProtocolVersion,
+		NodeID:              fmt.Sprintf("%d", c.cfg.NodeID),
+		AgentVersion:        AgentVersion,
+		AppliedVersion:      meta.AppliedVersion,
+		ContentHash:         localHash,
+		Capabilities:        []string{controlproto.CapabilityAuthoritativeConfigV1},
+		Region:              c.cfg.Region,
+		HeartbeatIntervalMS: int(c.cfg.HeartbeatInterval.Milliseconds()),
 	}
 	if err := c.sendMessage(ctx, ws, controlproto.TypeHello, "", hello); err != nil {
 		return fmt.Errorf("send hello: %w", err)
@@ -381,6 +382,12 @@ func (c *Client) handshake(ctx context.Context, ws *websocket.Conn) error {
 	if env.Type == controlproto.TypeError {
 		var perr controlproto.ErrorPayload
 		_ = env.DecodePayload(&perr)
+		if perr.Code == controlproto.ErrCodeVersionIncompatible {
+			slog.Warn("protocol version mismatch with panel, synchronous upgrade required",
+				"local_version", controlproto.ProtocolVersion,
+				"local_min_version", controlproto.MinCompatibleVersion,
+				"panel_message", perr.Message)
+		}
 		return fmt.Errorf("panel rejected connection: %s (%s)", perr.Message, perr.Code)
 	}
 	if env.Type != controlproto.TypeHelloAck {
@@ -473,12 +480,17 @@ func safeApplyError(err error) string {
 	return "desired state apply failed"
 }
 
+// importReportChunkBytes 是单个 import_report_chunk 序列化后的上限。
+const importReportChunkBytes = 512 << 10
+
 // handleImportRequest replies with a read-only snapshot of the node's current
 // local business config (credentials with plaintext secrets, buckets, webhooks)
 // so the panel can present an import summary for admin confirmation. It is
 // strictly read-only: the node's config is never modified by an import request
 // (the migration red line — the panel must not write business config to the
 // node before the admin confirms, design §8.3).
+//
+// v2 起改为分页传输,避免单帧超过 panel 1 MiB 读上限导致导入死循环。
 func (c *Client) handleImportRequest(ctx context.Context, ws *websocket.Conn, env controlproto.Envelope) {
 	state, err := c.executor.LocalState()
 	if err != nil {
@@ -488,16 +500,82 @@ func (c *Client) handleImportRequest(ctx context.Context, ws *websocket.Conn, en
 		})
 		return
 	}
-	report := controlproto.ImportReportPayload{
-		State:            state,
-		CredentialCount:  len(state.Credentials),
-		BucketCount:      len(state.Buckets),
-		WebhookCount:     len(state.Webhooks),
-		LocalContentHash: state.ContentHash(),
+
+	chunks, err := buildImportReportChunks(env.ID, state)
+	if err != nil {
+		slog.Error("build import report chunks failed", "error", err)
+		_ = c.sendMessage(ctx, ws, controlproto.TypeError, env.ID, controlproto.ErrorPayload{
+			Code: controlproto.ErrCodeInternal, Message: "build import report chunks: " + err.Error(),
+		})
+		return
 	}
-	if err := c.sendMessage(ctx, ws, controlproto.TypeImportReport, env.ID, report); err != nil {
-		slog.Error("send import report failed", "error", err)
+
+	for _, chunk := range chunks {
+		if err := c.sendMessage(ctx, ws, controlproto.TypeImportReportChunk, env.ID, chunk); err != nil {
+			slog.Error("send import report chunk failed", "seq", chunk.Seq, "error", err)
+			return
+		}
 	}
+}
+
+// buildImportReportChunks 把节点本地状态拆成若干分页块。每块只带一类资源的一段,
+// 且序列化后不超过 importReportChunkBytes。拆分的最细粒度是单条资源,因此单条资源
+// 本身超限时整组 import 会失败(意味着该节点当前状态不适合通过控制面迁移)。
+func buildImportReportChunks(requestID string, state controlproto.DesiredState) ([]controlproto.ImportReportChunkPayload, error) {
+	var chunks []controlproto.ImportReportChunkPayload
+	addChunk := func(creds []controlproto.DesiredCredential, buckets []controlproto.DesiredBucket, webhooks []controlproto.DesiredWebhook) {
+		chunks = append(chunks, controlproto.ImportReportChunkPayload{
+			RequestID: requestID, Credentials: creds, Buckets: buckets, Webhooks: webhooks,
+		})
+	}
+
+	// credentials 每条一块:包含明文 secret,不与其他条目混装,避免一块里多个 secret。
+	for _, cred := range state.Credentials {
+		addChunk([]controlproto.DesiredCredential{cred}, nil, nil)
+	}
+	// buckets / webhooks 各自按条目成块
+	for _, b := range state.Buckets {
+		addChunk(nil, []controlproto.DesiredBucket{b}, nil)
+	}
+	for _, h := range state.Webhooks {
+		addChunk(nil, nil, []controlproto.DesiredWebhook{h})
+	}
+
+	// 设置 Seq/Total;同时校验单块大小。
+	total := len(chunks)
+	for i := range chunks {
+		chunks[i].Seq = i
+		chunks[i].Total = total
+		data, err := json.Marshal(chunks[i])
+		if err != nil {
+			return nil, fmt.Errorf("marshal chunk %d: %w", i, err)
+		}
+		if len(data) > importReportChunkBytes {
+			return nil, fmt.Errorf("chunk %d exceeds %d bytes (got %d); reduce import size", i, importReportChunkBytes, len(data))
+		}
+	}
+	return chunks, nil
+}
+
+// maxTaskTimeout 是 node 侧对 panel 下发 timeout_ms 的硬编码上界。
+// 防止恶意/故障 panel 让任务无限占住 serve 循环。
+const maxTaskTimeout = 10 * time.Minute
+
+// defaultTaskTimeout 是 timeout_ms 缺失/非法时的安全默认值,与 panel 默认一致。
+const defaultTaskTimeout = 60 * time.Second
+
+// taskTimeout 计算任务实际执行时长。<=0 使用默认值;超出上界按上界执行并 Warn。
+func taskTimeout(timeoutMS int64) time.Duration {
+	if timeoutMS <= 0 {
+		slog.Warn("panel sent invalid task timeout_ms, using default", "timeout_ms", timeoutMS, "default", defaultTaskTimeout)
+		return defaultTaskTimeout
+	}
+	t := time.Duration(timeoutMS) * time.Millisecond
+	if t > maxTaskTimeout {
+		slog.Warn("panel sent task timeout_ms above node limit, clamping", "timeout_ms", timeoutMS, "limit", maxTaskTimeout)
+		return maxTaskTimeout
+	}
+	return t
 }
 
 // handleTask executes a one-shot task with idempotency. A duplicate task ID
@@ -516,6 +594,11 @@ func (c *Client) handleTask(ctx context.Context, ws *websocket.Conn, env control
 		return
 	}
 
+	// R3:node 真正执行 panel 下发的 timeout_ms。
+	timeout := taskTimeout(task.TimeoutMS)
+	taskCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	var result controlproto.TaskResultPayload
 	if c.runner == nil {
 		result = controlproto.TaskResultPayload{
@@ -525,15 +608,16 @@ func (c *Client) handleTask(ctx context.Context, ws *websocket.Conn, env control
 			Error:  "node does not support tasks",
 		}
 	} else {
-		result = c.runner.Run(ctx, task)
+		result = c.runner.Run(taskCtx, task)
 	}
 	result.TaskID = task.TaskID
 	result.Type = task.Type
 
-	// Record before sending so a crash after send still leaves an idempotency
-	// record; a duplicate delivery then resends rather than re-executing.
-	if err := c.recordTaskResult(task, result); err != nil {
-		slog.Error("record task result failed", "task", task.TaskID, "error", err)
+	// 超时失败不落幂等台账(它不是成功执行),panel 会按 task_timeout 判终态。
+	if result.State == controlproto.TaskStateSuccess {
+		if err := c.recordTaskResult(task, result); err != nil {
+			slog.Error("record task result failed", "task", task.TaskID, "error", err)
+		}
 	}
 	_ = c.sendMessage(ctx, ws, controlproto.TypeTaskResult, env.ID, result)
 }

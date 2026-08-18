@@ -25,6 +25,9 @@ type HelloPayload struct {
 	ContentHash     string   `json:"content_hash"`
 	Capabilities    []string `json:"capabilities,omitempty"`
 	Region          string   `json:"region,omitempty"`
+	// HeartbeatIntervalMS 是节点自报的心跳间隔(毫秒)。同步升级后必填;
+	// panel 据此计算离线阈值与读超时。非法值走 panel 配置回落并 Warn。
+	HeartbeatIntervalMS int `json:"heartbeat_interval_ms"`
 }
 
 const CapabilityAuthoritativeConfigV1 = "authoritative_config_v1"
@@ -291,12 +294,28 @@ type TaskResult struct {
 // established mTLS channel) so the panel can build an import summary and, only
 // after admin confirmation, adopt it as the version=1 baseline. Sending this
 // report never mutates the node.
+//
+// v2 起 node 不再发送完整单帧,而是拆成 ImportReportChunkPayload 分页传输;
+// 该类型继续保留,用于 panel 侧重组收齐后统一落库。
 type ImportReportPayload struct {
 	State            DesiredState `json:"state"`
 	CredentialCount  int          `json:"credential_count"`
 	BucketCount      int          `json:"bucket_count"`
 	WebhookCount     int          `json:"webhook_count"`
 	LocalContentHash string       `json:"local_content_hash"`
+}
+
+// ImportReportChunkPayload 是 v2 引入的 import 报告分页单元。
+// node 把本地业务配置按资源类型切成多块,每块序列化后 ≤ 512 KiB;
+// panel 按 request_id 重组,收齐 total 块后走既有导入落库路径。
+type ImportReportChunkPayload struct {
+	RequestID string `json:"request_id"`
+	Seq       int    `json:"seq"`
+	Total     int    `json:"total"`
+	// 每块只携带一类资源的一段;三类资源共用 Seq/Total 编号空间
+	Credentials []DesiredCredential `json:"credentials,omitempty"`
+	Buckets     []DesiredBucket     `json:"buckets,omitempty"`
+	Webhooks    []DesiredWebhook    `json:"webhooks,omitempty"`
 }
 
 // ErrorCode enumerates protocol-level error codes exchanged in ErrorPayload.

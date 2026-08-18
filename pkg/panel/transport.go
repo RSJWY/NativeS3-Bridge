@@ -380,9 +380,17 @@ func (s *TransportServer) serve(ctx context.Context, conn *AgentConn) {
 	}
 
 	for {
-		env, err := conn.readEnvelope(ctx)
+		// R2:读超时回收。心跳间隔协商后阈值随节点自报值走,固定读超时不再误杀
+		// 长心跳节点。超时只摘连接,DB online 状态由 SweepOffline 负责。
+		readTimeout := conn.heartbeatInterval()*time.Duration(DefaultOfflineMultiplier) + 30*time.Second
+		readCtx, readCancel := context.WithTimeout(ctx, readTimeout)
+		env, err := conn.readEnvelope(readCtx)
+		readCancel()
 		if err != nil {
-			if !errors.Is(err, context.Canceled) {
+			if errors.Is(err, context.DeadlineExceeded) {
+				slog.Warn("agent connection read timeout, closing",
+					"node", conn.NodeID, "read_timeout", readTimeout)
+			} else if !errors.Is(err, context.Canceled) {
 				slog.Info("agent connection closed", "node", conn.NodeID, "reason", err)
 			}
 			return
@@ -409,6 +417,13 @@ func (s *TransportServer) disconnect(conn *AgentConn) {
 
 // handshake reads the node's hello frame, negotiates the protocol version, and
 // replies with hello_ack (including whether the node must reconcile).
+// minHeartbeatInterval / maxHeartbeatInterval 钳制节点自报心跳间隔,
+// 防止故障/恶意节点报极大值从而永远不被判离线。
+const (
+	minHeartbeatInterval = 1 * time.Second
+	maxHeartbeatInterval = 10 * time.Minute
+)
+
 func (s *TransportServer) handshake(ctx context.Context, conn *AgentConn) error {
 	hsCtx, cancel := context.WithTimeout(ctx, handshakeReadTimeout)
 	defer cancel()
@@ -424,10 +439,27 @@ func (s *TransportServer) handshake(ctx context.Context, conn *AgentConn) error 
 	if err := env.DecodePayload(&hello); err != nil {
 		return fmt.Errorf("decode hello: %w", err)
 	}
+
+	// R1.4:hello 里节点自报 node_id 与证书身份不一致时打 Warn 日志(仅可观测性,
+	// 不改变以证书为准的语义)。
+	if reportedID := strings.TrimSpace(hello.NodeID); reportedID != "" && reportedID != strconv.FormatUint(uint64(conn.NodeID), 10) {
+		slog.Warn("node reported node_id does not match certificate identity",
+			"reported_node_id", reportedID, "cert_node_id", conn.NodeID)
+	}
+
 	negotiated, err := controlproto.NegotiateVersion(hello.ProtocolVersion)
 	if err != nil {
+		slog.Warn("protocol version mismatch with node, synchronous upgrade required",
+			"node", conn.NodeID,
+			"local_version", controlproto.ProtocolVersion,
+			"local_min_version", controlproto.MinCompatibleVersion,
+			"peer_version", hello.ProtocolVersion,
+			"error", err)
 		_ = conn.sendMessage(hsCtx, controlproto.TypeError, "", controlproto.ErrorPayload{
-			Code: controlproto.ErrCodeVersionIncompatible, Message: err.Error(), Fatal: true,
+			Code: controlproto.ErrCodeVersionIncompatible,
+			Message: fmt.Sprintf("protocol version mismatch: panel=%d(min=%d) node=%d; synchronous upgrade required",
+				controlproto.ProtocolVersion, controlproto.MinCompatibleVersion, hello.ProtocolVersion),
+			Fatal: true,
 		})
 		return fmt.Errorf("version negotiation: %w", err)
 	}
@@ -435,6 +467,9 @@ func (s *TransportServer) handshake(ctx context.Context, conn *AgentConn) error 
 	conn.Capabilities = append([]string(nil), hello.Capabilities...)
 	conn.AppliedVersion = hello.AppliedVersion
 	conn.ContentHash = hello.ContentHash
+
+	// R1 心跳间隔协商:解析节点自报值并钳制,结果用于离线阈值与读超时。
+	conn.HeartbeatInterval = s.clampHeartbeatInterval(time.Duration(hello.HeartbeatIntervalMS) * time.Millisecond)
 
 	// Decide whether the node needs to sync against the latest desired config.
 	needsSync, desiredVersion := s.reconcileDecision(conn.NodeID, hello.AppliedVersion, hello.ContentHash)
@@ -494,8 +529,11 @@ func (s *TransportServer) dispatch(ctx context.Context, conn *AgentConn, env con
 		return s.handleAck(conn, env)
 	case controlproto.TypeTaskResult:
 		return s.handleTaskResult(conn, env)
+	case controlproto.TypeImportReportChunk:
+		return s.handleImportReportChunk(conn, env)
 	case controlproto.TypeImportReport:
-		return s.handleImportReport(conn, env)
+		// v2 起 import 改走 TypeImportReportChunk,单帧 import_report 不再处理。
+		return fmt.Errorf("legacy import_report not supported in protocol v%d", conn.ProtocolVersion)
 	case controlproto.TypeError:
 		var payload controlproto.ErrorPayload
 		_ = env.DecodePayload(&payload)
@@ -652,20 +690,27 @@ func (s *TransportServer) handleTaskResult(conn *AgentConn, env controlproto.Env
 	return nil
 }
 
-// handleImportReport forwards a node's read-only import report to the migration
-// sink (if configured). The node is never mutated by this path; the sink only
-// records a PENDING import for later admin confirmation.
-func (s *TransportServer) handleImportReport(conn *AgentConn, env controlproto.Envelope) error {
+// handleImportReportChunk 重组 v2 import 分页报告。收齐全部 chunk 后调用
+// MigrationSink 落库;超限/超时则丢弃并返回错误以触发断连。
+func (s *TransportServer) handleImportReportChunk(conn *AgentConn, env controlproto.Envelope) error {
 	if s.deps.MigrationSink == nil {
 		return nil
 	}
-	var report controlproto.ImportReportPayload
-	if err := env.DecodePayload(&report); err != nil {
+	var chunk controlproto.ImportReportChunkPayload
+	if err := env.DecodePayload(&chunk); err != nil {
 		return err
+	}
+	complete, report, err := conn.importReassembler.ingest(chunk, nowUTC())
+	if err != nil {
+		slog.Warn("import report reassembly failed", "node", conn.NodeID, "request", chunk.RequestID, "error", err)
+		return err
+	}
+	if !complete {
+		return nil
 	}
 	if err := s.deps.MigrationSink.ingestReport(conn.NodeID, report); err != nil {
 		slog.Error("ingest import report failed", "node", conn.NodeID, "error", err)
-		return nil // non-fatal to the connection
+		return nil // 落库失败不拆连接,由 sink 内部处理
 	}
 	return nil
 }
@@ -953,6 +998,18 @@ func (s *TransportServer) audit(action string, nodeID uint, resource, result str
 	}
 }
 
+// clampHeartbeatInterval 把节点自报的心跳间隔钳制到合法区间;非法值回落到
+// panel 配置间隔并 Warn。这是防故障/恶意节点的关键护栏,与版本兼容无关。
+func (s *TransportServer) clampHeartbeatInterval(reported time.Duration) time.Duration {
+	if reported < minHeartbeatInterval || reported > maxHeartbeatInterval {
+		slog.Warn("node heartbeat interval out of bounds, falling back to panel interval",
+			"reported", reported, "min", minHeartbeatInterval, "max", maxHeartbeatInterval,
+			"fallback", s.deps.HeartbeatInterval)
+		return s.deps.HeartbeatInterval
+	}
+	return reported
+}
+
 // SweepOffline marks nodes offline whose last heartbeat is older than the
 // offline threshold. Intended to be called periodically by the panel. It only
 // updates the observed state; it never touches the node's data plane.
@@ -963,7 +1020,23 @@ func (s *TransportServer) SweepOffline(interval time.Duration, multiplier int) e
 	if multiplier <= 0 {
 		multiplier = DefaultOfflineMultiplier
 	}
-	threshold := nowUTC().Add(-time.Duration(multiplier) * interval)
+
+	// 优先按各在线连接自报的心跳间隔判定;无连接节点用 panel 默认阈值兜底。
+	now := nowUTC()
+	for _, nodeID := range s.deps.Hub.OnlineNodes() {
+		conn, ok := s.deps.Hub.Get(nodeID)
+		if !ok {
+			continue
+		}
+		nodeInterval := conn.heartbeatInterval()
+		threshold := now.Add(-time.Duration(multiplier) * nodeInterval)
+		if conn.LastSeen().Before(threshold) {
+			s.setOnline(nodeID, false)
+		}
+	}
+
+	// DB 兜底:断连后无内存连接,用 panel 默认阈值把残留 online 行刷掉。
+	threshold := now.Add(-time.Duration(multiplier) * interval)
 	return s.deps.DB.Model(&NodeState{}).
 		Where("online = ? AND (last_heartbeat IS NULL OR last_heartbeat < ?)", true, threshold).
 		Updates(map[string]any{"online": false, "updated_at": nowUTC()}).Error

@@ -327,3 +327,43 @@ func TestEnvelopeJSONShape(t *testing.T) {
 		}
 	}
 }
+
+func TestNegotiateVersionV2Required(t *testing.T) {
+	// v2 本端与 v2 对端应协商出 v2。
+	if v, err := NegotiateVersion(2); err != nil || v != 2 {
+		t.Fatalf("negotiate v2: got %d,%v", v, err)
+	}
+	// v1 对端应失败(同步升级,不再支持 v1)。
+	if _, err := NegotiateVersion(1); err == nil {
+		t.Fatal("negotiate v1 should fail")
+	}
+	// 非法/零值应失败。
+	if _, err := NegotiateVersion(0); err == nil {
+		t.Fatal("negotiate 0 should fail")
+	}
+	// 高于本端的版本应回落到本端 v2。
+	if v, err := NegotiateVersion(99); err != nil || v != 2 {
+		t.Fatalf("negotiate 99: got %d,%v", v, err)
+	}
+}
+
+func TestHelloPayloadHeartbeatField(t *testing.T) {
+	hello := HelloPayload{
+		ProtocolVersion: 2, NodeID: "7", AgentVersion: "test",
+		HeartbeatIntervalMS: 60000,
+	}
+	raw, err := json.Marshal(hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "heartbeat_interval_ms") {
+		t.Fatalf("heartbeat_interval_ms missing from JSON: %s", raw)
+	}
+	var decoded HelloPayload
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.HeartbeatIntervalMS != 60000 {
+		t.Fatalf("heartbeat interval = %d", decoded.HeartbeatIntervalMS)
+	}
+}
