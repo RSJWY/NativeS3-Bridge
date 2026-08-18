@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/RSJWY/NativeS3-Bridge/pkg/controlproto"
 )
@@ -22,7 +23,32 @@ func TestHeartbeatPersistsEveryFrameAtNormalCadence(t *testing.T) {
 		if !conn.shouldPersistHeartbeat(now, minInterval) {
 			t.Fatalf("frame #%d at normal cadence was throttled; DB last_heartbeat would go stale", i)
 		}
+		conn.markHeartbeatPersisted(now)
 		now = now.Add(interval)
+	}
+}
+
+// R5:节流时间戳只在落库成功后推进。若在"决定落库"时就推进,一次失败的 upsert 会
+// 连带吃掉下一个 minInterval 内的重试机会,DB 短暂故障期间反而更难恢复。
+func TestFailedHeartbeatPersistDoesNotConsumeThrottleWindow(t *testing.T) {
+	conn := newAgentConn(1, "fp", nil)
+	minInterval := 7500 * time.Millisecond
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+
+	if !conn.shouldPersistHeartbeat(now, minInterval) {
+		t.Fatal("first frame must be persisted")
+	}
+	// 模拟落库失败:不调用 markHeartbeatPersisted。
+
+	// 紧接着的下一帧仍应尝试落库,而不是被节流跳过。
+	if !conn.shouldPersistHeartbeat(now.Add(time.Second), minInterval) {
+		t.Fatal("after a failed persist the next frame must retry, not be throttled")
+	}
+	// 这次成功。
+	conn.markHeartbeatPersisted(now.Add(time.Second))
+	// 成功之后才开始节流。
+	if conn.shouldPersistHeartbeat(now.Add(2*time.Second), minInterval) {
+		t.Fatal("after a successful persist the throttle window must apply")
 	}
 }
 
@@ -42,6 +68,7 @@ func TestHeartbeatFloodIsThrottledWellBelowOfflineThreshold(t *testing.T) {
 	// 100ms 一帧狂发 60s。
 	for now.Sub(start) < time.Minute {
 		if conn.shouldPersistHeartbeat(now, minInterval) {
+			conn.markHeartbeatPersisted(now)
 			if !lastPersist.IsZero() && now.Sub(lastPersist) > maxGap {
 				maxGap = now.Sub(lastPersist)
 			}
@@ -236,6 +263,43 @@ func TestHelloObservationPersistsSanitizedContentHash(t *testing.T) {
 	}
 	if strings.ContainsRune(state.Region, '\x1b') {
 		t.Fatalf("persisted region still has a control character: %q", state.Region)
+	}
+}
+
+// R8:截断必须落在 rune 边界。按字节切会在多字节字符中间断开,产出非法 UTF-8——
+// 那种值在 MySQL/Postgres 的 utf8mb4 列上会被拒收,落库失败又会计入连续存储失败
+// 计数,把一个脏值放大成"节点反复掉线"。region 由运维在 node 本地 yaml 里填写,
+// 写中文地区名很正常,所以这不是理论风险。
+func TestSanitizeTruncatesOnRuneBoundary(t *testing.T) {
+	// 边界正好落在一个 3 字节汉字中间。
+	if got := sanitizeReportedRegion(strings.Repeat("a", 62) + "中文"); !utf8.ValidString(got) {
+		t.Fatalf("sanitized region is not valid UTF-8: %v", []byte(got))
+	}
+	// 逐个字节偏移都扫一遍,确保任何对齐方式下都不会切碎字符。
+	for pad := 0; pad < 8; pad++ {
+		value := strings.Repeat("a", 58+pad) + strings.Repeat("中", 6)
+		got := sanitizeReportedContentHash(value)
+		if !utf8.ValidString(got) {
+			t.Fatalf("pad=%d produced invalid UTF-8: %v", pad, []byte(got))
+		}
+		if len(got) > maxReportedContentHashBytes {
+			t.Fatalf("pad=%d exceeded the column width: %d bytes", pad, len(got))
+		}
+	}
+	// 纯多字节且整体超限的情况。
+	got := sanitizeReportedRegion(strings.Repeat("中", 50))
+	if !utf8.ValidString(got) {
+		t.Fatalf("multibyte-only value produced invalid UTF-8: %v", []byte(got))
+	}
+	if len(got) > maxReportedRegionBytes {
+		t.Fatalf("multibyte-only value exceeded the column width: %d bytes", len(got))
+	}
+	// 未超限时必须原样保留(截断逻辑不能顺手改写正常值)。
+	if got := sanitizeReportedRegion("us-east-1"); got != "us-east-1" {
+		t.Fatalf("in-range value was altered: %q", got)
+	}
+	if got := sanitizeReportedRegion("华北一区"); got != "华北一区" {
+		t.Fatalf("in-range multibyte value was altered: %q", got)
 	}
 }
 

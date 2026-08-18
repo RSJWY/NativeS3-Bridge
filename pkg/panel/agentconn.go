@@ -63,16 +63,21 @@ type AgentConn struct {
 	storageFailures int
 }
 
-// shouldPersistHeartbeat 判断本帧心跳是否应该落库,并在返回 true 时记下落库时间。
-// 正常 cadence 下每帧都会返回 true;狂发帧被压到每 minInterval 一次。
+// shouldPersistHeartbeat 判断本帧心跳是否应该落库。正常 cadence 下每帧都会返回
+// true;狂发帧被压到每 minInterval 一次。它只做判断,不记录时间戳——落库成功后由
+// markHeartbeatPersisted 记录。若在这里就推进时间戳,一次失败的落库会同时吃掉本次
+// 写入和下一个 minInterval 内的重试机会,DB 短暂故障期间反而更难恢复。
 func (c *AgentConn) shouldPersistHeartbeat(now time.Time, minInterval time.Duration) bool {
 	c.heartbeatMu.Lock()
 	defer c.heartbeatMu.Unlock()
-	if !c.lastPersistedBeat.IsZero() && now.Sub(c.lastPersistedBeat) < minInterval {
-		return false
-	}
+	return c.lastPersistedBeat.IsZero() || now.Sub(c.lastPersistedBeat) >= minInterval
+}
+
+// markHeartbeatPersisted 记下这一帧确实落库成功的时间。
+func (c *AgentConn) markHeartbeatPersisted(now time.Time) {
+	c.heartbeatMu.Lock()
 	c.lastPersistedBeat = now
-	return true
+	c.heartbeatMu.Unlock()
 }
 
 // noteStorageFailure 记一次存储失败并返回累计的连续失败次数。

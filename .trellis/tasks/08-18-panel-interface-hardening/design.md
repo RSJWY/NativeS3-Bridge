@@ -63,6 +63,26 @@ PRD R1.1 写「`PanelConfig` 的 **webadmin 段**新增 `trust_forwarded`」。�
 
 配套发现:`webadmin.clientIP`(`net.go:9`)取 `X-Forwarded-For` 的**最右**一段,与 `docs/public-deployment.md` 里 nginx 示例的 `$proxy_add_x_forwarded_for`(追加模式)正好配套安全——客户端伪造的值留在左侧被忽略。文档已补该口径说明,避免运维误改成"只透传客户端原值"而使锁定失效。
 
+## D9 实施期发现的两处 PRD 覆盖缺口(2026-08-18)
+
+**D9.1 R3 漏了第四处控制面写路径。** PRD R3 列了三处(心跳 ack、Dispatch、PushDesiredState),实际还有 `migration.go` 的 `import_request`(`conn.sendMessage`)。核实结论:该路径的 ctx 来自 `adminapi.go` 的 `requestImport`,已经包了 `context.WithTimeout(r.Context(), 30*time.Second)`,写等待本就有界,不会永久阻塞。因此**不改**,只在此记录已核实,避免后续审查误判为漏修。
+
+**D9.2 R8 漏了 `content_hash` 的第二个写入点。** PRD R8 只说 hello 的 `content_hash`,但 `handleAck` 的 `SyncStateSynced/Drift` 分支也把节点自报的 `ack.ContentHash` 写进同一列。只消毒 hello 等于只堵一半——脏值照样能从 ack 进库。**已一并消毒**,并把 region/hash 共用的消毒逻辑抽成 `sanitizeReportedText`,不留两份复制。注意落库用消毒值、一致性比较仍用原值(合法的 64 位摘要不受消毒影响,而比较的语义是"节点自报的是否等于已发布的")。
+
+## D10 质量检查发现并修掉的三项(2026-08-18)
+
+**D10.1 消毒按字节截断会产出非法 UTF-8(真缺陷,已修)。** `sanitizeReportedText` 原先用 `value[:maxBytes]`,边界落在多字节字符中间时切出半个 rune(已复现:62 个 `a` + `中文` → 尾部 `[228 184]`,`utf8.ValidString` 为 false)。危害链条:panel 支持 MySQL/Postgres(`config/panel.go:173`),utf8mb4 列拒收非法字节序列 → 落库失败 → 计入本任务新加的 R6 连续存储失败计数 → 连续 5 次断连。等于把"一个脏值写不进去"放大成"节点反复掉线"。而 region 是运维在 node 本地 yaml 里填的,写中文地区名很正常,不是理论风险。
+
+修复:截断收敛到最后一个完整 rune,仍以字节计量(列宽是字节数)。这同时是**向既有惯例对齐**——同文件的 `safeReportedApplyError` 处理同类节点自报文本时本来就用 `[]rune` 截断。缺陷继承自原有的 `sanitizeReportedRegion`,但本任务把它的适用面扩大到了 `content_hash`,故在本任务修掉。
+
+**D10.2 节流时间戳在落库失败时也被推进(逻辑瑕疵,已修)。** `shouldPersistHeartbeat` 原先在"决定落库"时就写 `lastPersistedBeat`,但 upsert 可能失败。失败后时间戳已推进,下一帧会被节流跳过——DB 短暂故障期间反而自己减少了重试机会,且"已落库"的语义与事实不符。改为两段式:`shouldPersistHeartbeat` 只判断,落库成功后由 `markHeartbeatPersisted` 记录。
+
+**D10.3 R7 缺 handler 层测试(覆盖缺口,已补)。** 原先只测了 `renewLimiter` 的单元逻辑,没验证接线。AC6 的字面要求是"单节点连续 11 次 `/renew`(合法 CSR),第 11 次起 429"。已补 `renewlimit_handler_test.go`:走真实 mTLS + 真实 CSR,断言前 10 次 200、第 11 次 429 且带合法 `Retry-After`、被拒请求**不签发证书**(证书行数不变)、且留下 `rate_limited` 审计。
+
+**已用"临时回退→确认变红→恢复"验证过的测试**(证明不是永远绿的断言):R9.1 双写(还顺带暴露旧行为会吐一个全零 node 对象)、R1 trustForwarded 接线、R3 写等待永久阻塞、R5 节流(未节流 600 次 vs 节流后 ≤9 次)、R6 错误分级。
+
+**记为后续项(不在本任务范围)**:`audit.go:61` 的 `redactResource` 也是字节截断,但它截的是 ASCII 标识符(access key / fingerprint),且属既有代码、不在本任务改动面内,未扩大范围去动。
+
 ## D6 不改的东西(明确边界)
 
 - 不动 `pkg/controlproto/`、`pkg/nodeagent/`、`cmd/node/`。

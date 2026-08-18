@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"gorm.io/gorm"
@@ -513,13 +514,15 @@ func (s *TransportServer) handleHeartbeat(ctx context.Context, conn *AgentConn, 
 	}
 	// 内存态(Hub 的 LastSeen)每帧都已由 readEnvelope 刷新;这里只决定是否落库。
 	// 狂发心跳时每帧一次 upsert(还带 busy 重试)会把 DB 写放大成拒绝服务面。
-	if conn.shouldPersistHeartbeat(nowUTC(), s.heartbeatPersistInterval()) {
+	if now := nowUTC(); conn.shouldPersistHeartbeat(now, s.heartbeatPersistInterval()) {
 		if err := s.touchHeartbeat(conn.NodeID, hb); err != nil {
-			// 心跳落库失败按存储类错误处理:不拆连接,除非连续失败到阈值。
+			// 心跳落库失败按存储类错误处理:不拆连接,除非连续失败到阈值。时间戳不推进,
+			// 下一帧仍会尝试落库。
 			if failErr := s.noteStorageFailure(conn, "persist heartbeat", err); failErr != nil {
 				return failErr
 			}
 		} else {
+			conn.markHeartbeatPersisted(now)
 			conn.noteStorageSuccess()
 		}
 	}
@@ -802,6 +805,10 @@ func sanitizeReportedContentHash(hash string) string {
 }
 
 // sanitizeReportedText 是节点自报文本的公共消毒:去首尾空白、剥控制字符、按列宽截断。
+// 截断按 rune 边界而不是字节:直接切字节会在多字节字符中间断开,产出非法 UTF-8。
+// 那种值在 MySQL/Postgres 的 utf8mb4 列上会被拒收,落库失败又会计入控制连接的
+// 连续存储失败计数,把"一个脏值写不进去"放大成"节点反复掉线"。
+// 同文件的 safeReportedApplyError 处理同类文本时也是按 rune 截断,这里保持一致。
 func sanitizeReportedText(value string, maxBytes int) string {
 	value = strings.TrimSpace(value)
 	value = strings.Map(func(r rune) rune {
@@ -810,10 +817,19 @@ func sanitizeReportedText(value string, maxBytes int) string {
 		}
 		return r
 	}, value)
-	if len(value) > maxBytes {
-		value = value[:maxBytes]
+	if len(value) <= maxBytes {
+		return value
 	}
-	return value
+	// 按字节上限收敛到最后一个完整 rune:列宽是字节数,所以仍以字节计量,只是不切碎字符。
+	truncated := make([]byte, 0, maxBytes)
+	for _, r := range value {
+		encoded := utf8.RuneLen(r)
+		if encoded < 0 || len(truncated)+encoded > maxBytes {
+			break
+		}
+		truncated = utf8.AppendRune(truncated, r)
+	}
+	return string(truncated)
 }
 
 // upsertNodeState creates or updates the single node_status row for nodeID.
