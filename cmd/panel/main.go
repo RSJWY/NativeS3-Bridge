@@ -91,7 +91,7 @@ func main() {
 	creds := panel.NewPanelCredentialStore(gdb, cipher)
 	desired := panel.NewDesiredStateAuthority(gdb, cipher)
 	auditor := panel.NewAuditor(gdb)
-	tasks := panel.NewTaskOrchestrator(gdb, hub, panel.DefaultTaskTimeout)
+	tasks := panel.NewTaskOrchestrator(gdb, hub, cfg.TaskTimeout)
 	migration := panel.NewMigrationCoordinator(gdb, cipher, desired, auditor)
 
 	transport := panel.NewTransportServer(panel.TransportDeps{

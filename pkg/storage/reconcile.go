@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -18,7 +19,15 @@ type ReconcileReport struct {
 	orphanFullPaths []string
 }
 
+// ReconcileBucket 扫描单个桶目录并返回统计报告。它是 context-free 兼容入口,
+// 内部走 context.Background(),便于未接入 ctx 的现有调用方直接使用。
 func ReconcileBucket(root, bucket, metadataSuffix string) (ReconcileReport, error) {
+	return ReconcileBucketContext(context.Background(), root, bucket, metadataSuffix)
+}
+
+// ReconcileBucketContext 是 ReconcileBucket 的 context 版本,允许调用方在扫描
+// 过程中取消操作(例如 panel 下发的任务超时)。
+func ReconcileBucketContext(ctx context.Context, root, bucket, metadataSuffix string) (ReconcileReport, error) {
 	bucketPath, err := ResolveBucketPath(root, bucket)
 	if err != nil {
 		return ReconcileReport{}, err
@@ -34,7 +43,7 @@ func ReconcileBucket(root, bucket, metadataSuffix string) (ReconcileReport, erro
 		metadataSuffix = DefaultMetadataSuffix
 	}
 	report := ReconcileReport{Bucket: bucket}
-	err = walkBucket(bucketPath, metadataSuffix, &report)
+	err = walkBucket(ctx, bucketPath, metadataSuffix, &report)
 	return report, err
 }
 
@@ -42,6 +51,11 @@ func ReconcileBucket(root, bucket, metadataSuffix string) (ReconcileReport, erro
 // 遥测基线/重建的采集入口:逐个遍历根目录下的合法桶目录,复用 walkBucket 的
 // 排除规则(sidecar、.multipart、数据库文件),不做任何删除或记账变更。
 func ScanDataRoot(root, metadataSuffix string) (ReconcileReport, error) {
+	return ScanDataRootContext(context.Background(), root, metadataSuffix)
+}
+
+// ScanDataRootContext 是 ScanDataRoot 的 context 版本。
+func ScanDataRootContext(ctx context.Context, root, metadataSuffix string) (ReconcileReport, error) {
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return ReconcileReport{}, err
@@ -58,6 +72,9 @@ func ScanDataRoot(root, metadataSuffix string) (ReconcileReport, error) {
 		return ReconcileReport{}, err
 	}
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return ReconcileReport{}, ctx.Err()
+		}
 		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
@@ -66,7 +83,7 @@ func ScanDataRoot(root, metadataSuffix string) (ReconcileReport, error) {
 			continue
 		}
 		bucketReport := ReconcileReport{Bucket: entry.Name()}
-		if err := walkBucket(filepath.Join(rootAbs, entry.Name()), metadataSuffix, &bucketReport); err != nil {
+		if err := walkBucket(ctx, filepath.Join(rootAbs, entry.Name()), metadataSuffix, &bucketReport); err != nil {
 			return ReconcileReport{}, err
 		}
 		report.ObjectCount += bucketReport.ObjectCount
@@ -77,8 +94,12 @@ func ScanDataRoot(root, metadataSuffix string) (ReconcileReport, error) {
 
 // walkBucket 统计单个桶目录下的对象数与字节数,跳过元数据 sidecar、.multipart
 // 与数据库文件。ReconcileBucket 与 ScanDataRoot 共用它,保证两套口径一致。
-func walkBucket(bucketPath, metadataSuffix string, report *ReconcileReport) error {
+// 每轮 DirEntry 回调检查 ctx,支持可取消扫描。
+func walkBucket(ctx context.Context, bucketPath, metadataSuffix string, report *ReconcileReport) error {
 	err := filepath.WalkDir(bucketPath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if walkErr != nil {
 			return walkErr
 		}

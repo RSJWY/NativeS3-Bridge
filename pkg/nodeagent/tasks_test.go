@@ -3,6 +3,8 @@ package nodeagent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -94,5 +96,48 @@ func TestLogQueryHonorsCancelledContext(t *testing.T) {
 	result := runner.Run(ctx, controlproto.TaskPayload{TaskID: "cancelled", Type: controlproto.TaskLogQuery})
 	if result.State != controlproto.TaskStateFailed || result.Error != "log query cancelled" {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestStorageScanHonoursCancelledContext(t *testing.T) {
+	root := t.TempDir()
+	bucket := filepath.Join(root, "test-bucket")
+	if err := os.MkdirAll(bucket, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 创建足够多的文件让扫描不可能在取消前完成。
+	for i := 0; i < 1000; i++ {
+		if err := os.WriteFile(filepath.Join(bucket, "obj"+strings.Repeat("x", i%10)+"-"+strings.Repeat("0", 6)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runner := NewLocalTaskRunner(nil, nil, root, ".s3meta", nil)
+	result := runner.Run(ctx, controlproto.TaskPayload{
+		TaskID: "scan-cancel", Type: controlproto.TaskStorageScan,
+		Params: controlproto.TaskParams{Bucket: "test-bucket"},
+	})
+	if result.State != controlproto.TaskStateFailed || result.Error != "storage reconcile cancelled" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestTaskTimeoutClamp(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want time.Duration
+	}{
+		{0, defaultTaskTimeout},
+		{-1, defaultTaskTimeout},
+		{60000, 60 * time.Second},
+		{60000 * 15, maxTaskTimeout}, // 15min -> 10min
+	}
+	for _, tc := range cases {
+		got := taskTimeout(tc.in)
+		if got != tc.want {
+			t.Errorf("taskTimeout(%d) = %v, want %v", tc.in, got, tc.want)
+		}
 	}
 }

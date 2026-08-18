@@ -48,6 +48,9 @@ type PanelConfig struct {
 	// HeartbeatInterval / OfflineMultiplier tune node liveness accounting.
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
 	OfflineMultiplier int           `yaml:"offline_multiplier"`
+	// TaskTimeout bounds how long the panel waits for a task_result before giving
+	// up on a dispatched task. Default 60s; non-positive values fall back to default.
+	TaskTimeout time.Duration `yaml:"task_timeout"`
 }
 
 // AgentListenerConfig configures the node接入 listener. It always uses server
@@ -132,6 +135,9 @@ func (c *PanelConfig) applyDefaults() {
 	}
 	if c.OfflineMultiplier == 0 {
 		c.OfflineMultiplier = 3
+	}
+	if c.TaskTimeout <= 0 {
+		c.TaskTimeout = 60 * time.Second
 	}
 	if c.PKI.ClientCertTTL == 0 {
 		c.PKI.ClientCertTTL = 90 * 24 * time.Hour

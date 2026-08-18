@@ -3,6 +3,7 @@ package nodeagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -59,9 +60,9 @@ func (r *LocalTaskRunner) Run(ctx context.Context, task controlproto.TaskPayload
 	case controlproto.TaskLogQuery:
 		return r.runLogQuery(ctx, task, base)
 	case controlproto.TaskStorageScan:
-		return r.runStorageScan(task, base, false)
+		return r.runStorageScan(ctx, task, base, false)
 	case controlproto.TaskStorageReconcileApply:
-		return r.runStorageScan(task, base, true)
+		return r.runStorageScan(ctx, task, base, true)
 	default:
 		base.State = controlproto.TaskStateFailed
 		base.Error = fmt.Sprintf("unsupported task type %q", task.Type)
@@ -204,7 +205,7 @@ func failedTask(base controlproto.TaskResultPayload, message string) controlprot
 // Preview never mutates data; apply deletes orphan sidecars and updates bound
 // credential UsedBytes, exactly matching the webadmin reconcile semantics. Apply
 // is a high-risk write; idempotency is enforced by the caller via task_id.
-func (r *LocalTaskRunner) runStorageScan(task controlproto.TaskPayload, base controlproto.TaskResultPayload, apply bool) controlproto.TaskResultPayload {
+func (r *LocalTaskRunner) runStorageScan(ctx context.Context, task controlproto.TaskPayload, base controlproto.TaskResultPayload, apply bool) controlproto.TaskResultPayload {
 	bucket := strings.TrimSpace(task.Params.Bucket)
 	if bucket == "" {
 		base.State = controlproto.TaskStateFailed
@@ -216,8 +217,14 @@ func (r *LocalTaskRunner) runStorageScan(task controlproto.TaskPayload, base con
 		base.Error = "storage reconcile is not configured"
 		return base
 	}
-	report, err := storage.ReconcileBucket(r.dataRoot, bucket, r.metadataSuffix)
+	if err := ctx.Err(); err != nil {
+		return failedTask(base, "storage reconcile cancelled")
+	}
+	report, err := storage.ReconcileBucketContext(ctx, r.dataRoot, bucket, r.metadataSuffix)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return failedTask(base, "storage reconcile cancelled")
+		}
 		base.State = controlproto.TaskStateFailed
 		base.Error = err.Error()
 		return base
