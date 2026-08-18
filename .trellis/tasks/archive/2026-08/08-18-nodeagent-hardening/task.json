@@ -3,7 +3,7 @@
   "name": "nodeagent-hardening",
   "title": "NodeAgent 控制面连接加固",
   "description": "",
-  "status": "planning",
+  "status": "done",
   "dev_type": null,
   "scope": null,
   "package": null,
