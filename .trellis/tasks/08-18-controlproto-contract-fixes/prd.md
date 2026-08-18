@@ -38,8 +38,9 @@
 ### R3 node 执行 `timeout_ms`(M7)
 - R3.1 node 执行任务时以 `context.WithTimeout(serveCtx, time.Duration(TimeoutMS)×time.Millisecond)` 包裹;`TimeoutMS<=0` 视为不限(兼容不发该字段的假想对端,现网 panel 恒发 60000)。
 - R3.2 超时即中止任务并回 `task_result`(state=failed,error 含 "timeout");任务实现须响应 ctx 取消——`storage_scan`/`storage_reconcile_apply` 的 WalkDir 循环每轮迭代检查 `ctx.Err()`(reconcile 中断是部分生效、重跑可续,已在父任务确认安全)。
-- R3.3 保持同步执行模型(serve 循环内),**不做**任务异步化(那是另一个工程,超出本任务)。超时上限 60s 即 serve 循环最长阻塞时长,可接受。
-- R3.4 panel 侧不改:`expireTask` 60s 判终止语义不变;node 超时回包若晚于 panel 判超时,结果按既有守卫丢弃——这是正常竞态结局,两端日志各自说明即可。
+- R3.3 保持同步执行模型(serve 循环内),**不做**任务异步化(那是另一个工程,超出本任务)。超时上限即 serve 循环最长阻塞时长,默认 60s 可接受。
+- R3.4 panel 侧判终止语义不变(`expireTask` 按下发时的 timeout 判超时);node 超时回包若晚于 panel 判超时,结果按既有守卫丢弃——这是正常竞态结局,两端日志各自说明即可。
+- R3.5 panel 新增配置键 `task_timeout`(`time.Duration`,默认 60s,≤0 或缺省回落默认),接线 `cmd/panel/main.go` → adminserver deps → tasksRoute 的 `Dispatch` 调用点(`Dispatch` 本就接受 timeout 参数,`tasks.go:51-54` 非正数回落常量,此处只是改为注入配置值)。这是 C4 让 node 真正执行 `timeout_ms` 后给「合法长任务」(大桶全量扫描)留的出口。node 侧对 `timeout_ms` 设硬编码上界钳制 10 分钟:超出按上界执行并 Warn(防故障/恶意 panel 让任务无限占住 serve 循环)。
 
 ### R4 import_report 分页(M10,需协议 v2)
 - R4.1 `pkg/controlproto` 版本上限升到 v2(下限仍 v1);v2 新增消息类型 `import_report_chunk`,payload:`{request_id, seq, total, state_chunk}`(credentials/buckets/webhooks 分块携带,单块序列化后 ≤ 512 KiB)。
@@ -65,6 +66,7 @@
 - [ ] AC2 R1:node 心跳 60s + panel 默认配置,新 panel 下节点持续 online 不抖动;旧 node(不带字段)行为与升级前一致。
 - [ ] AC3 R2:模拟上报 15s 的节点握手后静默,~75s 内连接被回收;未上报节点静默不被回收。
 - [ ] AC4 R3:注入一个永远阻塞的假任务,60s 内被 ctx 中止并回 failed(timeout);reconcile 中途取消不 panic、不产生半写的 sidecar 状态(重跑可续)。
+- [ ] AC4b R3.5:panel.yaml 设 `task_timeout: 300s` → 下发的 `timeout_ms` = 300000,node 按 300s 执行;不设该键 → 60s,与升级前一致;panel 下发 `timeout_ms` > 10min 时 node 按 10min 执行并 Warn。
 - [ ] AC5 R4:v2 对端下构造 >1 MiB 的导入数据,分块传输成功落库,连接不断;重组超上限/超时拒绝并日志。
 - [ ] AC6 R5 三组合:新node+旧panel、旧node+新panel、新node+新panel 各自的握手与心跳/任务/导入路径测试通过(v1/v2 协商可用 test 双端直接构造)。
 - [ ] AC7 `git diff` 中 `pkg/controlproto/` 的变更仅为:HelloPayload 加可选字段、新增 chunk 消息类型、版本上限提升——**既有字段零改动**。

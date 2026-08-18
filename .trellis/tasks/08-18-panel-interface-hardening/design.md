@@ -32,6 +32,7 @@ case <-ctx.Done():
 - 先核实:`dashboard.go`、`logs.go` 是否有 SSE/流式端点。若有流式 **GET**(无 body),`ReadTimeout` 不影响(ReadTimeout 只管到 body 读完),安全;若有长 body 上传型端点(如导入),需单独核算。
 - 取值:`ReadTimeout: 30s`、`IdleTimeout: 120s`,硬编码,与既有 `ReadHeaderTimeout: 10s` 风格一致。
 - 不设 `WriteTimeout`(仪表盘首屏在大数据量下可能慢)。
+- **决策记录(2026-08-18 评审)**:这两个超时**不做成配置项**。理由:admin JSON body 上限 1 MiB,30s 对任何真实网络都富余;管理面按文档推荐挂在反代后时,代理与面板同机/同内网,不存在需要调优的慢链路场景。实施者不要临时起意加配置键——本批修复的新增配置键全集固定为 `allow_insecure_transport`(C1)、`trust_forwarded`(C2)、`task_timeout`(C4),见父任务 PRD 红线。
 
 ## D4 `/renew` 限频(R7)的选型
 

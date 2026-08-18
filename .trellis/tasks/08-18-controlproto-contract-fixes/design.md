@@ -40,6 +40,8 @@ type ImportReportChunkPayload struct {
 - 三个 task 实现逐个加 ctx 检查:scan/reconcile 的 WalkDir 回调里 `if ctx.Err() != nil { return ctx.Err() }`;log_query 本来有界,检查入口即可。
 - 超时后回 failed 结果;**注意幂等台账**:超时失败的任务**不落** applied_tasks(它不是成功执行),重发的新 task_id 可正常执行。核对现有代码在失败时是否落台账,保持「只记成功」语义。
 
+**`task_timeout` 配置键(R3.5)的接线链路与默认值论证**:`PanelConfig` 根部(与 `heartbeat_interval` 并列)加 `TaskTimeout time.Duration \`yaml:"task_timeout"\``;`applyDefaults` 里 `<=0` 时填 `60s`(= 既有常量 `DefaultTaskTimeout`,存量部署零变化)。接线:`cmd/panel/main.go` 读配置 → adminserver deps → tasksRoute 持有该值,调 `Dispatch` 时传入。`DefaultTaskTimeout` 常量保留作为默认值来源,不删。node 侧钳制上界 10min 硬编码于 nodeagent,不设配置键(防故障 panel 的参数,不是运维旋钮)。
+
 ## D5 读超时回收的实现(R2)
 
 - coder/websocket 无内建读 deadline;用 `ws.SetReadLimit` 同款思路不行。**方案**:serve 循环每次 Read 前 `ctx, cancel := context.WithTimeout(serveCtx, deadline)`,Read 返回后 cancel 换下轮;或看门狗 goroutine(与 C3 node 侧 D3 对称)。二选一,倾向看门狗(与 C3 一致的机制,审阅者心智负担小)。

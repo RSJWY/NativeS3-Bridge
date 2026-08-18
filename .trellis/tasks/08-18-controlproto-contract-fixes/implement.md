@@ -25,11 +25,12 @@ grep -rn "DisallowUnknownFields" pkg/controlproto/ pkg/panel/transport.go pkg/no
 2. 测试:上报节点静默被回收;未上报不回收。
 - 验证:`go test -race ./pkg/panel/ -run 'TestTransport'`
 
-### Step 3 R3 node 执行 timeout_ms
-1. handleTask 包 WithTimeout;三个 task 实现响应 ctx(design D4)。
+### Step 3 R3 node 执行 timeout_ms + panel task_timeout 配置键
+1. handleTask 包 WithTimeout;三个 task 实现响应 ctx(design D4);node 侧钳制 `timeout_ms` 上界 10min,超出 Warn 按上界执行。
 2. 核对台账「只记成功」语义,超时失败不落台账。
-3. 测试:假任务 60s 内被中止回 failed;reconcile 取消安全。
-- 验证:`go test -race ./pkg/nodeagent/ -run 'TestTask|TestReconcile'`
+3. `PanelConfig` 加 `task_timeout`(默认 60s,design D4),接线 `cmd/panel/main.go` → adminserver → tasksRoute 的 Dispatch 调用点;`configs/panel.example.yaml` 加注释键。
+4. 测试:假任务 60s 内被中止回 failed;reconcile 取消安全;显式 `task_timeout: 300s` 时下发 `timeout_ms=300000`;缺省 = 60s;超限钳制生效。
+- 验证:`go test -race ./pkg/nodeagent/ ./pkg/config/ ./pkg/panel/ -run 'TestTask|TestReconcile|TestConfig|TestDispatch'`
 
 ### Step 4 R4 版本 v2 + import_report 分页
 1. `version.go` MaxSupported=2 + 能力注释。
