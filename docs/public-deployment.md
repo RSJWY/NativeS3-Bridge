@@ -23,6 +23,9 @@ node ──outbound mTLS──▶ panel agent listener :9443
 - 管理后台公网访问不要只依赖单密码。建议启用 TOTP 和 captcha。
 - `admin_addr` 尽量绑定内网地址，公网只通过反向代理访问。
 - `trust_forwarded` 只在可信代理覆盖转发头时启用。
+  - panel 的管理面开关是 **顶层** `trust_forwarded`（`configs/panel.example.yaml`），不是单体版的 `rate_limit.trust_forwarded`——panel 没有 S3 数据面，该键只决定登录失败锁定按谁的 IP 计数。默认 `false`。
+  - 不开启时按 TCP 来源地址计数：管理面在反代之后时，所有登录尝试都会算到反代这一个 IP 上，锁定会波及全部管理员。挂了反代就应当开启。
+  - 取值口径是 `X-Forwarded-For` 的**最后一段**，与下面示例里 `$proxy_add_x_forwarded_for`（追加模式）配套：客户端伪造的值留在左侧被忽略，最右一段由反代写入。因此**不要**把反代改成只透传客户端原值，那样伪造的 IP 会被采信，登录失败锁定形同虚设。
 - 业务直链优先使用 private bucket + 短 TTL presigned URL。
 - `public-read` 只用于明确对所有知道 URL 的人公开的对象。
 - panel 的 9443 端口只用于 node 注册和控制面连接，应使用正确的服务端证书并限制无关来源。

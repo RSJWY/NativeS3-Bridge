@@ -20,6 +20,13 @@ type PanelConfig struct {
 	AdminAddr string     `yaml:"admin_addr"`
 	AdminTLS  *TLSConfig `yaml:"admin_tls"`
 
+	// TrustForwarded 决定管理面是否采信 X-Forwarded-For 作为客户端 IP(登录限流与
+	// 审计的计数口径)。默认 false:只有当管理面确实挂在会**覆写**该头的受信反代之后
+	// 才可开启,否则任何人都能伪造来源 IP 绕过登录失败锁定。
+	// 单体版的同名开关在 rate_limit 段(那里还兼管 S3 数据面限流);panel 没有数据面,
+	// 因此该键与 admin_addr / admin_tls 同层,只描述管理面入口。
+	TrustForwarded bool `yaml:"trust_forwarded"`
+
 	// Agent is the node control-plane listener config (mTLS WebSocket + one-shot
 	// registration endpoint). Physically separate from AdminAddr so certificate
 	// and firewall policy differ per surface (design §1.3).

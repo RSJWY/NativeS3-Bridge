@@ -31,7 +31,11 @@ type updateNodeBucketACLRequest struct {
 }
 
 func (a *AdminAPI) bucketsRoute(w http.ResponseWriter, r *http.Request, nodeID uint, rest []string) {
-	if _, ok := a.loadNode(w, nodeID); !ok {
+	node, ok := a.loadNode(w, nodeID)
+	if !ok {
+		return
+	}
+	if a.rejectRetiredWrite(w, node, r.Method) {
 		return
 	}
 	if len(rest) == 0 {
@@ -211,7 +215,11 @@ type updateNodeWebhookRequest struct {
 }
 
 func (a *AdminAPI) webhooksRoute(w http.ResponseWriter, r *http.Request, nodeID uint, rest []string) {
-	if _, ok := a.loadNode(w, nodeID); !ok {
+	node, ok := a.loadNode(w, nodeID)
+	if !ok {
+		return
+	}
+	if a.rejectRetiredWrite(w, node, r.Method) {
 		return
 	}
 	if len(rest) == 0 {
@@ -435,7 +443,11 @@ func (a *AdminAPI) rateLimitRoute(w http.ResponseWriter, r *http.Request, nodeID
 		writeTransportError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if _, ok := a.loadNode(w, nodeID); !ok {
+	node, ok := a.loadNode(w, nodeID)
+	if !ok {
+		return
+	}
+	if a.rejectRetiredWrite(w, node, r.Method) {
 		return
 	}
 	switch r.Method {

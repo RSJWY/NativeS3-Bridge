@@ -49,6 +49,9 @@ func NewAdminServer(deps AdminServerDeps) (*AdminServer, error) {
 	webCfg := deps.Config.WebAdmin
 	effectiveTLS := deps.Config.EffectiveAdminTLS()
 	authenticator := webadmin.NewAuthForServiceMode(webCfg, webadmin.ServiceModePanel, effectiveTLS.Enabled)
+	// 登录限流/锁定按客户端 IP 计数。默认取 RemoteAddr;只有显式声明管理面在受信
+	// 反代之后(会覆写 X-Forwarded-For)时才采信该头,否则伪造来源 IP 即可绕过锁定。
+	authenticator.SetTrustForwarded(deps.Config.TrustForwarded)
 
 	mux := http.NewServeMux()
 	adminAPI := NewAdminAPI(deps.DB, deps.Hub, deps.Creds, deps.Desired, deps.Tasks, deps.Transport, deps.Migration, deps.Audit)
@@ -76,6 +79,13 @@ func NewAdminServer(deps AdminServerDeps) (*AdminServer, error) {
 			Addr:              deps.Config.AdminAddr,
 			Handler:           mux,
 			ReadHeaderTimeout: 10 * time.Second,
+			// 慢速 body 会一直占着连接:管理面最大请求体只有 1 MiB(见 decodeAdminJSON),
+			// 30s 对任何真实链路都富余。IdleTimeout 回收 keep-alive 空闲连接。
+			// 这里安全地不需要 per-handler 豁免:管理面没有 SSE/流式端点,节点控制面的
+			// WebSocket 长连接跑在 cmd/panel 里另一个 http.Server 上,不受此影响。
+			// 不设 WriteTimeout:仪表盘在大数据量下的正常响应不能被误杀。
+			ReadTimeout: 30 * time.Second,
+			IdleTimeout: 120 * time.Second,
 		},
 		tls: effectiveTLS,
 	}, nil

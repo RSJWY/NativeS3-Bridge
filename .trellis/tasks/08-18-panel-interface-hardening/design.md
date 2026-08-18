@@ -29,7 +29,14 @@ case <-ctx.Done():
 
 ## D3 管理面超时(R2)的取值与豁免
 
-- 先核实:`dashboard.go`、`logs.go` 是否有 SSE/流式端点。若有流式 **GET**(无 body),`ReadTimeout` 不影响(ReadTimeout 只管到 body 读完),安全;若有长 body 上传型端点(如导入),需单独核算。
+**核实结论(2026-08-18,R2.2 前置已完成,可直接实施)**:
+
+1. **两个 server 物理隔离**:管理面是 `pkg/panel/adminserver.go:75` 的 `http.Server`;节点控制面是 `cmd/panel/main.go:134` 的**另一个** `http.Server`。`grep websocket` 命中全部落在 `pkg/panel/transport.go` / `agentconn.go`,即只挂在控制面 server 上。给管理 server 加超时对节点 websocket 长连接**零影响**。
+2. **管理面无流式端点**:`grep 'Flush()|text/event-stream|Hijack|http.Flusher' pkg/panel pkg/webadmin` 在 `pkg/webadmin` 零命中。唯一像流式的 `/api/admin/logs` 走 `LogsViewer.ServeHTTP`(`pkg/webadmin/logs.go:63`),是一次性 JSON 快照的 GET,不是 SSE。
+3. **最大 body 已有硬上限**:管理面唯一的大 body 入口是 `pkg/panel/adminapi.go:995` 的 `io.LimitReader(r.Body, 1<<20)` = 1 MiB。30s 读完 1 MiB 对任何真实链路都富余。
+
+结论:`ReadTimeout` 无需任何 per-handler 豁免,直接加在 server 上即可。
+
 - 取值:`ReadTimeout: 30s`、`IdleTimeout: 120s`,硬编码,与既有 `ReadHeaderTimeout: 10s` 风格一致。
 - 不设 `WriteTimeout`(仪表盘首屏在大数据量下可能慢)。
 - **决策记录(2026-08-18 评审)**:这两个超时**不做成配置项**。理由:admin JSON body 上限 1 MiB,30s 对任何真实网络都富余;管理面按文档推荐挂在反代后时,代理与面板同机/同内网,不存在需要调优的慢链路场景。实施者不要临时起意加配置键——本批修复的新增配置键全集固定为 `allow_insecure_transport`(C1)、`trust_forwarded`(C2)、`task_timeout`(C4),见父任务 PRD 红线。
@@ -41,6 +48,20 @@ case <-ctx.Done():
 ## D5 瞬时错误分级(R6)的判定方式
 
 `handleTaskResult`/ack 回调返回的 error 目前无法区分「DB 瞬时」与「协议错误」。**决策**:在回调内部就把存储错误消化掉(打 Error 日志 + 计数,返回 nil),而不是在 serve 里分类 error——回调最知道错因。连续失败计数挂在 agentConn 上,≥5 次时由回调返回一个哨兵错误触发断连。协议解析错误维持原路径(返回非 nil → 断连)。
+
+## D7 R9.5 退役节点:拒写但保留只读(实施期补充决策,2026-08-18)
+
+PRD R9.5 字面写「credentials/buckets/webhooks/rate-limit 路由对已退役节点返回 409」。实施时发现这四条路由是 **GET 与写操作混在同一入口**,若整条路由 409,管理员将再也看不到退役节点的历史凭证/桶/webhook 列表——而 `retireNode` 的设计原意明确是「node 行保留用于审计关系」。整条 409 会直接摧毁这个审计可见性。
+
+**决策**:只拒绝写方法(POST/PATCH/PUT/DELETE)返回 409,GET 保持 200。这满足 PRD 要修的真实缺陷(「退役节点仍可建 credential/bucket/webhook 草稿」——草稿永远下发不出去),同时不牺牲审计追溯。实现为 `adminapi.go` 的共用 helper `rejectRetiredWrite`,四条路由统一调用,语义与 `updateNode:226`、`issueToken` 的既有 409 对齐。
+
+## D8 R1 `trust_forwarded` 的落键位置(实施期补充决策,2026-08-18)
+
+PRD R1.1 写「`PanelConfig` 的 **webadmin 段**新增 `trust_forwarded`」。实施时发现 `webadmin:` 段映射的 `config.WebAdminConfig` 是**单体版与 panel 共用**的类型:往里加字段会让单体版的 `webadmin.trust_forwarded` 也变成一个可写但**无人读取**的键(单体版真正生效的是 `rate_limit.trust_forwarded`,见 `config.go:123`),这是比"放哪个段"严重得多的配置陷阱。
+
+**决策**:落在 `PanelConfig` **顶层**,与 `admin_addr` / `admin_tls` 同层——三者都描述管理面入口属性,而 panel 没有 `rate_limit` 段可归。共用类型 `WebAdminConfig` 不动,单体版零影响。键名仍是 `trust_forwarded`,不算新增第四个配置键(仍在父任务冻结的键集内)。
+
+配套发现:`webadmin.clientIP`(`net.go:9`)取 `X-Forwarded-For` 的**最右**一段,与 `docs/public-deployment.md` 里 nginx 示例的 `$proxy_add_x_forwarded_for`(追加模式)正好配套安全——客户端伪造的值留在左侧被忽略。文档已补该口径说明,避免运维误改成"只透传客户端原值"而使锁定失效。
 
 ## D6 不改的东西(明确边界)
 

@@ -79,3 +79,42 @@ webadmin:
 		t.Fatalf("panel session secret error = %v, want it to name the field and give the generate command", err)
 	}
 }
+
+// R1(AC8):trust_forwarded 是安全敏感开关,未配置时必须是 false——存量 panel.yaml
+// 不写该键,升级后行为必须与升级前完全一致(按 TCP 来源地址计数登录失败)。
+// 单体版有同名守护(见 config_test.go 对 rate_limit.trust_forwarded 的断言)。
+func TestPanelTrustForwardedDefaultsToFalse(t *testing.T) {
+	cfg, err := LoadPanel(writePanelConfig(t, ""))
+	if err != nil {
+		t.Fatalf("load panel config: %v", err)
+	}
+	if cfg.TrustForwarded {
+		t.Fatal("trust_forwarded must default to false; enabling it by default lets anyone spoof the client IP")
+	}
+
+	// 显式开启要能生效(该键位于顶层,与 admin_addr / admin_tls 同层)。
+	path := filepath.Join(t.TempDir(), "panel-trust.yaml")
+	body := `
+trust_forwarded: true
+database: {driver: sqlite, dsn: ./panel.db}
+master_key_file: /data/secrets/master.key
+pki:
+  intermediate_cert_file: /data/pki/intermediate-ca.crt
+  intermediate_key_file: /data/pki/intermediate-ca.key
+agent:
+  cert_file: /data/pki/panel-server.crt
+  key_file: /data/pki/panel-server.key
+webadmin:
+  session_secret: "` + validTestSessionSecret + `"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = LoadPanel(path)
+	if err != nil {
+		t.Fatalf("load panel config with trust_forwarded: %v", err)
+	}
+	if !cfg.TrustForwarded {
+		t.Fatal("explicit trust_forwarded: true was not honoured")
+	}
+}

@@ -88,6 +88,13 @@ func NewAuthForServiceMode(cfg config.WebAdminConfig, serviceMode ServiceMode, s
 	return newAuth(cfg, serviceMode, secureCookie...)
 }
 
+// SetTrustForwarded 决定 clientIP 是否采信 X-Forwarded-For。单体版在本包内直接
+// 赋值(server.go),panel 在包外组装认证栈,需要这个入口。必须在开始处理请求前
+// 调用(构造后立即),之后该值只被读取。
+func (a *Auth) SetTrustForwarded(trust bool) {
+	a.trustForwarded = trust
+}
+
 func newAuth(cfg config.WebAdminConfig, serviceMode ServiceMode, secureCookie ...bool) *Auth {
 	ttl := time.Duration(cfg.SessionTTLMinutes) * time.Minute
 	if ttl <= 0 {

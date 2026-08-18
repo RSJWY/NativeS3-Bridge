@@ -148,6 +148,11 @@ func (a *AdminAPI) NodeByID(w http.ResponseWriter, r *http.Request) {
 	// /api/admin/nodes/{id}/{sub...}
 	switch segments[1] {
 	case "tokens":
+		// tokens 没有子资源:多余路径段(如 tokens/extra)必须 404,不能被当成签发请求。
+		if len(segments) != 2 {
+			writeTransportError(w, http.StatusNotFound, "not found")
+			return
+		}
 		a.issueToken(w, r, id)
 	case "credentials":
 		a.credentialsRoute(w, r, id, segments[2:])
@@ -268,7 +273,12 @@ func (a *AdminAPI) updateNode(w http.ResponseWriter, r *http.Request, id uint) {
 			}
 		}
 	}
-	node, _ = a.loadNode(w, id)
+	// 重新读取以返回最新状态。这里必须尊重 ok:loadNode 失败时它已经写过
+	// 404/500 响应,继续写 200 会造成同一请求双写响应体。
+	node, ok = a.loadNode(w, id)
+	if !ok {
+		return
+	}
 	writeTransportJSON(w, http.StatusOK, a.nodeToResponse(node))
 }
 
@@ -304,7 +314,11 @@ func (a *AdminAPI) retireNode(w http.ResponseWriter, _ *http.Request, id uint) {
 		conn.close("node retired")
 	}
 	a.audit.Write(AuditEntry{Action: "node_retire", TargetNode: id, Result: "retired", Source: a.adminIdentity})
-	node, _ = a.loadNode(w, id)
+	// 同 updateNode:重新读取时必须尊重 ok,否则会在已写出的错误响应后再写 200。
+	node, ok = a.loadNode(w, id)
+	if !ok {
+		return
+	}
 	writeTransportJSON(w, http.StatusOK, a.nodeToResponse(node))
 }
 
@@ -417,6 +431,11 @@ func certToResponse(cert NodeCert, now time.Time) certResponse {
 func (a *AdminAPI) certsRoute(w http.ResponseWriter, r *http.Request, id uint, rest []string) {
 	// /api/admin/nodes/{id}/certs           GET  -> list
 	// /api/admin/nodes/{id}/certs/revoke     POST -> revoke all node certs
+	// 与 credentials/buckets/tasks 等子路由一致:先确认节点存在,不存在返回 404,
+	// 而不是对着一个不存在的 node_id 返回空列表或"撤销 0 张"。
+	if _, ok := a.loadNode(w, id); !ok {
+		return
+	}
 	if len(rest) == 0 {
 		if r.Method != http.MethodGet {
 			writeTransportError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -435,7 +454,9 @@ func (a *AdminAPI) certsRoute(w http.ResponseWriter, r *http.Request, id uint, r
 		writeTransportJSON(w, http.StatusOK, items)
 		return
 	}
-	if rest[0] == "revoke" && r.Method == http.MethodPost {
+	// 精确匹配 certs/revoke:多余路径段(如 certs/revoke/extra)一律落到下面的 404,
+	// 不能被当成合法的撤销请求。
+	if len(rest) == 1 && rest[0] == "revoke" && r.Method == http.MethodPost {
 		n, err := RevokeNodeCerts(a.db, id, nowUTC())
 		if err != nil {
 			writeTransportError(w, http.StatusInternalServerError, "revoke certs failed")
@@ -475,7 +496,11 @@ type createCredentialRequest struct {
 func (a *AdminAPI) credentialsRoute(w http.ResponseWriter, r *http.Request, id uint, rest []string) {
 	// /api/admin/nodes/{id}/credentials                 GET (list) / POST (create)
 	// /api/admin/nodes/{id}/credentials/{ak}/rotate      POST
-	if _, ok := a.loadNode(w, id); !ok {
+	node, ok := a.loadNode(w, id)
+	if !ok {
+		return
+	}
+	if a.rejectRetiredWrite(w, node, r.Method) {
 		return
 	}
 	if len(rest) == 0 {
@@ -706,7 +731,11 @@ func (a *AdminAPI) pushDesiredState(w http.ResponseWriter, r *http.Request, id u
 		return
 	}
 	if err := a.transport.PushDesiredState(r.Context(), id); err != nil {
-		if errors.Is(err, ErrAuthoritativeConfigCapabilityRequired) || errors.Is(err, ErrDesiredSnapshotRepublishRequired) {
+		// 这三类都是"当前已发布快照的状态不允许推送"的冲突语义,不是服务端故障:
+		// 哈希校验失败同样要管理员重新发布,归 409 而不是 500。
+		if errors.Is(err, ErrAuthoritativeConfigCapabilityRequired) ||
+			errors.Is(err, ErrDesiredSnapshotRepublishRequired) ||
+			errors.Is(err, ErrDesiredSnapshotHashMismatch) {
 			writeTransportError(w, http.StatusConflict, desiredPushAdminMessage(err))
 			return
 		}
@@ -937,6 +966,17 @@ func (a *AdminAPI) loadNode(w http.ResponseWriter, id uint) (Node, bool) {
 		return Node{}, false
 	}
 	return node, true
+}
+
+// rejectRetiredWrite 对已退役节点的写操作写出 409 并返回 true(调用方应立即 return)。
+// 退役是不可逆终态:节点行与其子资源保留只读可见性供审计追溯,但不再接受任何写入,
+// 否则会产生永远不可能下发到节点的"草稿"。语义对齐 updateNode 与 issueToken。
+func (a *AdminAPI) rejectRetiredWrite(w http.ResponseWriter, node Node, method string) bool {
+	if node.Status != NodeStatusRetired || method == http.MethodGet {
+		return false
+	}
+	writeTransportError(w, http.StatusConflict, "node is retired")
+	return true
 }
 
 func (a *AdminAPI) nodeToResponse(n Node) nodeResponse {
