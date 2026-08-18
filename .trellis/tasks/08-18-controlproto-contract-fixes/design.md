@@ -1,60 +1,73 @@
 # 控制协议契约修复 — 技术设计
 
-> 对应 `prd.md`。本任务全部复杂度集中在「协议演进不破坏混跑」,设计围绕此展开。
+> 对应 `prd.md`。**2026-08-18 部署策略已裁决:panel 与 node 同步升级,不做新旧混跑兼容。** 因此本设计不再围绕"双轨兼容"展开,而是把复杂度转移到"部署纪律";对恶意/故障对端的防护(钳制、上限)保持不变。
 
-## D1 心跳协商的字段与存储(R1)
+## D1 心跳间隔协商的字段与存储(R1)
 
-- `HelloPayload` 加 `HeartbeatIntervalMS int \`json:"heartbeat_interval_ms,omitempty"\``。omitempty 保证旧字段集序列化结果不变。
-- panel 存储位置:`agentConn` 上加字段 + 随 `NodeState` 落库(heartbeat 路径已写库,捎带一列即可——**注意:若 NodeState 落库需要新增 DB 列则违反父任务红线,此时改为只存内存,SweepOffline 读内存值,节点断连后该次会话的阈值随连接消亡,可接受**)。实施者先查 `NodeState` 模型与 migrate 注册表,确认是否已有可复用列;没有就内存方案,不加列。
-- `SweepOffline` 改造:遍历在线连接时逐节点用各自阈值;DB 兜底路径对未上报节点用 panel 默认阈值。
+- `HelloPayload` 加 `HeartbeatIntervalMS int \`json:"heartbeat_interval_ms"\``。**同步升级下该字段必填**,缺省/为 0 按协议违规处理,走 R1.3 非法值回落路径。
+- panel 侧存储:连接级存 `AgentConn.HeartbeatInterval`;不新增 DB 列(`NodeState` 表已有 `last_heartbeat`,阈值只影响内存判定与读超时)。
+- 阈值口径统一为 `heartbeat_interval × offline_multiplier`,不再保留"按 panel 本地配置"的第二套口径。
+- `SweepOffline` 改造:优先读 Hub 在线连接上的 `HeartbeatInterval`,DB 兜底路径对无连接节点使用 panel 默认阈值(与混跑期无关,只是断连后的展示兜底)。
+- 非法值钳制:`<1s` 或 `>10min` 拒绝,记 Warn 并回落到 panel 配置间隔。
 
-## D2 版本协商升 v2 的机制(R4)
+## D2 版本协商升 v2 与快速失败(R4/R5)
 
-`version.go` 现状:`MinSupported=1, MaxSupported=1`。改为 `MaxSupported=2`。`NegotiateVersion` 取 min(两端 Max),只要 ≥ Min 即兼容——旧端 Max=1,自动协商出 1。无需新增握手往返。
-
-**能力表**(放在 version.go 注释):v1 = 基础集;v2 = v1 + import_report_chunk。心跳协商字段(R1)不设版本门控:可选字段天然安全,旧端忽略即可。
+- `controlproto` 常量改为 `ProtocolVersion = 2`、`MinCompatibleVersion = 2`。上下限同时升 v2,**不再保留 v1 支持**。
+- `NegotiateVersion` 行为不变(取 min 后校验范围),但任一侧为 v1 时结果低于 MinCompatibleVersion,返回错误。
+- 握手时版本不匹配即发送 `ErrorPayload{Code: ErrCodeVersionIncompatible, Fatal: true}` 并断连;两侧日志必须打印本端与对端版本以及"需同步升级"提示。
+- node 侧收到 Fatal error 后让 `connectAndServe` 返回错误,`Run` 按既有退避重连。
 
 ## D3 import_report 分块格式(R4)
 
 ```go
 type ImportReportChunkPayload struct {
-    RequestID string                       `json:"request_id"`
-    Seq       int                          `json:"seq"`
-    Total     int                          `json:"total"`
-    // 每块只带一类资源的一段;三类资源分别编号到同一个 total
-    Credentials []CredentialImportItem    `json:"credentials,omitempty"`
-    Buckets     []BucketImportItem        `json:"buckets,omitempty"`
-    Webhooks    []WebhookImportItem       `json:"webhooks,omitempty"`
+    RequestID string `json:"request_id"`
+    Seq       int    `json:"seq"`
+    Total     int    `json:"total"`
+    // 每块携带完整 DesiredState 中的一个片段;三类资源用同一 Seq/Total 编号空间
+    Credentials []controlproto.DesiredCredential `json:"credentials,omitempty"`
+    Buckets     []controlproto.DesiredBucket     `json:"buckets,omitempty"`
+    Webhooks    []controlproto.DesiredWebhook    `json:"webhooks,omitempty"`
 }
 ```
 
-(具体类型名以 payloads.go 现有 import 相关结构为准,上面是示意。)
-
-- 分块策略:按「序列化后 ≤ 512 KiB」累积条目切块;seq 从 0,total 预先算出(panel 重组需要总数)。
-- request_id 复用触发帧的 envelope ID,与现有 `import_report` 的对应关系一致。
-- panel 重组器:`map[requestID]*重组态`,挂在 agentConn 上,连接断开即清理;每请求上限 32 块、5 分钟超时(设计值,实现可微调)。
+- 分块策略:node 侧按「序列化后 ≤ 512 KiB」累积条目切块;seq 从 0 开始,total 预先算出。
+- request_id 复用触发帧的 envelope ID。
+- panel 重组器:挂在 `AgentConn` 上,连接断开即清理。上限 32 块 / 16 MiB / 5 分钟,任一超限丢弃并断连。
+- **v2 唯一形态**:node 恒用分页,不保留单帧回退分支;旧单帧 `import_report` 接收路径删除。
 
 ## D4 timeout_ms 的取消传导(R3)
 
-- `handleTask`:`taskCtx, cancel := context.WithTimeout(ctx, ...)`,传入 `LocalTaskRunner.Run`。
-- 三个 task 实现逐个加 ctx 检查:scan/reconcile 的 WalkDir 回调里 `if ctx.Err() != nil { return ctx.Err() }`;log_query 本来有界,检查入口即可。
-- 超时后回 failed 结果;**注意幂等台账**:超时失败的任务**不落** applied_tasks(它不是成功执行),重发的新 task_id 可正常执行。核对现有代码在失败时是否落台账,保持「只记成功」语义。
+- `handleTask`:`taskCtx, cancel := context.WithTimeout(ctx, timeout)`,传入 `LocalTaskRunner.Run`。
+- timeout 来源:取 `task.TimeoutMS`;`<=0` 视为协议违规,使用 60s 默认值并 Warn。
+- node 侧硬编码上界 10min:超出按 10min 执行并 Warn(防恶意/故障 panel 无限占住 serve 循环)。
+- 三个 task 实现响应 ctx:scan/reconcile 的 WalkDir 回调里检查 `ctx.Err()`;log_query 检查入口。
+- 超时后回 failed 结果;幂等台账只记成功,失败(含超时)不落 `applied_tasks`。
 
-**`task_timeout` 配置键(R3.5)的接线链路与默认值论证**:`PanelConfig` 根部(与 `heartbeat_interval` 并列)加 `TaskTimeout time.Duration \`yaml:"task_timeout"\``;`applyDefaults` 里 `<=0` 时填 `60s`(= 既有常量 `DefaultTaskTimeout`,存量部署零变化)。接线:`cmd/panel/main.go` 读配置 → adminserver deps → tasksRoute 持有该值,调 `Dispatch` 时传入。`DefaultTaskTimeout` 常量保留作为默认值来源,不删。node 侧钳制上界 10min 硬编码于 nodeagent,不设配置键(防故障 panel 的参数,不是运维旋钮)。
+## D5 panel `task_timeout` 配置键(R3.5)
 
-## D5 读超时回收的实现(R2)
+- `PanelConfig` 根部加 `TaskTimeout time.Duration \`yaml:"task_timeout"\``。
+- `applyDefaults` 里 `<=0` 时填 `60s`(`DefaultTaskTimeout`),存量部署零变化。
+- 接线:`cmd/panel/main.go` 读配置 → `adminserver deps` → `tasksRoute` 持有 → 调 `Dispatch` 时传入 `timeout`。
+- `DefaultTaskTimeout` 常量保留作为默认值来源。
 
-- coder/websocket 无内建读 deadline;用 `ws.SetReadLimit` 同款思路不行。**方案**:serve 循环每次 Read 前 `ctx, cancel := context.WithTimeout(serveCtx, deadline)`,Read 返回后 cancel 换下轮;或看门狗 goroutine(与 C3 node 侧 D3 对称)。二选一,倾向看门狗(与 C3 一致的机制,审阅者心智负担小)。
-- 仅对 `HeartbeatIntervalMS > 0` 的连接启用。
+## D6 静默连接回收(R2)
 
-## D6 测试策略
+- 方案:panel serve 循环每次 `readEnvelope` 前用 `context.WithTimeout(serveCtx, deadline)` 包裹,超时即关闭连接走既有断连清理。
+- deadline = `上报间隔 × offline_multiplier + 30s` 裕量。上报值非法而回落的,按回落后的间隔计算。
+- 同步升级后不存在"不上报间隔"的合法节点,**不再保留"不设读超时"的豁免分支**。
+- 回收只摘连接,DB online 状态仍由 `SweepOffline` 负责,两边不打架。
 
-- 版本混跑:测试里直接构造两个 `controlproto` 端点(而非起真实进程),分别钉死 MaxSupported=1/2,验证协商与能力开关。
-- 分块重组:构造 3 块乱序到达、重复块、缺块超时、超限 五个用例。
-- 心跳协商:钳制边界(0、500ms、11min)三例。
+## D7 测试策略
 
-## D7 不改的东西
+- 版本协商:v2 两端握手成功;构造 v1 对端(直接改 `ProtocolVersion`)验证握手失败、日志含版本与"需同步升级"。
+- 心跳协商:60s 心跳持续 online;非法值(0、1h)回落并 Warn。
+- 读超时回收:15s 上报节点静默约 75s 被回收;60s 上报节点约 210s 不被回收(用测试时钟注入或缩短倍数加速)。
+- timeout_ms:假阻塞任务 60s 内被 ctx 中止并回 failed;`task_timeout: 300s` 下发 300000ms;超限钳制生效。
+- import_report 分页:>1 MiB 数据分块落库成功;乱序到达重组;缺块超时/超块数/超字节上限拒绝。
 
-- 既有消息类型与字段零改动;v1 行为路径一行不动。
-- panel 对 v1 节点的 import 处理逻辑原样保留。
-- 不引入 heartbeat ping/pong 帧(看门狗已够,少一个新消息类型)。
+## D8 不改的东西
+
+- 既有消息类型与字段零改动(除新增字段/类型外)。
+- 不引入 heartbeat ping/pong 帧。
+- 不新增 DB 列/表/迁移。

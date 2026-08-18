@@ -3,7 +3,7 @@
   "name": "controlproto-contract-fixes",
   "title": "控制协议契约修复(超时/心跳协商/导入分页)",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
