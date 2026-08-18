@@ -258,6 +258,8 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 - Do not rely on `configs/config.sqlite.yaml` for admin login smoke unless it has a password configured. Use a temporary local config with `admin_bootstrap_password` for validation.
 - Do not commit built `dist/assets/*`; keep only `.gitkeep` tracked. Build artifacts are regenerated before embedding and are ignored by `.gitignore`.
 - Do not add sensitive or high-cardinality labels to `/metrics`; keep labels limited to bounded operational dimensions such as S3 operation names.
+- Do not default `trust_forwarded` to true, and do not add it to the shared `config.WebAdminConfig`. Trusting a forwarded header by default lets anyone spoof the client IP and walk past login lockout; putting it in the shared struct gives standalone a key that nothing reads.
+- Do not set `WriteTimeout` on the admin server (it kills legitimate large responses), and do not assume `ReadTimeout` is safe without re-checking that the admin surface still has no streaming endpoints.
 
 ## Scenario: Logs And Storage Reconcile Admin APIs
 
@@ -307,6 +309,7 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 
 - Standalone auth: `NewAuth(cfg, secureCookie...)`.
 - Explicit mode auth: `NewAuthForServiceMode(cfg, ServiceModePanel, secureCookie...)`.
+- Forwarded-IP trust (out-of-package wiring): `(*Auth).SetTrustForwarded(bool)`.
 - Public discovery endpoint: `GET /api/admin/auth-settings`.
 
 ### 3. Contracts
@@ -316,6 +319,13 @@ fmt.Fprintf(w, "natives3_buckets %d\n", bucketCount)
 - Panel admin servers construct auth with `ServiceModePanel`; mode is never inferred from request failures.
 - `/logs` is a shared authenticated route. Panel navigation labels it `Panel 日志`; standalone keeps `日志`. Dashboard, credential, and bucket pages remain standalone-only, while node pages remain Panel-only.
 - The field is additive and non-sensitive; password hashes, captcha secrets, session keys, and one-time tokens remain excluded.
+
+#### Client IP trust and admin listener timeouts
+
+- Login lockout counts per client IP, resolved by `clientIP(r, trustForwarded)`. Default is **off**: without an explicit opt-in, only `RemoteAddr` counts. Enabling it is a deployment assertion that a trusted proxy **overwrites** the header.
+- `clientIP` reads the **rightmost** `X-Forwarded-For` element, which pairs with nginx's `$proxy_add_x_forwarded_for` (append mode): a client-forged prefix stays on the left and is ignored. Never "simplify" this to the leftmost element or to passing the client value through — either turns lockout into a no-op, since a fresh forged IP per request buys unlimited attempts.
+- Standalone reads this from `rate_limit.trust_forwarded` (that section also governs the S3 data plane). Panel has no data plane, so its switch is **top-level** `trust_forwarded`, wired via `SetTrustForwarded`. Do not add the key to the shared `config.WebAdminConfig`: standalone would then accept a `webadmin.trust_forwarded` that nothing reads — a silent config trap.
+- Admin `http.Server` sets `ReadHeaderTimeout`, `ReadTimeout`, and `IdleTimeout`, but **not** `WriteTimeout` (a large dashboard response must not be killed mid-flight). `ReadTimeout` needs no per-handler exemption because the admin surface has no streaming endpoints and caps bodies at 1 MiB; the node control plane's WebSockets live on a **separate** `http.Server`. Re-verify both facts before adding a streaming admin endpoint — that is what would make a blanket `ReadTimeout` wrong.
 
 ### 4. Validation & Error Matrix
 
