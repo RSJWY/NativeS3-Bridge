@@ -53,6 +53,41 @@ type AgentConn struct {
 	// loop updates it and the offline sweeper reads it.
 	lastSeenMu sync.RWMutex
 	lastSeen   time.Time
+
+	// heartbeatMu 保护心跳落库节流与连续存储失败计数。两者都只由本连接的 serve
+	// 循环读写,加锁是为了对遥测/诊断类的旁路读取保持 race-free。
+	heartbeatMu sync.Mutex
+	// lastPersistedBeat 是本连接上次把心跳落库的时间(零值表示还没落过)。
+	lastPersistedBeat time.Time
+	// storageFailures 是连续存储失败次数;任何一次成功落库都会清零。
+	storageFailures int
+}
+
+// shouldPersistHeartbeat 判断本帧心跳是否应该落库,并在返回 true 时记下落库时间。
+// 正常 cadence 下每帧都会返回 true;狂发帧被压到每 minInterval 一次。
+func (c *AgentConn) shouldPersistHeartbeat(now time.Time, minInterval time.Duration) bool {
+	c.heartbeatMu.Lock()
+	defer c.heartbeatMu.Unlock()
+	if !c.lastPersistedBeat.IsZero() && now.Sub(c.lastPersistedBeat) < minInterval {
+		return false
+	}
+	c.lastPersistedBeat = now
+	return true
+}
+
+// noteStorageFailure 记一次存储失败并返回累计的连续失败次数。
+func (c *AgentConn) noteStorageFailure() int {
+	c.heartbeatMu.Lock()
+	defer c.heartbeatMu.Unlock()
+	c.storageFailures++
+	return c.storageFailures
+}
+
+// noteStorageSuccess 清零连续失败计数(阈值只针对"连续"失败)。
+func (c *AgentConn) noteStorageSuccess() {
+	c.heartbeatMu.Lock()
+	c.storageFailures = 0
+	c.heartbeatMu.Unlock()
 }
 
 func (c *AgentConn) Supports(capability string) bool {

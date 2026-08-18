@@ -101,6 +101,9 @@ func main() {
 		Cipher:        cipher,
 		ClientCTTL:    cfg.PKI.ClientCertTTL,
 		MigrationSink: migration,
+		// 心跳落库节流的阈值由这个 cadence 推导(interval/2),所以要用实际配置值:
+		// 否则调过 heartbeat_interval 的部署会按默认 15s 去节流。
+		HeartbeatInterval: cfg.HeartbeatInterval,
 		// On disconnect, mark any in-flight tasks unknown (no silent retry, §5.3).
 		OnDisconnected: func(conn *panel.AgentConn) { tasks.FailInFlightForConn(conn) },
 	})

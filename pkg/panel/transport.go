@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +34,23 @@ const (
 	nodeStateBusyRetryDelay  = 5 * time.Millisecond
 	// maxReportedRegionBytes 与 NodeState.Region 的列宽一致。
 	maxReportedRegionBytes = 64
+	// maxReportedContentHashBytes 与 NodeState.ContentHash 的列宽一致。节点自报的
+	// content_hash 与 region 同属"节点说了算"的自由文本,消毒策略也一致。
+	maxReportedContentHashBytes = 64
+	// maxConsecutiveStorageFailures 是同一条控制连接上容许的连续存储失败次数。
+	// 瞬时 DB 错误(锁竞争、临时不可用)不该拆掉整条连接,但一直写不进库的连接留着
+	// 也没意义:达到该次数即断开,让节点重连到一个健康的处理路径。
+	maxConsecutiveStorageFailures = 5
+	// renewWindow / maxRenewPerWindow 限制单个节点的证书续期频率。正常续期是每
+	// 90 天一次,这个量级只拦住异常循环:每次 /renew 都要 CA 签名并往 node_certs
+	// 插一行,不限频等于给了一个免费的 CPU + 表膨胀入口。
+	renewWindow      = time.Hour
+	maxRenewPerWindow = 10
 )
+
+// errPersistentStorageFailure 是连续存储失败达到阈值时的哨兵错误,用于让 serve
+// 循环走既有的断连路径。协议错误仍按原样返回,语义不变。
+var errPersistentStorageFailure = errors.New("persistent storage failure on control connection")
 
 var ErrAuthoritativeConfigCapabilityRequired = errors.New("agent upgrade required for authoritative config")
 
@@ -45,7 +63,10 @@ type TransportDeps struct {
 	Hub         *Hub
 	Cipher      *SecretCipher
 	ClientCTTL  time.Duration
-	OnConnected func(ctx context.Context, conn *AgentConn) // optional connection observer
+	// HeartbeatInterval 是节点心跳的期望 cadence(由 cmd/panel 从 PanelConfig 注入)。
+	// 只用来推导心跳落库的节流阈值,不是新配置键;零值时取 DefaultHeartbeatInterval。
+	HeartbeatInterval time.Duration
+	OnConnected       func(ctx context.Context, conn *AgentConn) // optional connection observer
 	// OnDisconnected fires when a serve loop ends (connection closed). It is used
 	// to fail any tasks still in flight on the dropped connection (design §5.3).
 	OnDisconnected func(conn *AgentConn)
@@ -71,8 +92,11 @@ type MigrationSink interface {
 // design runs registration behind tls.RequestClientCert / VerifyClientCertIfGiven
 // and enforces the mTLS requirement per-route in the handler rather than at the
 // listener. See cmd/panel for how the listener is configured.
+// TransportServer 承载节点控制面。renew 是唯一需要跨连接内存状态的路径(限频按
+// 节点身份计数,而 /renew 不在 WebSocket 连接上),因此计数器挂在这里。
 type TransportServer struct {
-	deps TransportDeps
+	deps  TransportDeps
+	renew *renewLimiter
 }
 
 // NewTransportServer builds the transport server from its dependencies.
@@ -80,7 +104,26 @@ func NewTransportServer(deps TransportDeps) *TransportServer {
 	if deps.ClientCTTL <= 0 {
 		deps.ClientCTTL = DefaultClientCertTTL
 	}
-	return &TransportServer{deps: deps}
+	if deps.HeartbeatInterval <= 0 {
+		deps.HeartbeatInterval = DefaultHeartbeatInterval
+	}
+	return &TransportServer{deps: deps, renew: newRenewLimiter()}
+}
+
+// heartbeatPersistInterval 是心跳落库的最小间隔。取心跳 cadence 的一半:正常
+// cadence 下每帧都满足条件(落库行为与加节流之前逐帧一致),只有远快于 cadence 的
+// 狂发帧才被压掉,DB 写频率上限 = 2/interval。
+//
+// 这个取值同时保证 SweepOffline 不会误判:它的离线阈值是
+// offline_multiplier * heartbeat_interval(默认 3 × 15s = 45s),而落库最多滞后
+// interval/2(默认 7.5s)。滞后量始终小于阈值的 1/6,活跃节点不可能因为被节流跳过
+// 一帧就被标 offline。因此 SweepOffline 的判定源保持不动(仍看 DB last_heartbeat)。
+func (s *TransportServer) heartbeatPersistInterval() time.Duration {
+	interval := s.deps.HeartbeatInterval
+	if interval <= 0 {
+		interval = DefaultHeartbeatInterval
+	}
+	return interval / 2
 }
 
 // Handler returns the HTTP handler exposing /register, /agent, and /renew.
@@ -171,6 +214,15 @@ func (s *TransportServer) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = fingerprint
+	// 限频放在解析 CSR 之前:超限时不该把 CPU 花在一个注定被拒的请求上。正常续期
+	// 是每 90 天一次,触发这里说明节点侧在异常循环(或身份被滥用)。
+	if retryAfter, ok := s.renew.allow(nodeID, nowUTC()); !ok {
+		s.audit("node_cert_renew", nodeID, "", "rate_limited")
+		slog.Warn("renew rate limit hit", "node", nodeID, "window", renewWindow, "limit", maxRenewPerWindow)
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+		writeTransportError(w, http.StatusTooManyRequests, "certificate renewal rate limit exceeded")
+		return
+	}
 	var req renewRequest
 	dec := json.NewDecoder(io.LimitReader(r.Body, registrationBodyLimit))
 	dec.DisallowUnknownFields()
@@ -459,7 +511,18 @@ func (s *TransportServer) handleHeartbeat(ctx context.Context, conn *AgentConn, 
 	if err := env.DecodePayload(&hb); err != nil {
 		return err
 	}
-	s.touchHeartbeat(conn.NodeID, hb)
+	// 内存态(Hub 的 LastSeen)每帧都已由 readEnvelope 刷新;这里只决定是否落库。
+	// 狂发心跳时每帧一次 upsert(还带 busy 重试)会把 DB 写放大成拒绝服务面。
+	if conn.shouldPersistHeartbeat(nowUTC(), s.heartbeatPersistInterval()) {
+		if err := s.touchHeartbeat(conn.NodeID, hb); err != nil {
+			// 心跳落库失败按存储类错误处理:不拆连接,除非连续失败到阈值。
+			if failErr := s.noteStorageFailure(conn, "persist heartbeat", err); failErr != nil {
+				return failErr
+			}
+		} else {
+			conn.noteStorageSuccess()
+		}
+	}
 	// ack 回写必须带超时:serve ctx 只在连接关闭时取消,拿它当写 ctx 会让一个
 	// "不读"的节点把心跳处理 goroutine 永久钉住。
 	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
@@ -487,12 +550,15 @@ func (s *TransportServer) handleAck(conn *AgentConn, env controlproto.Envelope) 
 		updates["last_error"] = safeReportedApplyError(ack.Error)
 	case controlproto.SyncStateSynced, controlproto.SyncStateDrift:
 		updates["applied_version"] = ack.Version
-		updates["content_hash"] = ack.ContentHash
+		// 与 hello 路径同口径:节点自报的 hash 消毒后落库(下面的一致性比较仍用原值,
+		// 合法的 64 位摘要不受消毒影响)。
+		updates["content_hash"] = sanitizeReportedContentHash(ack.ContentHash)
 		if ack.State == controlproto.SyncStateSynced {
 			var desired DesiredConfig
 			if err := s.deps.DB.Where("node_id = ?", conn.NodeID).First(&desired).Error; err != nil {
 				if !errors.Is(err, gorm.ErrRecordNotFound) {
-					return err
+					// 存储类错误:不拆连接,除非连续失败到阈值。
+					return s.noteStorageFailure(conn, "load desired config for ack", err)
 				}
 				updates["sync_state"] = SyncStateDrift
 				updates["last_error"] = "node reported a version with no published desired state"
@@ -502,11 +568,13 @@ func (s *TransportServer) handleAck(conn *AgentConn, env controlproto.Envelope) 
 			}
 		}
 	default:
+		// 协议错误:节点发了一个不存在的同步状态,断连语义不变。
 		return fmt.Errorf("invalid desired-state ack status %q", ack.State)
 	}
 	if err := s.upsertNodeState(conn.NodeID, updates); err != nil {
-		return err
+		return s.noteStorageFailure(conn, "persist desired-state ack", err)
 	}
+	conn.noteStorageSuccess()
 	return nil
 }
 
@@ -541,7 +609,9 @@ func (s *TransportServer) handleTaskResult(conn *AgentConn, env controlproto.Env
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
 		}
-		return err
+		// 存储类错误:丢一次结果落库不该拆掉整条控制连接(节点上还可能有别的任务
+		// 在跑,断连会把它们全标成 interrupted)。
+		return s.noteStorageFailure(conn, "load task for result", err)
 	}
 	taskType := controlproto.TaskType(task.Type)
 	if result.Type != "" && result.Type != taskType {
@@ -569,8 +639,9 @@ func (s *TransportServer) handleTaskResult(conn *AgentConn, env controlproto.Env
 			string(controlproto.TaskStatePending), string(controlproto.TaskStateRunning),
 		}).Updates(updates)
 	if updated.Error != nil {
-		return updated.Error
+		return s.noteStorageFailure(conn, "persist task result", updated.Error)
 	}
+	conn.noteStorageSuccess()
 	if updated.RowsAffected == 0 {
 		return nil
 	}
@@ -663,7 +734,7 @@ func (s *TransportServer) setOnline(nodeID uint, online bool) {
 	_ = s.upsertNodeState(nodeID, updates)
 }
 
-func (s *TransportServer) touchHeartbeat(nodeID uint, hb controlproto.HeartbeatPayload) {
+func (s *TransportServer) touchHeartbeat(nodeID uint, hb controlproto.HeartbeatPayload) error {
 	now := nowUTC()
 	updates := map[string]any{
 		"online":          true,
@@ -683,7 +754,24 @@ func (s *TransportServer) touchHeartbeat(nodeID uint, hb controlproto.HeartbeatP
 		// 保留旧列值供排查,但 Valid=false 使聚合口径把它排除。
 		updates["telemetry_valid"] = false
 	}
-	_ = s.upsertNodeState(nodeID, updates)
+	return s.upsertNodeState(nodeID, updates)
+}
+
+// noteStorageFailure 处理一次存储类错误:记日志并累计连续失败次数。返回 nil 表示
+// "已消化,继续服务这条连接";返回哨兵错误表示连续失败已达阈值,调用方应让 serve
+// 走既有断连路径。ctx 取消不计入——那是连接正常关闭,不是存储故障。
+func (s *TransportServer) noteStorageFailure(conn *AgentConn, op string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	failures := conn.noteStorageFailure()
+	slog.Error("control-plane storage operation failed",
+		"node", conn.NodeID, "op", op, "consecutive_failures", failures, "error", err)
+	if failures >= maxConsecutiveStorageFailures {
+		return fmt.Errorf("%w: %s failed %d times in a row: %v",
+			errPersistentStorageFailure, op, failures, err)
+	}
+	return nil
 }
 
 // recordHelloObservation 落库节点在 hello 里自报的观测量。region 一并写入(包括
@@ -692,9 +780,10 @@ func (s *TransportServer) touchHeartbeat(nodeID uint, hb controlproto.HeartbeatP
 func (s *TransportServer) recordHelloObservation(nodeID uint, version int64, hash, region string) {
 	_ = s.upsertNodeState(nodeID, map[string]any{
 		"applied_version": version,
-		"content_hash":    hash,
-		"region":          sanitizeReportedRegion(region),
-		"updated_at":      nowUTC(),
+		// content_hash 与 region 同样来自节点自报的自由文本,必须同样消毒后落库。
+		"content_hash": sanitizeReportedContentHash(hash),
+		"region":       sanitizeReportedRegion(region),
+		"updated_at":   nowUTC(),
 	})
 }
 
@@ -702,17 +791,29 @@ func (s *TransportServer) recordHelloObservation(nodeID uint, version int64, has
 // mTLS 通道但仍是"节点说了算"的自由文本,且会直接进管理端页面:去掉首尾空白与
 // 控制字符,并截断到列宽 64,避免脏值撑坏展示或写库失败。
 func sanitizeReportedRegion(region string) string {
-	region = strings.TrimSpace(region)
-	region = strings.Map(func(r rune) rune {
+	return sanitizeReportedText(region, maxReportedRegionBytes)
+}
+
+// sanitizeReportedContentHash 归一化节点在 hello 里自报的 content_hash。它和 region
+// 一样是节点侧自由文本(节点声称自己应用的快照摘要),同样会进管理端展示,因此用同一
+// 套策略消毒后再落库。
+func sanitizeReportedContentHash(hash string) string {
+	return sanitizeReportedText(hash, maxReportedContentHashBytes)
+}
+
+// sanitizeReportedText 是节点自报文本的公共消毒:去首尾空白、剥控制字符、按列宽截断。
+func sanitizeReportedText(value string, maxBytes int) string {
+	value = strings.TrimSpace(value)
+	value = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return -1
 		}
 		return r
-	}, region)
-	if len(region) > maxReportedRegionBytes {
-		region = region[:maxReportedRegionBytes]
+	}, value)
+	if len(value) > maxBytes {
+		value = value[:maxBytes]
 	}
-	return region
+	return value
 }
 
 // upsertNodeState creates or updates the single node_status row for nodeID.
