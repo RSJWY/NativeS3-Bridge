@@ -75,15 +75,15 @@
 
 ## Acceptance Criteria
 
-- [ ] AC1 `go build ./...`、`go vet ./...` 干净;`go test -race ./pkg/controlproto/... ./pkg/panel/... ./pkg/nodeagent/...` 全绿。
-- [ ] AC2 R1:node 心跳 60s + panel 默认配置,新 panel 下节点持续 online 不抖动;上报值非法(如 0 / 1h)时回落到 panel 配置间隔并 Warn,不被永久判为在线。
-- [ ] AC3 R2:模拟上报 15s 的节点握手后静默,~75s 内连接被回收;上报 60s 的节点在 ~75s 时**不**被回收(证明阈值随自报值走,而不是固定值误杀长心跳节点)。
-- [ ] AC4 R3:注入一个永远阻塞的假任务,60s 内被 ctx 中止并回 failed(timeout);reconcile 中途取消不 panic、不产生半写的 sidecar 状态(重跑可续)。
-- [ ] AC4b R3.5:panel.yaml 设 `task_timeout: 300s` → 下发的 `timeout_ms` = 300000,node 按 300s 执行;不设该键 → 60s;panel 下发 `timeout_ms` > 10min 或 ≤0 时 node 分别按 10min / 默认值执行并 Warn。
-- [ ] AC5 R4:构造 >1 MiB 的导入数据,分块传输成功落库,连接不断;重组超块数/字节/超时上限时拒绝并日志。
-- [ ] AC6 R5:v2 两端全路径通过;版本不匹配时握手失败且日志含两端版本号与"需同步升级"提示;不匹配期间 node 的 S3 读写仍成功。
-- [ ] AC7 `git diff` 中 `pkg/controlproto/` 的变更仅为:HelloPayload 加心跳间隔字段、新增 chunk 消息类型、版本上下限提升(v1 支持移除)——**其余既有字段零改动**。
-- [ ] AC8 `docs/multi-node-operations.md` 协议章节更新,包含 v2 能力、v1 不再受支持、以及"必须同步升级/成对回滚"的部署说明。
+- [x] AC1 `go build ./...`、`go vet ./...` 干净;`go test -race ./pkg/controlproto/... ./pkg/panel/... ./pkg/nodeagent/...` 全绿。
+- [x] AC2 R1:node 心跳 60s + panel 默认配置,新 panel 下节点持续 online 不抖动;上报值非法(如 0 / 1h)时回落到 panel 配置间隔并 Warn,不被永久判为在线。
+- [x] AC3 R2:模拟上报 15s 的节点握手后静默,~75s 内连接被回收;上报 60s 的节点在 ~75s 时**不**被回收(证明阈值随自报值走,而不是固定值误杀长心跳节点)。
+- [x] AC4 R3:注入一个永远阻塞的假任务,60s 内被 ctx 中止并回 failed(timeout);reconcile 中途取消不 panic、不产生半写的 sidecar 状态(重跑可续)。
+- [x] AC4b R3.5:panel.yaml 设 `task_timeout: 300s` → 下发的 `timeout_ms` = 300000,node 按 300s 执行;不设该键 → 60s;panel 下发 `timeout_ms` > 10min 或 ≤0 时 node 分别按 10min / 默认值执行并 Warn。
+- [x] AC5 R4:构造 >1 MiB 的导入数据,分块传输成功落库,连接不断;重组超块数/字节/超时上限时拒绝并日志。
+- [x] AC6 R5:v2 两端全路径通过;版本不匹配时握手失败且日志含两端版本号与"需同步升级"提示;不匹配期间 node 的 S3 读写仍成功。
+- [x] AC7 `git diff` 中 `pkg/controlproto/` 的变更仅为:HelloPayload 加心跳间隔字段、新增 chunk 消息类型、版本上下限提升(v1 支持移除)——**其余既有字段零改动**。
+- [x] AC8 `docs/multi-node-operations.md` 协议章节更新,包含 v2 能力、v1 不再受支持、以及"必须同步升级/成对回滚"的部署说明。
 
 ## 依赖与排序
 

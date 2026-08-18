@@ -84,13 +84,13 @@
 
 ## Acceptance Criteria
 
-- [ ] AC1 `go build ./...` + `go vet ./...` 干净;`go test -race ./pkg/panel/...` 全绿。
-- [ ] AC2 R3 并发测试通过:对端不读时,推送/下发/心跳 ack 均在 ~10s 量级返回错误,无 goroutine 泄漏(测试用 runtime.NumGoroutine 或超时断言)。
-- [ ] AC3 R4 竞态测试通过:结果先落库后 `markState(running)` 不覆盖终态。
-- [ ] AC4 R5:以 15s 间隔正常心跳的节点,DB `last_seen` 更新行为与升级前一致;以 100ms 间隔狂发心跳,DB 写频率被压到阈值以下且连接不被断开。
-- [ ] AC5 R6:注入一次临时 DB 错误(可用测试钩子),连接保持;连续超阈值后断开。
-- [ ] AC6 R7:单节点连续 11 次 `/renew`(合法 CSR),第 11 次起 429;正常周期续期不受影响。
-- [ ] AC7 R9:五个语义修正各有测试覆盖(双写→单 500;不存在节点 certs→404;多余路径段→404;hash mismatch→409;退役节点建草稿→409)。
-- [ ] AC8 R1:panel.yaml 加 `trust_forwarded: true` 并经反带头访问,登录限流按真实客户端 IP 计数(测试或手工验证记录);不写该键行为与升级前完全一致。
-- [ ] AC9 R8:hello 携带含控制字符的超长 content_hash,落库值已消毒。
-- [ ] AC10 配置/协议/DB 零变更确认:node 二进制未动;`git diff` 不涉及 `pkg/controlproto/`、`pkg/nodeagent/`、`models.go` 的 schema 字段、`migrate.go`。
+- [x] AC1 `go build ./...` + `go vet ./...` 干净;`go test -race ./pkg/panel/...` 全绿。
+- [x] AC2 R3 并发测试通过:对端不读时,推送/下发/心跳 ack 均在 ~10s 量级返回错误,无 goroutine 泄漏(测试用 runtime.NumGoroutine 或超时断言)。
+- [x] AC3 R4 竞态测试通过:结果先落库后 `markState(running)` 不覆盖终态。
+- [x] AC4 R5:以 15s 间隔正常心跳的节点,DB `last_seen` 更新行为与升级前一致;以 100ms 间隔狂发心跳,DB 写频率被压到阈值以下且连接不被断开。
+- [x] AC5 R6:注入一次临时 DB 错误(可用测试钩子),连接保持;连续超阈值后断开。
+- [x] AC6 R7:单节点连续 11 次 `/renew`(合法 CSR),第 11 次起 429;正常周期续期不受影响。
+- [x] AC7 R9:五个语义修正各有测试覆盖(双写→单 500;不存在节点 certs→404;多余路径段→404;hash mismatch→409;退役节点建草稿→409)。
+- [x] AC8 R1:panel.yaml 加 `trust_forwarded: true` 并经反带头访问,登录限流按真实客户端 IP 计数(测试或手工验证记录);不写该键行为与升级前完全一致。
+- [x] AC9 R8:hello 携带含控制字符的超长 content_hash,落库值已消毒。
+- [x] AC10 配置/协议/DB 零变更确认:node 二进制未动;`git diff` 不涉及 `pkg/controlproto/`、`pkg/nodeagent/`、`models.go` 的 schema 字段、`migrate.go`。

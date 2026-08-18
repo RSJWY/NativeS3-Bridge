@@ -183,6 +183,54 @@ func TestWatchdogTimeout(t *testing.T) {
 	}
 }
 
+// TestHeartbeatSendFailureClosesLoop verifies that a peer closing the socket
+// causes the heartbeat writer to return instead of continuing a dead loop.
+func TestHeartbeatSendFailureClosesLoop(t *testing.T) {
+	server := startTestPanelServer(t, func(t *testing.T, ws *websocket.Conn) {
+		_, _, _ = ws.Read(context.Background())
+	})
+	id := testIdentity(t, server)
+	client := testClient(t, server, id, openTestDB(t))
+	client.cfg.HeartbeatInterval = 10 * time.Millisecond
+
+	cert, err := tls.LoadX509KeyPair(id.CertFile, id.KeyFile)
+	if err != nil {
+		t.Fatalf("load test client certificate: %v", err)
+	}
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), time.Second)
+	defer cancelDial()
+	ws, _, err := websocket.Dial(dialCtx, "wss://"+server.Listener.Addr().String()+"/agent", &websocket.DialOptions{
+		HTTPClient: &http.Client{Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, // test server certificate is ephemeral
+				Certificates:       []tls.Certificate{cert},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("dial test websocket: %v", err)
+	}
+	if err := ws.CloseNow(); err != nil {
+		t.Fatalf("force-close client websocket: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		client.heartbeatLoop(ctx, ws, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// The failed write must close the heartbeat loop before its context
+		// deadline; otherwise a dead control-plane connection can linger.
+	case <-ctx.Done():
+		t.Fatal("heartbeat loop did not stop after peer close")
+	}
+}
+
 // TestVersionFrameDropped 验证 serveLoop 收到高于协商版本的帧时丢弃并不断连。
 func TestVersionFrameDropped(t *testing.T) {
 	server := startTestPanelServer(t, func(t *testing.T, ws *websocket.Conn) {

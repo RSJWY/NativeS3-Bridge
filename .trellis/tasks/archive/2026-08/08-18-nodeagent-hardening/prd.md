@@ -72,8 +72,8 @@
 - [x] AC3 `kill -9` 于写盘时机无法用单测模拟,改为:构造临时目录,断言 `persistPEM` 写完后存在完整 PEM 且过程中出现过的临时文件已清理;`.bak` 策略按 R2.2 决策验证。
 - [x] AC4 mock panel 接受 WS 后不应答 hello → 节点在握手超时内放弃并重连(测试断言耗时 < 超时上限)。
 - [x] AC5 mock panel 建立连接后完全静默 → 节点在看门狗阈值内断开重连;正常每 15s 心跳+ack 的连接永不误杀(跑 3 分钟以上模拟或时钟注入)。
-- [ ] AC6 心跳发送注入失败 → 连接立即关闭并进入重连。(注:真实 WebSocket 写失败难以注入,已在实现层保证发送失败即 Close+return;留待后续集成测试覆盖。)
-- [ ] AC7 续期成功路径日志为 Info,且从断连到用新证重连的间隔 ≈ 最小退避(非最长 90s)。(注:已在实现层引入 errRenewedReconnect 哨兵与退避清零;留待后续集成测试覆盖完整路径。)
+- [x] AC6 心跳发送注入失败 → 连接立即关闭并进入重连。归档后复验新增 `TestHeartbeatSendFailureClosesLoop`:强制关闭客户端 WebSocket 后触发 heartbeat 写,断言写失败路径使 heartbeat loop 立即退出。
+- [x] AC7 续期成功路径日志为 Info,且从断连到用新证重连的间隔 ≈ 最小退避(非最长 90s)。`errRenewedReconnect` 单测验证退避清零分支;local Panel -> Node E2E 以 45s 短证书完成真实续期、换证重连并保持 S3 数据面可用。
 - [x] AC8 无 task_id 的 task:不执行、台账无 `""` 记录、有 Warn;同 id 换 type:不被缓存命中跳过。
 - [x] AC9 高于支持版本的 envelope 被 Warn+丢弃,连接保持。
 - [x] AC10 端口被普通 HTTP 服务(如 `python3 -m http.server`)占用时 `node --health` 返回非零;被真实网关监听时返回 0。

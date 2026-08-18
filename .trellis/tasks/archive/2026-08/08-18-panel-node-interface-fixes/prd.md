@@ -72,13 +72,21 @@
 
 ## 跨子任务验收标准(集成验收)
 
-- [ ] X1 `go build ./...` 通过;`go vet ./...` 干净。
-- [ ] X2 `go test ./...` 全绿(含修复后的 `TestCertsRouteReturnsSnakeCaseDTO`,且不再依赖真实时钟日期)。
-- [ ] X3 `go test -race ./pkg/panel/... ./pkg/nodeagent/... ./pkg/controlproto/...` 通过。
-- [ ] X4 兼容性自证:C2 只动 panel、C3 只动 node,C4 的协议变更提供"新 panel + 旧 node"与"旧 panel + 新 node"两个方向的测试或论证。
-- [ ] X5 升级前自查脚本/步骤验证:用 `configs/panel.example.yaml` 原样启动新 panel 二进制,必须**拒绝启动**并打印指向 session_secret 的明确错误;用 `agent_url: ws://...` 启动新 node,必须拒绝启动并提示改用 `wss://`。
-- [ ] X6 现有 shell 测试套件不被破坏:`scripts/test-panel-node-e2e.sh`、`scripts/test-distribution-contract.sh`(若本机环境可运行)。
-- [ ] X7 审计清单中的每一项在对应子任务 PRD 的验收标准里都有勾选项,无遗漏、无超范围改动。
+- [x] X1 `go build ./...` 通过;`go vet ./...` 干净。
+- [x] X2 `go test ./...` 全绿(含修复后的 `TestCertsRouteReturnsSnakeCaseDTO`,且不再依赖真实时钟日期)。
+- [x] X3 `go test -race ./pkg/panel/... ./pkg/nodeagent/... ./pkg/controlproto/...` 通过。
+- [x] X4 兼容性自证:C2 只动 panel、C3 只动 node;C4 按 2026-08-18 用户裁决改为 v2 同步升级,版本不匹配快速失败且节点数据面继续服务。
+- [x] X5 升级前自查脚本/步骤验证:用 `configs/panel.example.yaml` 原样启动新 panel 二进制,必须**拒绝启动**并打印指向 session_secret 的明确错误;用 `agent_url: ws://...` 启动新 node,必须拒绝启动并提示改用 `wss://`。
+- [x] X6 现有 shell 测试套件不被破坏:`scripts/test-panel-node-e2e.sh`、`scripts/test-distribution-contract.sh`(若本机环境可运行)。
+- [x] X7 审计清单中的每一项在对应子任务 PRD 的验收标准里都有勾选项,无遗漏、无超范围改动。
+
+## 归档后独立复验(2026-08-18)
+
+- `go build ./...`、`go vet ./...`、`go test ./...`、`go test -count=1 -race ./...` 全部通过。
+- `npm run build`、`bash -n`、`scripts/test-distribution-contract.sh` 全部通过。
+- local Panel -> Node E2E 全路径通过:mTLS 注册、权威配置同步、Panel/Node 重启、错误 CA 失败关闭、证书续期、服务端证书重签、过期证书恢复、S3 字节保真与 Chrome 页面/API 边界均正常。
+- 启动期配置实测通过:示例占位 `session_secret` 与未放行的 `ws://` 均按预期拒绝;随机 secret、显式明文逃生门及权限告警均按预期工作。
+- 复验只补了 C3 心跳写失败的回归测试与验收记录,未改变产品运行时代码。
 
 ## 交接说明
 
