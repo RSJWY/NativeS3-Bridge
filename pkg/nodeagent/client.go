@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -43,6 +45,10 @@ type certError struct {
 	err  error
 }
 
+// errRenewedReconnect 标记续期成功后的计划内断连,Run 识别后应清零退避并
+// 立即用新证书重连(R4)。
+var errRenewedReconnect = errors.New("certificate renewed, reconnecting with new certificate")
+
 func (e *certError) Error() string {
 	if e.kind == "local" {
 		return fmt.Sprintf("node client certificate unusable: %v", e.err)
@@ -57,6 +63,7 @@ func (e *certError) Unwrap() error { return e.err }
 const (
 	DefaultHeartbeatInterval = 15 * time.Second
 	DefaultDialTimeout       = 15 * time.Second
+	DefaultHandshakeTimeout  = 30 * time.Second
 	DefaultMinBackoff        = 1 * time.Second
 	DefaultMaxBackoff        = 60 * time.Second
 	clientMaxMessageBytes    = 1 << 20 // 1 MiB, matches panel DefaultMaxMessageBytes
@@ -77,6 +84,7 @@ type ClientConfig struct {
 
 	HeartbeatInterval time.Duration
 	DialTimeout       time.Duration
+	HandshakeTimeout  time.Duration // 握手独立超时,默认 30s
 	MinBackoff        time.Duration
 	MaxBackoff        time.Duration
 }
@@ -87,6 +95,9 @@ func (c *ClientConfig) applyDefaults() {
 	}
 	if c.DialTimeout <= 0 {
 		c.DialTimeout = DefaultDialTimeout
+	}
+	if c.HandshakeTimeout <= 0 {
+		c.HandshakeTimeout = DefaultHandshakeTimeout
 	}
 	if c.MinBackoff <= 0 {
 		c.MinBackoff = DefaultMinBackoff
@@ -112,6 +123,11 @@ type Client struct {
 
 	writeMu sync.Mutex
 	ws      *websocket.Conn
+
+	// negotiatedVersion 是本连接握手协商出的协议版本,用于 R6 单帧 version 校验。
+	negotiatedVersion int
+	// lastRecvAt 是最后一次成功收到帧的 UnixNano,serve 看门狗用它检测静默连接。
+	lastRecvAt atomic.Int64
 }
 
 // TaskRunner executes the predefined one-shot tasks. It is an interface so the
@@ -147,6 +163,12 @@ func (c *Client) Run(ctx context.Context) error {
 		err := c.connectAndServe(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if errors.Is(err, errRenewedReconnect) {
+			// R4:续期成功后的计划内断连,立即用新证书重连,不清退避就是最小值。
+			slog.Info("certificate renewed, reconnecting with new certificate immediately")
+			backoff = c.cfg.MinBackoff
+			continue
 		}
 		if err != nil {
 			slog.Warn("control-plane connection ended", "error", err, "retry_in", backoff)
@@ -254,9 +276,12 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		c.setWS(nil)
 	}()
 
-	if err := c.handshake(ctx, ws); err != nil {
+	hsCtx, hsCancel := context.WithTimeout(ctx, c.cfg.HandshakeTimeout)
+	if err := c.handshake(hsCtx, ws); err != nil {
+		hsCancel()
 		return fmt.Errorf("handshake: %w", err)
 	}
+	hsCancel()
 	// 连接成功:证书错误节流计数归零,恢复后再次失败仍会立即报 Error。
 	c.certErrs.Reset()
 
@@ -264,9 +289,22 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	defer serveCancel()
 
 	// Heartbeat goroutine runs until the serve loop exits.
-	go c.heartbeatLoop(serveCtx, ws)
+	renewedCh := make(chan struct{}, 1)
+	go c.heartbeatLoop(serveCtx, ws, func() {
+		select {
+		case renewedCh <- struct{}{}:
+		default:
+		}
+	})
 
-	return c.serveLoop(serveCtx, ws)
+	err = c.serveLoop(serveCtx, ws)
+	select {
+	case <-renewedCh:
+		// R4:续期成功后的计划内断连,返回哨兵错误让 Run 清零退避立即重连。
+		return errRenewedReconnect
+	default:
+		return err
+	}
 }
 
 // renewCertificate sends a POST /renew request to the panel with a fresh CSR
@@ -317,6 +355,31 @@ func (c *Client) renewCertificate(ctx context.Context) error {
 	if result.CertPEM == "" {
 		return fmt.Errorf("panel returned an empty certificate")
 	}
+
+	// R1:落盘前校验续期证书。续期场景 CA 池用本地 CAFile。
+	caPEM, err := os.ReadFile(c.cfg.Identity.CAFile)
+	if err != nil {
+		return fmt.Errorf("read local CA for validation: %w", err)
+	}
+	key, err = c.cfg.Identity.ensureKey()
+	if err != nil {
+		return fmt.Errorf("load node key for validation: %w", err)
+	}
+	cert, err := validateIssuedCert(result.CertPEM, key, caPEM, time.Now())
+	if err != nil {
+		return fmt.Errorf("validate renewed certificate: %w", err)
+	}
+	// R1.2:续期场景同样做 not_after 交叉核对。
+	if result.NotAfter != "" {
+		notAfter, parseErr := time.Parse(time.RFC3339, result.NotAfter)
+		if parseErr != nil {
+			slog.Warn("panel returned unparsable not_after, using certificate value", "not_after", result.NotAfter, "error", parseErr)
+		} else if !notAfter.Equal(cert.NotAfter) {
+			slog.Warn("panel not_after disagrees with renewed certificate, trusting certificate value",
+				"panel_not_after", notAfter, "cert_not_after", cert.NotAfter)
+		}
+	}
+
 	if err := persistPEM(c.cfg.Identity.CertFile, []byte(result.CertPEM), 0o644); err != nil {
 		return fmt.Errorf("write renewed cert: %w", err)
 	}
@@ -400,6 +463,8 @@ func (c *Client) handshake(ctx context.Context, ws *websocket.Conn) error {
 	if !controlproto.IsCompatible(ack.ProtocolVersion) {
 		return fmt.Errorf("negotiated protocol version %d is not supported", ack.ProtocolVersion)
 	}
+	c.negotiatedVersion = ack.ProtocolVersion
+	c.lastRecvAt.Store(time.Now().UnixNano())
 	// If the panel says we need to sync, it will push desired_state right after;
 	// no action needed here beyond logging.
 	if ack.NeedsSync {
@@ -410,18 +475,31 @@ func (c *Client) handshake(ctx context.Context, ws *websocket.Conn) error {
 
 // serveLoop reads and dispatches control-plane frames until the connection ends.
 func (c *Client) serveLoop(ctx context.Context, ws *websocket.Conn) error {
+	// R3:serve 看门狗,检测 panel 静默/半开连接。
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	defer serveCancel()
+	go c.watchdog(serveCtx, serveCancel, ws)
+
 	for {
-		env, err := c.readEnvelope(ctx, ws)
+		env, err := c.readEnvelope(serveCtx, ws)
 		if err != nil {
 			return err
 		}
+
+		// R6:单帧 version 防御性校验。高于协商版本的帧丢弃不断连;缺失 version
+		// 的帧按 v1 容忍(同版本部署不会触发,只是防御旧帧)。
+		if env.Version > 0 && env.Version > c.negotiatedVersion {
+			slog.Warn("dropping frame with version higher than negotiated", "type", env.Type, "version", env.Version, "negotiated", c.negotiatedVersion)
+			continue
+		}
+
 		switch env.Type {
 		case controlproto.TypeDesiredState:
-			c.handleDesiredState(ctx, ws, env)
+			c.handleDesiredState(serveCtx, ws, env)
 		case controlproto.TypeTask:
-			c.handleTask(ctx, ws, env)
+			c.handleTask(serveCtx, ws, env)
 		case controlproto.TypeImportRequest:
-			c.handleImportRequest(ctx, ws, env)
+			c.handleImportRequest(serveCtx, ws, env)
 		case controlproto.TypeHeartbeatAck:
 			// clock info only; ignored for now.
 		case controlproto.TypeError:
@@ -433,6 +511,39 @@ func (c *Client) serveLoop(ctx context.Context, ws *websocket.Conn) error {
 			}
 		default:
 			slog.Warn("ignoring unexpected message", "type", env.Type)
+		}
+	}
+}
+
+// watchdog 每隔 heartbeat_interval 检查一次最近一次收帧时间。
+// 若超过 max(3×heartbeat_interval, 60s) 未收到任何帧,则 cancel serveCtx 触发重连。
+func (c *Client) watchdog(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn) {
+	interval := c.cfg.HeartbeatInterval
+	if interval <= 0 {
+		interval = DefaultHeartbeatInterval
+	}
+	timeout := 3 * interval
+	if timeout < 60*time.Second {
+		timeout = 60 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			last := time.Unix(0, c.lastRecvAt.Load())
+			if time.Since(last) > timeout {
+				slog.Warn("control-plane watchdog timeout, reconnecting",
+					"last_recv", last, "timeout", timeout)
+				if ws != nil {
+					_ = ws.Close(websocket.StatusPolicyViolation, "watchdog timeout")
+				}
+				cancel()
+				return
+			}
 		}
 	}
 }
@@ -578,6 +689,15 @@ func taskTimeout(timeoutMS int64) time.Duration {
 	return t
 }
 
+// isKnownTaskType 判断 task type 是否在预定义枚举内。
+func isKnownTaskType(t controlproto.TaskType) bool {
+	switch t {
+	case controlproto.TaskLogQuery, controlproto.TaskStorageScan, controlproto.TaskStorageReconcileApply:
+		return true
+	}
+	return false
+}
+
 // handleTask executes a one-shot task with idempotency. A duplicate task ID
 // returns the previously-cached result without re-executing (critical for
 // high-risk reconcile-apply). Results are recorded before being sent.
@@ -588,10 +708,31 @@ func (c *Client) handleTask(ctx context.Context, ws *websocket.Conn, env control
 		return
 	}
 
-	// Idempotency: if we already have a result for this task ID, resend it.
-	if cached, ok := c.cachedTaskResult(task.TaskID); ok {
-		_ = c.sendMessage(ctx, ws, controlproto.TypeTaskResult, env.ID, cached)
+	// R5:task_id 为空或 type 不在已知枚举内 → 不执行、不写台账,回 failed 结果。
+	if strings.TrimSpace(task.TaskID) == "" {
+		slog.Warn("panel sent task with empty task_id, ignoring")
 		return
+	}
+	if !isKnownTaskType(task.Type) {
+		slog.Warn("panel sent task with unknown type", "task_id", task.TaskID, "type", task.Type)
+		_ = c.sendMessage(ctx, ws, controlproto.TypeTaskResult, env.ID, controlproto.TaskResultPayload{
+			TaskID: task.TaskID,
+			Type:   task.Type,
+			State:  controlproto.TaskStateFailed,
+			Error:  fmt.Sprintf("unsupported task type %q", task.Type),
+		})
+		return
+	}
+
+	// Idempotency: if we already have a result for this task ID, resend it.
+	// 命中时校验缓存条目的 type 与本次一致,不一致视为新任务执行。
+	if cached, ok := c.cachedTaskResult(task.TaskID); ok {
+		if cached.Type != task.Type {
+			slog.Warn("task id collision with different type, executing as new task", "task_id", task.TaskID, "cached_type", cached.Type, "new_type", task.Type)
+		} else {
+			_ = c.sendMessage(ctx, ws, controlproto.TypeTaskResult, env.ID, cached)
+			return
+		}
 	}
 
 	// R3:node 真正执行 panel 下发的 timeout_ms。
@@ -656,7 +797,8 @@ func (c *Client) recordTaskResult(task controlproto.TaskPayload, result controlp
 // heartbeatLoop sends periodic heartbeats until ctx is cancelled. It also
 // checks whether the client certificate needs renewal on each tick, so a
 // long-lived connection will still renew before expiry (R3.3).
-func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
+// onRenewed 在成功续期并主动断连时被调用一次(允许 nil)。
+func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn, onRenewed func()) {
 	ticker := time.NewTicker(c.cfg.HeartbeatInterval)
 	defer ticker.Stop()
 	renewed := false
@@ -676,7 +818,9 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 			}
 			payload.AppliedVersion = meta.AppliedVersion
 			if err := c.sendMessage(ctx, ws, controlproto.TypeHeartbeat, "", payload); err != nil {
-				slog.Debug("heartbeat send failed", "error", err)
+				// R3.3:心跳发送失败必须关闭连接并 cancel serveCtx,让 Run 立即重连。
+				slog.Warn("heartbeat send failed, closing connection", "error", err)
+				_ = ws.Close(websocket.StatusInternalError, "heartbeat send failed")
 				return
 			}
 			// Check for certificate renewal on each heartbeat tick. Once
@@ -692,6 +836,9 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 						renewed = true
 						slog.Info("certificate renewed successfully, reconnecting with new certificate")
 						_ = ws.Close(websocket.StatusNormalClosure, "renewed certificate, reconnecting")
+						if onRenewed != nil {
+							onRenewed()
+						}
 						return
 					}
 				}
@@ -728,6 +875,7 @@ func (c *Client) readEnvelope(ctx context.Context, ws *websocket.Conn) (controlp
 	if err != nil {
 		return controlproto.Envelope{}, err
 	}
+	c.lastRecvAt.Store(time.Now().UnixNano())
 	return controlproto.DecodeEnvelope(data)
 }
 
