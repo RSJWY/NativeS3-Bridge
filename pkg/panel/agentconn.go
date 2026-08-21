@@ -273,12 +273,12 @@ type importReassembler struct {
 }
 
 type importReassemblyState struct {
-	requestID   string
-	total       int
-	received    map[int]controlproto.ImportReportChunkPayload
-	bytes       int
-	deadline    time.Time
-	delivered   bool
+	requestID string
+	total     int
+	received  map[int]controlproto.ImportReportChunkPayload
+	bytes     int
+	deadline  time.Time
+	delivered bool
 }
 
 func newImportReassembler() *importReassembler {

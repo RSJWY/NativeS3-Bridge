@@ -24,6 +24,7 @@ import (
 //   - 心跳间隔协商(HelloPayload.HeartbeatIntervalMS)
 //   - import_report 分页传输(TypeImportReportChunk)
 //   - node 执行 panel 下发的任务 timeout_ms
+//
 // v1 已不再受支持;panel 与 node 必须同步升级,成对回滚。
 const (
 	ProtocolVersion      = 2
@@ -51,9 +52,9 @@ const (
 	// an admin confirms the import on the panel (design §8.3).
 	//
 	// v2 起 import 报告改走 TypeImportReportChunk 分页传输,单帧不再使用。
-	TypeImportRequest      MessageType = "import_request"
-	TypeImportReport       MessageType = "import_report"        // 已弃用(v2 起仅保留常量)
-	TypeImportReportChunk  MessageType = "import_report_chunk" // v2 分页
+	TypeImportRequest     MessageType = "import_request"
+	TypeImportReport      MessageType = "import_report"       // 已弃用(v2 起仅保留常量)
+	TypeImportReportChunk MessageType = "import_report_chunk" // v2 分页
 )
 
 // Envelope is the uniform wrapper for every control-plane message. Type drives

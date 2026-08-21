@@ -45,7 +45,7 @@ const (
 	// renewWindow / maxRenewPerWindow 限制单个节点的证书续期频率。正常续期是每
 	// 90 天一次,这个量级只拦住异常循环:每次 /renew 都要 CA 签名并往 node_certs
 	// 插一行,不限频等于给了一个免费的 CPU + 表膨胀入口。
-	renewWindow      = time.Hour
+	renewWindow       = time.Hour
 	maxRenewPerWindow = 10
 )
 
@@ -59,11 +59,11 @@ var ErrAuthoritativeConfigCapabilityRequired = errors.New("agent upgrade require
 // as an interface-free struct of concrete dependencies avoids premature
 // abstraction; the fields are all owned by the panel process.
 type TransportDeps struct {
-	DB          *gorm.DB
-	CA          *CA
-	Hub         *Hub
-	Cipher      *SecretCipher
-	ClientCTTL  time.Duration
+	DB         *gorm.DB
+	CA         *CA
+	Hub        *Hub
+	Cipher     *SecretCipher
+	ClientCTTL time.Duration
 	// HeartbeatInterval 是节点心跳的期望 cadence(由 cmd/panel 从 PanelConfig 注入)。
 	// 只用来推导心跳落库的节流阈值,不是新配置键;零值时取 DefaultHeartbeatInterval。
 	HeartbeatInterval time.Duration

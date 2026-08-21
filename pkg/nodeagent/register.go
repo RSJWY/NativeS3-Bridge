@@ -378,10 +378,11 @@ func persistPEM(path string, data []byte, perm os.FileMode) error {
 const issuedCertMaxTTL = 10 * 365 * 24 * time.Hour
 
 // validateIssuedCert 在把 panel 返回的证书落盘前做四项校验:
-//   1. 可解析为 X.509;
-//   2. 证书公钥与本次 CSR 所用私钥匹配;
-//   3. 能被给定 CA 池验证链;
-//   4. NotAfter 在未来且不超过合理上界。
+//  1. 可解析为 X.509;
+//  2. 证书公钥与本次 CSR 所用私钥匹配;
+//  3. 能被给定 CA 池验证链;
+//  4. NotAfter 在未来且不超过合理上界。
+//
 // 任一失败都返回错误,调用方应保留旧证书文件不动。成功时返回解析后的证书,
 // 供 R1.2 的 not_after 交叉核对复用。
 func validateIssuedCert(certPEM string, key crypto.Signer, caPEM []byte, now time.Time) (*x509.Certificate, error) {

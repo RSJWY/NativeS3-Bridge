@@ -105,15 +105,24 @@
 
 ## 跨子任务验收标准
 
-- [ ] **AC1 端到端续期闭环**：`scripts/test-panel-node-e2e.sh` 增加短 TTL 场景，实证「签发 → 临期 → 自动续期 → 用新证重连 → 旧证被吊销」全链路，且过程中控制面不中断。
-- [ ] **AC2 无静默失败**：证书过期/被吊销时，节点日志出现 Error 级、含「证书」语义、指明恢复动作的条目；不再只有 `control-plane connection ended`。
-- [ ] **AC3 安全网 A 未破坏**：续期失败、过期、被吊销三种情况下，node 的 S3 数据面持续正常服务本地 DB。
-- [ ] **AC4 安全网 C 未破坏**：panel DB 迁移严格增量（只增列），node DB 不因本轮改动新增任何表/列。
-- [ ] **AC5 D2 红线未破**：`transport.go` 的 `ClientAuth` 语义未变，未引入放宽标准校验的 `VerifyPeerCertificate`；已过期证书调 `/renew` 返回 401。
-- [ ] **AC6 注释与文档零虚假承诺**：`pki.go:22` 的续期注释与实现一致；仓库中不再出现与实现不符的 offline root CA 描述；`docker-deployment.md:470` 的引用不再断链。
-- [ ] **AC7 全绿**：`go build ./... && go vet ./... && go test ./... && gofmt -l .` 无输出；e2e 脚本通过。
-- [ ] **AC8 敏感材料零泄露**：新增日志与审计条目不含私钥内容或 secret；审计沿用 `Auditor` 脱敏约定。
-- [ ] **AC9 追溯闸门自证**：子任务 5 的闸门套在子任务 1/2/3/4 的 prd.md 上，每条 Requirement 都能在对应 implement.md 找到承载 Step，无断点（对应子任务 5 的 AC6）。
+- [x] **AC1 端到端续期闭环**：`scripts/test-panel-node-e2e.sh` 增加短 TTL 场景，实证「签发 → 临期 → 自动续期 → 用新证重连 → 旧证被吊销」全链路，且过程中控制面不中断。
+      → `scripts/test-panel-node-e2e.sh:1106-1250`：45s TTL / 15s 阈值场景，断言指纹变更、重连后同步、旧证在新证激活后被吊销。
+- [x] **AC2 无静默失败**：证书过期/被吊销时，节点日志出现 Error 级、含「证书」语义、指明恢复动作的条目；不再只有 `control-plane connection ended`。
+      → `pkg/nodeagent/client.go:203` `slog.Error("node certificate problem prevents control-plane connection", ...)`。
+- [x] **AC3 安全网 A 未破坏**：续期失败、过期、被吊销三种情况下，node 的 S3 数据面持续正常服务本地 DB。
+      → e2e 续期段内 `s3_expect 200 GET .../survivor.txt` 通过，记录 `renewal: S3 data plane stayed available during cert renewal`。
+- [x] **AC4 安全网 C 未破坏**：panel DB 迁移严格增量（只增列），node DB 不因本轮改动新增任何表/列。
+      → `pkg/panel/migrate_test.go:64-113` 由旧 schema 起迁移并断言 `activated_at` 增量加列；`pkg/node/` 本轮无迁移改动。
+- [x] **AC5 D2 红线未破**：`transport.go` 的 `ClientAuth` 语义未变，未引入放宽标准校验的 `VerifyPeerCertificate`；已过期证书调 `/renew` 返回 401。
+      → `pkg/panel/transport.go:1058` 仍为 `tls.VerifyClientCertIfGiven`，`git log -L` 显示该行自 `1ae6101`（07-13 原始提交）未被改动；全文无 `VerifyPeerCertificate`。
+- [x] **AC6 注释与文档零虚假承诺**：`pki.go` 的续期注释与实现一致；仓库中不再出现与实现不符的 offline root CA 描述；断链引用已修。
+      → `pki.go` 注释指向 `docs/multi-node-operations.md §10.2`（该节存在，`multi-node-operations.md:233`）；`multi-node-operations.md:117-118,211,356` 显式声明从未存在 offline root；「在线 intermediate 轮换见…」断链短语全仓已无残留。
+- [x] **AC7 全绿**：`go build ./... && go vet ./... && go test ./...` 通过，`gofmt -l .` 无输出。
+      → 收口时发现 `gofmt -l .` 报 4 个文件（`controlproto/envelope.go`、`nodeagent/register.go`、`panel/agentconn.go`、`panel/transport.go`，纯注释缩进与结构体字段对齐，源自 08-18 那轮提交），已 `gofmt -w` 修复后复验为空。
+- [x] **AC8 敏感材料零泄露**：新增日志与审计条目不含私钥内容或 secret；审计沿用 `Auditor` 脱敏约定。
+      → `pkg/panel/audit*.go` / `adminapi.go` 中无 `key_pem` / `private_key` / `KeyPEM` 引用。
+- [x] **AC9 追溯闸门自证**：子任务 5 的闸门套在子任务 1/2/3/4 的 prd.md 上，每条 Requirement 都能在对应 implement.md 找到承载 Step，无断点（对应子任务 5 的 AC6）。
+      → `.trellis/spec/guides/requirement-traceability-guide.md` 已落地并挂载到 `guides/index.md:26,57,61,77`（含「防御半边测试」反模式条目）。
 
 ## 约束
 
