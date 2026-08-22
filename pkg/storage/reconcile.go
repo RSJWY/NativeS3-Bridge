@@ -119,6 +119,16 @@ func walkBucket(ctx context.Context, bucketPath, metadataSuffix string, report *
 			if objectErr == nil && objectStat.Mode().IsRegular() {
 				return nil
 			}
+			if objectErr == nil && objectStat.IsDir() {
+				sidecar, exists, err := ReadSidecar(objectPath, metadataSuffix)
+				if err != nil {
+					return err
+				}
+				if exists && sidecar.Directory {
+					report.ObjectCount++
+					return nil
+				}
+			}
 			if objectErr != nil && !errors.Is(objectErr, os.ErrNotExist) {
 				return objectErr
 			}

@@ -316,3 +316,369 @@ func assertNoTempFiles(t *testing.T, target string) {
 		t.Fatalf("temp files remain: %v", matches)
 	}
 }
+func TestDirectoryMarkerOperations(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "put marker creates directory and sidecar",
+			run: func(t *testing.T) {
+				backend, err := NewFileBackend(t.TempDir())
+				if err != nil {
+					t.Fatalf("new backend: %v", err)
+				}
+				info, err := backend.PutObject("test-bucket", "dir/", stringsReader(""), "application/x-directory")
+				if err != nil {
+					t.Fatalf("put marker: %v", err)
+				}
+				if info.Size != 0 || info.ETag != emptyETag || info.Key != "dir/" {
+					t.Fatalf("marker info = %+v", info)
+				}
+				dirPath := filepath.Join(backend.root, "test-bucket", "dir")
+				if st, err := os.Stat(dirPath); err != nil || !st.IsDir() {
+					t.Fatalf("marker directory missing or not dir: %v", err)
+				}
+				sidecar, exists, err := ReadSidecar(dirPath, backend.metadataSuffix)
+				if err != nil || !exists || !sidecar.Directory {
+					t.Fatalf("marker sidecar = %+v exists=%t err=%v", sidecar, exists, err)
+				}
+				head, err := backend.HeadObject("test-bucket", "dir/")
+				if err != nil {
+					t.Fatalf("head marker: %v", err)
+				}
+				if head.Size != 0 || head.ETag != emptyETag {
+					t.Fatalf("head marker = %+v", head)
+				}
+				rc, gotInfo, err := backend.GetObject("test-bucket", "dir/", nil)
+				if err != nil {
+					t.Fatalf("get marker: %v", err)
+				}
+				defer rc.Close()
+				data, err := io.ReadAll(rc)
+				if err != nil || len(data) != 0 {
+					t.Fatalf("marker body = %q err=%v", data, err)
+				}
+				if gotInfo.Size != 0 {
+					t.Fatalf("get marker info size = %d", gotInfo.Size)
+				}
+				if _, _, err := backend.GetObject("test-bucket", "dir/", &Range{Start: 0, End: 0}); !errors.Is(err, ErrInvalidRange) {
+					t.Fatalf("range on marker err = %v, want ErrInvalidRange", err)
+				}
+			},
+		},
+		{
+			name: "child write after marker succeeds",
+			run: func(t *testing.T) {
+				backend, err := NewFileBackend(t.TempDir())
+				if err != nil {
+					t.Fatalf("new backend: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir2/", stringsReader(""), ""); err != nil {
+					t.Fatalf("put marker: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir2/file.txt", stringsReader("child"), "text/plain"); err != nil {
+					t.Fatalf("put child: %v", err)
+				}
+				head, err := backend.HeadObject("test-bucket", "dir2/file.txt")
+				if err != nil {
+					t.Fatalf("head child: %v", err)
+				}
+				if head.Size != int64(len("child")) {
+					t.Fatalf("child size = %d", head.Size)
+				}
+			},
+		},
+		{
+			name: "non-empty marker body rejected",
+			run: func(t *testing.T) {
+				backend, err := NewFileBackend(t.TempDir())
+				if err != nil {
+					t.Fatalf("new backend: %v", err)
+				}
+				_, err = backend.PutObjectWithOptions("test-bucket", "dir3/", stringsReader("x"), PutObjectOptions{ContentType: "text/plain"})
+				if !errors.Is(err, ErrInvalidObjectBody) {
+					t.Fatalf("err = %v, want ErrInvalidObjectBody", err)
+				}
+			},
+		},
+		{
+			name: "delete marker keeps children",
+			run: func(t *testing.T) {
+				backend, err := NewFileBackend(t.TempDir())
+				if err != nil {
+					t.Fatalf("new backend: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir4/", stringsReader(""), ""); err != nil {
+					t.Fatalf("put marker: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir4/file.txt", stringsReader("keep"), ""); err != nil {
+					t.Fatalf("put child: %v", err)
+				}
+				if err := backend.DeleteObject("test-bucket", "dir4/"); err != nil {
+					t.Fatalf("delete marker: %v", err)
+				}
+				if _, err := backend.HeadObject("test-bucket", "dir4/"); !errors.Is(err, ErrNoSuchKey) {
+					t.Fatalf("head deleted marker err = %v, want ErrNoSuchKey", err)
+				}
+				if _, err := backend.HeadObject("test-bucket", "dir4/file.txt"); err != nil {
+					t.Fatalf("head child after marker delete: %v", err)
+				}
+				listed, err := backend.ListObjects("test-bucket", "", "", "", 100)
+				if err != nil {
+					t.Fatalf("list: %v", err)
+				}
+				if gotKeys(listed.Objects) != "dir4/file.txt" {
+					t.Fatalf("objects = %q, want dir4/file.txt", gotKeys(listed.Objects))
+				}
+			},
+		},
+		{
+			name: "regular object blocks marker and child",
+			run: func(t *testing.T) {
+				backend, err := NewFileBackend(t.TempDir())
+				if err != nil {
+					t.Fatalf("new backend: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir5", stringsReader(""), "text/plain"); err != nil {
+					t.Fatalf("put regular: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir5/", stringsReader(""), ""); !errors.Is(err, ErrObjectConflict) {
+					t.Fatalf("put marker over regular err = %v, want ErrObjectConflict", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir5/file.txt", stringsReader("child"), ""); !errors.Is(err, ErrObjectConflict) {
+					t.Fatalf("put child under regular err = %v, want ErrObjectConflict", err)
+				}
+			},
+		},
+		{
+			name: "marker blocks regular object but allows children",
+			run: func(t *testing.T) {
+				backend, err := NewFileBackend(t.TempDir())
+				if err != nil {
+					t.Fatalf("new backend: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir6/", stringsReader(""), ""); err != nil {
+					t.Fatalf("put marker: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir6", stringsReader("regular"), ""); !errors.Is(err, ErrObjectConflict) {
+					t.Fatalf("put regular over marker err = %v, want ErrObjectConflict", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir6/file.txt", stringsReader("child"), ""); err != nil {
+					t.Fatalf("put child under marker: %v", err)
+				}
+			},
+		},
+		{
+			name: "legacy file-shaped marker remains readable and blocks children",
+			run: func(t *testing.T) {
+				backend, err := NewFileBackend(t.TempDir())
+				if err != nil {
+					t.Fatalf("new backend: %v", err)
+				}
+				if err := os.MkdirAll(filepath.Join(backend.root, "test-bucket"), 0o755); err != nil {
+					t.Fatalf("mkdir bucket: %v", err)
+				}
+				legacyPath := filepath.Join(backend.root, "test-bucket", "dir7")
+				if err := os.WriteFile(legacyPath, []byte{}, 0o644); err != nil {
+					t.Fatalf("write legacy marker file: %v", err)
+				}
+				if err := os.WriteFile(legacyPath+".s3meta", []byte("{}"), 0o644); err != nil {
+					t.Fatalf("write legacy sidecar: %v", err)
+				}
+				head, err := backend.HeadObject("test-bucket", "dir7")
+				if err != nil {
+					t.Fatalf("head legacy marker: %v", err)
+				}
+				if head.Size != 0 {
+					t.Fatalf("legacy marker size = %d", head.Size)
+				}
+				listed, err := backend.ListObjects("test-bucket", "", "", "", 100)
+				if err != nil {
+					t.Fatalf("list: %v", err)
+				}
+				if gotKeys(listed.Objects) != "dir7" {
+					t.Fatalf("objects = %q, want dir7", gotKeys(listed.Objects))
+				}
+				if _, err := backend.PutObject("test-bucket", "dir7/file.txt", stringsReader("child"), ""); !errors.Is(err, ErrObjectConflict) {
+					t.Fatalf("put child under legacy marker err = %v, want ErrObjectConflict", err)
+				}
+				if err := backend.DeleteObject("test-bucket", "dir7"); err != nil {
+					t.Fatalf("delete legacy marker: %v", err)
+				}
+				if _, err := backend.HeadObject("test-bucket", "dir7"); !errors.Is(err, ErrNoSuchKey) {
+					t.Fatalf("head after delete err = %v", err)
+				}
+			},
+		},
+		{
+			name: "list delimiter includes marker object and child prefixes",
+			run: func(t *testing.T) {
+				backend, err := NewFileBackend(t.TempDir())
+				if err != nil {
+					t.Fatalf("new backend: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir8/", stringsReader(""), ""); err != nil {
+					t.Fatalf("put marker: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir8/file.txt", stringsReader("a"), ""); err != nil {
+					t.Fatalf("put child: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir8/sub/deep.txt", stringsReader("b"), ""); err != nil {
+					t.Fatalf("put deep child: %v", err)
+				}
+				listed, err := backend.ListObjects("test-bucket", "dir8/", "/", "", 100)
+				if err != nil {
+					t.Fatalf("list: %v", err)
+				}
+				if gotKeys(listed.Objects) != "dir8/,dir8/file.txt" {
+					t.Fatalf("objects = %q, want dir8/,dir8/file.txt", gotKeys(listed.Objects))
+				}
+				if gotPrefixes(listed.CommonPrefixes) != "dir8/sub/" {
+					t.Fatalf("prefixes = %q, want dir8/sub/", gotPrefixes(listed.CommonPrefixes))
+				}
+			},
+		},
+		{
+			name: "pagination token is stable across markers",
+			run: func(t *testing.T) {
+				backend, err := NewFileBackend(t.TempDir())
+				if err != nil {
+					t.Fatalf("new backend: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir9/", stringsReader(""), ""); err != nil {
+					t.Fatalf("put marker: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir9/a.txt", stringsReader("a"), ""); err != nil {
+					t.Fatalf("put a: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir9/b.txt", stringsReader("b"), ""); err != nil {
+					t.Fatalf("put b: %v", err)
+				}
+				first, err := backend.ListObjects("test-bucket", "", "", "", 1)
+				if err != nil {
+					t.Fatalf("list first: %v", err)
+				}
+				if !first.IsTruncated || gotKeys(first.Objects) != "dir9/" || first.NextToken != "dir9/" {
+					t.Fatalf("first page = %+v", first)
+				}
+				second, err := backend.ListObjects("test-bucket", "", "", first.NextToken, 10)
+				if err != nil {
+					t.Fatalf("list second: %v", err)
+				}
+				if second.IsTruncated || gotKeys(second.Objects) != "dir9/a.txt,dir9/b.txt" {
+					t.Fatalf("second page = %+v", second)
+				}
+			},
+		},
+		{
+			name: "marker tags round-trip",
+			run: func(t *testing.T) {
+				backend, err := NewFileBackend(t.TempDir())
+				if err != nil {
+					t.Fatalf("new backend: %v", err)
+				}
+				if _, err := backend.PutObject("test-bucket", "dir10/", stringsReader(""), ""); err != nil {
+					t.Fatalf("put marker: %v", err)
+				}
+				if err := backend.PutObjectTags("test-bucket", "dir10/", map[string]string{"env": "prod"}); err != nil {
+					t.Fatalf("put tags: %v", err)
+				}
+				tags, err := backend.GetObjectTags("test-bucket", "dir10/")
+				if err != nil {
+					t.Fatalf("get tags: %v", err)
+				}
+				if tags["env"] != "prod" {
+					t.Fatalf("tags = %+v", tags)
+				}
+				head, err := backend.HeadObject("test-bucket", "dir10/")
+				if err != nil {
+					t.Fatalf("head tagged marker: %v", err)
+				}
+				if head.Metadata["env"] != "" {
+					t.Fatalf("tags leaked into metadata: %+v", head.Metadata)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, tc.run)
+	}
+}
+
+func TestDirectoryMarkerFailureLeavesNoDirectory(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	target := filepath.Join(backend.root, "test-bucket", "failed")
+	if _, err := backend.PutObject("test-bucket", "failed/", stringsReader("body"), ""); !errors.Is(err, ErrInvalidObjectBody) {
+		t.Fatalf("non-empty marker err = %v, want ErrInvalidObjectBody", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed marker left target %q, stat err = %v", target, err)
+	}
+
+	badMD5 := make([]byte, md5.Size)
+	if _, err := backend.PutObjectWithOptions("test-bucket", "digest-failed/", stringsReader(""), PutObjectOptions{ContentMD5: badMD5}); !errors.Is(err, ErrBadDigest) {
+		t.Fatalf("bad digest marker err = %v, want ErrBadDigest", err)
+	}
+	if _, err := os.Stat(filepath.Join(backend.root, "test-bucket", "digest-failed")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("digest-failed marker left directory, stat err = %v", err)
+	}
+}
+
+func TestLegacyFileMarkerTrailingSlashCompatibility(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	path := filepath.Join(backend.root, "test-bucket", "legacy")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSidecar(path, ".s3meta", Sidecar{ETag: emptyETag, Size: 0}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := backend.HeadObject("test-bucket", "legacy/"); err != nil {
+		t.Fatalf("head legacy marker with slash: %v", err)
+	}
+	rc, _, err := backend.GetObject("test-bucket", "legacy/", nil)
+	if err != nil {
+		t.Fatalf("get legacy marker with slash: %v", err)
+	}
+	_ = rc.Close()
+	if err := backend.DeleteObject("test-bucket", "legacy/"); err != nil {
+		t.Fatalf("delete legacy marker with slash: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy marker file remains, stat err = %v", err)
+	}
+}
+
+func TestFileBackendCopyDirectoryMarker(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	if _, err := backend.PutObject("test-bucket", "source/", stringsReader(""), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.PutObject("test-bucket", "source/child.txt", stringsReader("child"), ""); err != nil {
+		t.Fatal(err)
+	}
+	info, err := backend.CopyObject("test-bucket", "source/", "test-bucket", "copied/")
+	if err != nil {
+		t.Fatalf("copy marker: %v", err)
+	}
+	if info.Key != "copied/" || info.Size != 0 {
+		t.Fatalf("copied marker info = %+v", info)
+	}
+	if _, err := backend.HeadObject("test-bucket", "copied/"); err != nil {
+		t.Fatalf("head copied marker: %v", err)
+	}
+}

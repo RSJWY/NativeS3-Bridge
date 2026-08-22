@@ -181,3 +181,85 @@ func expectedMultipartETag(parts ...string) string {
 	full := md5.Sum(raw)
 	return hex.EncodeToString(full[:]) + "-" + strconv.Itoa(len(parts))
 }
+func TestMultipartCompleteZeroSizeMarker(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewMultipartStore(root, filepath.Join(root, ".multipart"), ".s3meta")
+	if err != nil {
+		t.Fatalf("new multipart store: %v", err)
+	}
+	uploadID, err := store.Create("test-bucket", "marker-dir/", "application/x-directory", map[string]string{"owner": "team"}, nil)
+	if err != nil {
+		t.Fatalf("create multipart: %v", err)
+	}
+	etag, err := store.UploadPart(uploadID, 1, strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("upload empty part: %v", err)
+	}
+
+	info, err := store.Complete(uploadID, []CompletedPart{{PartNumber: 1, ETag: etag}})
+	if err != nil {
+		t.Fatalf("complete marker: %v", err)
+	}
+	if info.Size != 0 || info.ETag != emptyETag || info.Key != "marker-dir/" {
+		t.Fatalf("marker info = %+v", info)
+	}
+	dirPath := filepath.Join(root, "test-bucket", "marker-dir")
+	if st, err := os.Stat(dirPath); err != nil || !st.IsDir() {
+		t.Fatalf("marker directory missing: %v", err)
+	}
+	sidecar, exists, err := ReadSidecar(dirPath, ".s3meta")
+	if err != nil || !exists || !sidecar.Directory {
+		t.Fatalf("marker sidecar = %+v exists=%t err=%v", sidecar, exists, err)
+	}
+	if sidecar.Metadata["owner"] != "team" {
+		t.Fatalf("sidecar metadata = %+v", sidecar.Metadata)
+	}
+}
+
+func TestMultipartCompleteRejectsNonEmptyMarker(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewMultipartStore(root, filepath.Join(root, ".multipart"), ".s3meta")
+	if err != nil {
+		t.Fatalf("new multipart store: %v", err)
+	}
+	uploadID, err := store.Create("test-bucket", "marker-dir2/", "", nil, nil)
+	if err != nil {
+		t.Fatalf("create multipart: %v", err)
+	}
+	etag, err := store.UploadPart(uploadID, 1, strings.NewReader("x"))
+	if err != nil {
+		t.Fatalf("upload part: %v", err)
+	}
+
+	_, err = store.Complete(uploadID, []CompletedPart{{PartNumber: 1, ETag: etag}})
+	if !errors.Is(err, ErrInvalidObjectBody) {
+		t.Fatalf("complete non-empty marker err = %v, want ErrInvalidObjectBody", err)
+	}
+}
+
+func TestMultipartCompleteRejectsConflictWithRegularObject(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "test-bucket"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "test-bucket", "parent"), []byte("regular"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewMultipartStore(root, filepath.Join(root, ".multipart"), ".s3meta")
+	if err != nil {
+		t.Fatalf("new multipart store: %v", err)
+	}
+	uploadID, err := store.Create("test-bucket", "parent/child.bin", "", nil, nil)
+	if err != nil {
+		t.Fatalf("create multipart: %v", err)
+	}
+	etag, err := store.UploadPart(uploadID, 1, strings.NewReader("data"))
+	if err != nil {
+		t.Fatalf("upload part: %v", err)
+	}
+
+	_, err = store.Complete(uploadID, []CompletedPart{{PartNumber: 1, ETag: etag}})
+	if !errors.Is(err, ErrObjectConflict) {
+		t.Fatalf("complete under regular object err = %v, want ErrObjectConflict", err)
+	}
+}

@@ -20,11 +20,15 @@ import (
 )
 
 var (
-	ErrNoSuchBucket  = errors.New("no such bucket")
-	ErrNoSuchKey     = errors.New("no such key")
-	ErrInvalidRange  = errors.New("invalid range")
-	ErrBadDigest     = errors.New("bad digest")
-	ErrInvalidDigest = errors.New("invalid digest")
+	ErrNoSuchBucket      = errors.New("no such bucket")
+	ErrNoSuchKey         = errors.New("no such key")
+	ErrInvalidRange      = errors.New("invalid range")
+	ErrBadDigest         = errors.New("bad digest")
+	ErrInvalidDigest     = errors.New("invalid digest")
+	ErrObjectConflict    = errors.New("object conflicts with existing directory or regular object")
+	ErrInvalidObjectBody = errors.New("invalid object body")
+
+	emptyETag = "d41d8cd98f00b204e9800998ecf8427e"
 )
 
 type FileBackend struct {
@@ -65,10 +69,71 @@ func (b *FileBackend) PutObjectWithOptions(bucket, key string, r io.Reader, opts
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	target, err := ResolveObjectPath(b.root, bucket, key)
+	target, isMarker, err := b.preparePutTarget(bucket, key)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
+
+	resolvedContentType := normalizeContentType(opts.ContentType, key)
+	meta := cloneStringMap(opts.Metadata)
+	now := time.Now().UTC()
+
+	if isMarker {
+		h := md5.New()
+		var sha256Hasher hash.Hash
+		writers := []io.Writer{h}
+		if expectedSHA256 != nil {
+			sha256Hasher = sha256.New()
+			writers = append(writers, sha256Hasher)
+		}
+		size, copyErr := io.Copy(io.MultiWriter(writers...), io.LimitReader(r, 1))
+		if copyErr != nil {
+			return ObjectInfo{}, copyErr
+		}
+		if size > 0 {
+			return ObjectInfo{}, ErrInvalidObjectBody
+		}
+		computedMD5 := h.Sum(nil)
+		if len(opts.ContentMD5) > 0 && !bytes.Equal(computedMD5, opts.ContentMD5) {
+			return ObjectInfo{}, ErrBadDigest
+		}
+		if expectedSHA256 != nil && !bytes.Equal(sha256Hasher.Sum(nil), expectedSHA256) {
+			return ObjectInfo{}, ErrBadDigest
+		}
+		_, statErr := os.Stat(target)
+		createdDir := errors.Is(statErr, os.ErrNotExist)
+		if statErr != nil && !createdDir {
+			return ObjectInfo{}, statErr
+		}
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return ObjectInfo{}, err
+		}
+
+		if err := WriteSidecar(target, b.metadataSuffix, Sidecar{
+			ETag:        emptyETag,
+			ContentType: resolvedContentType,
+			Metadata:    meta,
+			Tags:        map[string]string{},
+			Size:        0,
+			Directory:   true,
+			UploadedAt:  now.Format(time.RFC3339),
+		}); err != nil {
+			if createdDir {
+				_ = os.Remove(target)
+			}
+			return ObjectInfo{}, err
+		}
+		b.setContentType(target, resolvedContentType)
+		return ObjectInfo{
+			Key:          filepath.ToSlash(key),
+			Size:         0,
+			ETag:         emptyETag,
+			LastModified: now,
+			ContentType:  resolvedContentType,
+			Metadata:     meta,
+		}, nil
+	}
+
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return ObjectInfo{}, err
 	}
@@ -111,16 +176,14 @@ func (b *FileBackend) PutObjectWithOptions(bucket, key string, r io.Reader, opts
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	resolvedContentType := normalizeContentType(opts.ContentType, key)
 	etag := hex.EncodeToString(computedMD5)
-	meta := cloneStringMap(opts.Metadata)
 	if err := WriteSidecar(target, b.metadataSuffix, Sidecar{
 		ETag:        etag,
 		ContentType: resolvedContentType,
 		Metadata:    meta,
 		Tags:        map[string]string{},
 		Size:        size,
-		UploadedAt:  time.Now().UTC().Format(time.RFC3339),
+		UploadedAt:  now.Format(time.RFC3339),
 	}); err != nil {
 		return ObjectInfo{}, err
 	}
@@ -158,6 +221,20 @@ func (b *FileBackend) GetObject(bucket, key string, rng *Range) (io.ReadCloser, 
 	if err != nil {
 		return nil, ObjectInfo{}, err
 	}
+	if isMarkerKey(key) {
+		if !isDirectoryMarker(target, b.metadataSuffix) {
+			if !isLegacyFileMarker(target, b.metadataSuffix) {
+				return nil, ObjectInfo{}, ErrNoSuchKey
+			}
+		}
+		if rng != nil {
+			if _, err := NormalizeRange(info.Size, *rng); err != nil {
+				return nil, ObjectInfo{}, err
+			}
+		}
+		return io.NopCloser(strings.NewReader("")), info, nil
+	}
+
 	f, err := os.Open(target)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -186,6 +263,60 @@ func (b *FileBackend) HeadObject(bucket, key string) (ObjectInfo, error) {
 	if err := b.ensureBucketExists(bucket); err != nil {
 		return ObjectInfo{}, err
 	}
+
+	if isMarkerKey(key) {
+		info, err := os.Stat(target)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return ObjectInfo{}, ErrNoSuchKey
+			}
+			return ObjectInfo{}, err
+		}
+		if !info.IsDir() {
+			if !isLegacyFileMarker(target, b.metadataSuffix) {
+				return ObjectInfo{}, ErrNoSuchKey
+			}
+			sidecar, exists, err := ReadSidecar(target, b.metadataSuffix)
+			if err != nil {
+				return ObjectInfo{}, err
+			}
+			contentType := b.contentTypeFor(target, key)
+			metadata := map[string]string{}
+			etag := ""
+			if exists {
+				etag = sidecar.ETag
+				contentType = normalizeSidecarContentType(sidecar, contentType)
+				metadata = cloneStringMap(sidecar.Metadata)
+			}
+			if etag == "" {
+				etag, err = fileMD5(target)
+				if err != nil {
+					return ObjectInfo{}, err
+				}
+			}
+			return ObjectInfo{Key: filepath.ToSlash(key), Size: 0, ETag: etag, LastModified: info.ModTime().UTC(), ContentType: contentType, Metadata: metadata}, nil
+		}
+		sidecar, exists, err := ReadSidecar(target, b.metadataSuffix)
+		if err != nil {
+			return ObjectInfo{}, err
+		}
+		if !exists || !sidecar.Directory {
+			return ObjectInfo{}, ErrNoSuchKey
+		}
+		contentType := b.contentTypeFor(target, key)
+		if sidecar.ContentType != "" {
+			contentType = sidecar.ContentType
+		}
+		return ObjectInfo{
+			Key:          filepath.ToSlash(key),
+			Size:         0,
+			ETag:         emptyETag,
+			LastModified: info.ModTime().UTC(),
+			ContentType:  contentType,
+			Metadata:     cloneStringMap(sidecar.Metadata),
+		}, nil
+	}
+
 	info, err := os.Stat(target)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -236,6 +367,37 @@ func (b *FileBackend) DeleteObject(bucket, key string) error {
 	if err := b.ensureBucketExists(bucket); err != nil {
 		return err
 	}
+
+	if isMarkerKey(key) {
+		sidecarPath := markerSidecarPath(target, b.metadataSuffix)
+		legacyFile := isLegacyFileMarker(target, b.metadataSuffix)
+		if _, err := os.Stat(sidecarPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return ErrNoSuchKey
+			}
+			return err
+		}
+		if err := os.Remove(sidecarPath); err != nil {
+			return err
+		}
+		b.deleteContentType(target)
+		if info, statErr := os.Stat(target); statErr == nil {
+			if info.IsDir() {
+				entries, err := os.ReadDir(target)
+				if err == nil && len(entries) == 0 {
+					_ = os.Remove(target)
+				}
+			} else if legacyFile {
+				_ = os.Remove(target)
+			}
+		}
+		return nil
+	}
+
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		return ErrNoSuchKey
+	}
+
 	err = os.Remove(target)
 	if errors.Is(err, os.ErrNotExist) {
 		b.deleteContentType(target)
@@ -260,13 +422,16 @@ func (b *FileBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (O
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	dstPath, err := ResolveObjectPath(b.root, dstBucket, dstKey)
+	srcIsMarker := isMarkerKey(srcKey) && isDirectoryMarker(srcPath, b.metadataSuffix)
+
+	dstPath, isMarker, err := b.preparePutTarget(dstBucket, dstKey)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
 	if err := b.ensureBucketExists(dstBucket); err != nil {
 		return ObjectInfo{}, err
 	}
+
 	sidecar, exists, err := ReadSidecar(srcPath, b.metadataSuffix)
 	if err != nil {
 		return ObjectInfo{}, err
@@ -288,12 +453,50 @@ func (b *FileBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (O
 		sidecar.Tags = map[string]string{}
 	}
 
-	in, err := os.Open(srcPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ObjectInfo{}, ErrNoSuchKey
+	contentType := normalizeContentType(sidecar.ContentType, dstKey)
+	metadata := cloneStringMap(sidecar.Metadata)
+	now := time.Now().UTC()
+
+	if isMarker {
+		if srcInfo.Size != 0 {
+			return ObjectInfo{}, ErrInvalidObjectBody
 		}
-		return ObjectInfo{}, err
+		if err := os.MkdirAll(dstPath, 0o755); err != nil {
+			return ObjectInfo{}, err
+		}
+		if err := WriteSidecar(dstPath, b.metadataSuffix, Sidecar{
+			ETag:        emptyETag,
+			ContentType: contentType,
+			Metadata:    metadata,
+			Tags:        cloneStringMap(sidecar.Tags),
+			Size:        0,
+			Directory:   true,
+			UploadedAt:  now.Format(time.RFC3339),
+		}); err != nil {
+			return ObjectInfo{}, err
+		}
+		b.setContentType(dstPath, contentType)
+		return ObjectInfo{
+			Key:          filepath.ToSlash(dstKey),
+			Size:         0,
+			ETag:         emptyETag,
+			LastModified: now,
+			ContentType:  contentType,
+			Metadata:     metadata,
+		}, nil
+	}
+
+	var in io.ReadCloser
+	if srcIsMarker {
+		in = io.NopCloser(strings.NewReader(""))
+	} else {
+		in, err = os.Open(srcPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return ObjectInfo{}, ErrNoSuchKey
+			}
+			return ObjectInfo{}, err
+		}
 	}
 	defer in.Close()
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
@@ -323,15 +526,13 @@ func (b *FileBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (O
 		return ObjectInfo{}, err
 	}
 	etag := hex.EncodeToString(h.Sum(nil))
-	metadata := cloneStringMap(sidecar.Metadata)
-	contentType := normalizeContentType(sidecar.ContentType, dstKey)
 	if err := WriteSidecar(dstPath, b.metadataSuffix, Sidecar{
 		ETag:        etag,
 		ContentType: contentType,
 		Metadata:    metadata,
 		Tags:        cloneStringMap(sidecar.Tags),
 		Size:        size,
-		UploadedAt:  time.Now().UTC().Format(time.RFC3339),
+		UploadedAt:  now.Format(time.RFC3339),
 	}); err != nil {
 		return ObjectInfo{}, err
 	}
@@ -361,7 +562,7 @@ func (b *FileBackend) PutObjectTags(bucket, key string, tags map[string]string) 
 	if sidecar.ContentType == "" {
 		sidecar.ContentType = info.ContentType
 	}
-	if sidecar.Size == 0 {
+	if sidecar.Size == 0 && !sidecar.Directory {
 		sidecar.Size = info.Size
 	}
 	return WriteSidecar(target, b.metadataSuffix, sidecar)
@@ -406,8 +607,36 @@ func (b *FileBackend) ListObjects(bucket, prefix, delimiter, token string, maxKe
 		}
 		name := d.Name()
 		if d.IsDir() {
+			if p == bucketDir {
+				return nil
+			}
 			if name == ".multipart" {
 				return filepath.SkipDir
+			}
+			rel, err := filepath.Rel(bucketDir, p)
+			if err != nil {
+				return err
+			}
+			markerKey := filepath.ToSlash(rel) + "/"
+			if strings.HasPrefix(markerKey, prefix) {
+				if delimiter == "/" {
+					remainder := strings.TrimPrefix(markerKey, prefix)
+					if idx := strings.Index(remainder, "/"); idx >= 0 {
+						common[prefix+remainder[:idx+1]] = struct{}{}
+					} else if isDirectoryMarker(p, b.metadataSuffix) {
+						obj, err := b.HeadObject(bucket, markerKey)
+						if err != nil {
+							return err
+						}
+						objects = append(objects, obj)
+					}
+				} else if isDirectoryMarker(p, b.metadataSuffix) {
+					obj, err := b.HeadObject(bucket, markerKey)
+					if err != nil {
+						return err
+					}
+					objects = append(objects, obj)
+				}
 			}
 			return nil
 		}
@@ -613,6 +842,49 @@ func (b *FileBackend) deleteContentType(path string) {
 	delete(b.contentTypes, path)
 }
 
+func (b *FileBackend) preparePutTarget(bucket, key string) (string, bool, error) {
+	isMarker := isMarkerKey(key)
+	resolveKey := key
+	if isMarker {
+		resolveKey = strings.TrimSuffix(key, "/")
+		if resolveKey == "" {
+			return "", false, ErrInvalidPath
+		}
+	}
+	target, err := ResolveObjectPath(b.root, bucket, resolveKey)
+	if err != nil {
+		return "", false, err
+	}
+	bucketDir, err := ResolveBucketPath(b.root, bucket)
+	if err != nil {
+		return "", false, err
+	}
+
+	sep := string(filepath.Separator)
+	for p := filepath.Dir(target); p != bucketDir && strings.HasPrefix(p, bucketDir+sep); p = filepath.Dir(p) {
+		info, err := os.Stat(p)
+		if err == nil && info.Mode().IsRegular() {
+			return "", false, ErrObjectConflict
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", false, err
+		}
+	}
+
+	info, err := os.Stat(target)
+	if err == nil {
+		if isMarker && info.Mode().IsRegular() {
+			return "", false, ErrObjectConflict
+		}
+		if !isMarker && info.IsDir() {
+			return "", false, ErrObjectConflict
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+	return target, isMarker, nil
+}
+
 func NormalizeRange(size int64, rng Range) (Range, error) {
 	if size < 0 || rng.Start < 0 {
 		return Range{}, ErrInvalidRange
@@ -686,4 +958,34 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func isMarkerKey(key string) bool { return strings.HasSuffix(key, "/") }
+
+func markerSidecarPath(dirPath, suffix string) string {
+	if suffix == "" {
+		suffix = DefaultMetadataSuffix
+	}
+	return dirPath + suffix
+}
+
+func isDirectoryMarker(dirPath, suffix string) bool {
+	sidecar, exists, err := ReadSidecar(dirPath, suffix)
+	return err == nil && exists && sidecar.Directory
+}
+
+func isLegacyFileMarker(path, suffix string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
+		return false
+	}
+	sidecar, exists, err := ReadSidecar(path, suffix)
+	return err == nil && exists && !sidecar.Directory
+}
+
+func normalizeSidecarContentType(sidecar Sidecar, fallback string) string {
+	if sidecar.ContentType != "" {
+		return sidecar.ContentType
+	}
+	return fallback
 }

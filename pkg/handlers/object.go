@@ -511,6 +511,10 @@ func writeStorageError(w http.ResponseWriter, err error, resource string) {
 		WriteS3Error(w, "InvalidDigest", http.StatusBadRequest, resource)
 	case errors.Is(err, storage.ErrBucketNotEmpty):
 		WriteS3Error(w, "BucketNotEmpty", http.StatusConflict, resource)
+	case errors.Is(err, storage.ErrObjectConflict):
+		WriteS3Error(w, "Conflict", http.StatusConflict, resource)
+	case errors.Is(err, storage.ErrInvalidObjectBody):
+		WriteS3Error(w, "InvalidArgument", http.StatusBadRequest, resource)
 	case errors.Is(err, awschunked.ErrMalformedChunk), errors.Is(err, awschunked.ErrSizeMismatch):
 		WriteS3Error(w, "IncompleteBody", http.StatusBadRequest, resource)
 	case errors.Is(err, awschunked.ErrChecksumMismatch):

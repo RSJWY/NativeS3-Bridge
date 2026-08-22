@@ -393,3 +393,85 @@ func md5Hex(s string) string {
 	sum := md5.Sum([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
+func TestPutObjectConflictReturns409(t *testing.T) {
+	backend, err := storage.NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	if _, err := backend.PutObject("test-bucket", "dir", strings.NewReader("regular object"), "text/plain"); err != nil {
+		t.Fatalf("put regular object: %v", err)
+	}
+	h := NewObjectHandler(backend, nil)
+
+	markerReq := newSignedPutRequest("/test-bucket/dir/", "")
+	markerRR := httptest.NewRecorder()
+	h.Put(markerRR, markerReq, "test-bucket", "dir/")
+	if markerRR.Code != http.StatusConflict || errorCodeFromResponse(t, markerRR) != "Conflict" {
+		t.Fatalf("marker conflict status/code = %d/%s, body = %s", markerRR.Code, errorCodeFromResponse(t, markerRR), markerRR.Body.String())
+	}
+
+	childReq := newSignedPutRequest("/test-bucket/dir/file.txt", "child")
+	childRR := httptest.NewRecorder()
+	h.Put(childRR, childReq, "test-bucket", "dir/file.txt")
+	if childRR.Code != http.StatusConflict || errorCodeFromResponse(t, childRR) != "Conflict" {
+		t.Fatalf("child conflict status/code = %d/%s, body = %s", childRR.Code, errorCodeFromResponse(t, childRR), childRR.Body.String())
+	}
+}
+
+func TestDirectoryMarkerEndToEnd(t *testing.T) {
+	backend, err := storage.NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	emitter := &recordingEmitter{}
+	h := NewObjectHandlerWithHooks(backend, func(_ uint, _ int64, _ quota.Op) error { return nil }, emitter)
+
+	putMarker := newSignedPutRequest("/test-bucket/dir/", "")
+	putMarker.Header.Set("Content-Type", "application/x-directory")
+	putMarkerRR := httptest.NewRecorder()
+	h.Put(putMarkerRR, putMarker, "test-bucket", "dir/")
+	if putMarkerRR.Code != http.StatusOK {
+		t.Fatalf("put marker status = %d, body = %s", putMarkerRR.Code, putMarkerRR.Body.String())
+	}
+	if putMarkerRR.Header().Get("ETag") != `"d41d8cd98f00b204e9800998ecf8427e"` {
+		t.Fatalf("marker etag = %q, want quoted empty etag", putMarkerRR.Header().Get("ETag"))
+	}
+	if len(emitter.events) != 1 || emitter.events[0].Type != hooks.ObjectCreated || emitter.events[0].Key != "dir/" {
+		t.Fatalf("marker events = %+v", emitter.events)
+	}
+
+	headReq := httptest.NewRequest(http.MethodHead, "/test-bucket/dir/", nil)
+	headRR := httptest.NewRecorder()
+	h.Head(headRR, headReq, "test-bucket", "dir/")
+	if headRR.Code != http.StatusOK {
+		t.Fatalf("head marker status = %d", headRR.Code)
+	}
+	if headRR.Header().Get("Content-Length") != "0" {
+		t.Fatalf("marker content-length = %q", headRR.Header().Get("Content-Length"))
+	}
+
+	putChild := newSignedPutRequest("/test-bucket/dir/file.txt", "child content")
+	putChildRR := httptest.NewRecorder()
+	h.Put(putChildRR, putChild, "test-bucket", "dir/file.txt")
+	if putChildRR.Code != http.StatusOK {
+		t.Fatalf("put child status = %d, body = %s", putChildRR.Code, putChildRR.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/test-bucket?prefix=dir/&delimiter=", nil)
+	listRR := httptest.NewRecorder()
+	h.ListObjectsV2(listRR, listReq, "test-bucket")
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", listRR.Code, listRR.Body.String())
+	}
+	var listResp listBucketResult
+	if err := xml.Unmarshal(listRR.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	keys := make([]string, 0, len(listResp.Contents))
+	for _, c := range listResp.Contents {
+		keys = append(keys, c.Key)
+	}
+	if strings.Join(keys, ",") != "dir/,dir/file.txt" {
+		t.Fatalf("list contents = %q, want dir/,dir/file.txt", keys)
+	}
+}

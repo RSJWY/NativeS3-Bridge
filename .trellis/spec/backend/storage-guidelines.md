@@ -263,6 +263,47 @@ etag, err := store.UploadPart(uploadID, partNumber, r.Body)
 - Wrong: infer objects from a database table or sidecars.
 - Correct: walk the native bucket directory with `ListObjects` exclusions because disk is the object truth source.
 
+## Scenario: Directory Markers
+
+### 1. Scope / Trigger
+- Trigger: changes to `FileBackend` object write/read/delete/list/copy, multipart completion, object tagging, reconciliation, or S3 error mapping that affect keys ending in `/`.
+- Goal: represent explicit S3 directory markers as real directories with marker sidecars, keep ordinary object bytes in native files, and make directory prefixes mutually exclusive with same-name regular objects.
+
+### 2. Storage Model
+- An explicit directory marker for key `dir/` is stored as:
+  - `data_root/bucket/dir/` — a real directory, required by child objects.
+  - `data_root/bucket/dir.s3meta` — a sidecar with `"directory": true` and size `0`.
+- The marker sidecar uses the configured metadata suffix (default `.s3meta`) and the additive JSON field `directory`. Sidecars without the field remain ordinary objects.
+- Ordinary object `dir` and directory prefix `dir/` are mutually exclusive in this model.
+
+### 3. Contracts
+- `PutObject("bucket", "dir/", emptyBody, ...)` creates the directory and writes a marker sidecar with `directory: true`, size `0`, and the empty-object MD5 ETag `d41d8cd98f00b204e9800998ecf8427e`.
+- A trailing-slash key rejects any non-empty body with `ErrInvalidObjectBody`, mapped to HTTP `400 InvalidArgument`.
+- `PutObject("bucket", "dir/file", ...)` succeeds after `dir/` marker creation; it fails with `ErrObjectConflict` if a regular file named `dir` exists.
+- `PutObject("bucket", "dir", ...)` fails with `ErrObjectConflict` if a directory marker `dir/` exists.
+- `HeadObject`/`GetObject` on a marker key return size `0`; `GetObject` with a Range header returns `ErrInvalidRange` because the size is `0`.
+- `DeleteObject("bucket", "dir/")` removes only the marker sidecar. The directory is removed only when it becomes empty; children are preserved.
+- `ListObjects` includes explicit markers as zero-size `Contents` entries (when the prefix/delimiter combination exposes the exact key) and continues to return child objects and `CommonPrefixes`.
+- `CopyObject` and multipart `Complete` reuse the same target-preparation logic and reject directory/regular-object conflicts and non-empty marker targets.
+- `ReconcileBucket` counts a valid marker sidecar as one object with zero bytes and does not report it as an orphan sidecar.
+
+### 4. Validation & Error Matrix
+- Directory/regular object conflict -> `ErrObjectConflict` -> HTTP `409 Conflict` XML.
+- Non-empty body for trailing-slash key -> `ErrInvalidObjectBody` -> HTTP `400 InvalidArgument` XML.
+- Missing marker sidecar for a trailing-slash key -> `ErrNoSuchKey` -> HTTP `404 NoSuchKey` XML.
+
+### 5. Legacy Data and Migration
+- Old code wrote `dir/` as a zero-byte regular file named `dir` plus an ordinary sidecar. These legacy markers remain readable, listable, and deletable as ordinary objects.
+- For a legacy zero-byte file with an existing ordinary sidecar, trailing-slash `HEAD`/`GET`/`DELETE` is accepted as a compatibility alias; deletion removes both the sidecar and legacy file. Child writes remain rejected until migration.
+- Because old sidecars have no reliable marker bit, the implementation does not silently convert zero-byte files into directory markers.
+- Migration: delete the legacy object key (`dir`) and then issue `PUT dir/` to create the real directory marker. Until migration, child writes under the legacy file return `ErrObjectConflict`/409 instead of an internal error.
+
+### 6. Tests Required
+- Marker PUT/HEAD/GET/DELETE, child writes, conflict with regular objects, legacy file-shaped marker compatibility, list with delimiter/pagination, and marker tag round-trip.
+- Reconcile object/byte counts for buckets containing directory markers.
+- Multipart completion to a trailing-slash key for zero-size and non-zero-size cases.
+- Handler-level mapping of `ErrObjectConflict` to HTTP 409 and an end-to-end trailing-slash flow.
+
 ## Scenario: Managed Node Storage Telemetry Accounting
 
 ### 1. Scope / Trigger

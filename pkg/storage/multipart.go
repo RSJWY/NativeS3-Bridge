@@ -241,20 +241,55 @@ func (s *MultipartStore) ExistingObject(uploadID string) (size int64, exists boo
 	return info.Size(), true, nil
 }
 
+func (s *MultipartStore) prepareTarget(bucket, key string) (string, bool, error) {
+	isMarker := isMarkerKey(key)
+	resolveKey := key
+	if isMarker {
+		resolveKey = strings.TrimSuffix(key, "/")
+		if resolveKey == "" {
+			return "", false, ErrInvalidPath
+		}
+	}
+	target, err := ResolveObjectPath(s.root, bucket, resolveKey)
+	if err != nil {
+		return "", false, err
+	}
+	bucketDir, err := ResolveBucketPath(s.root, bucket)
+	if err != nil {
+		return "", false, err
+	}
+
+	sep := string(filepath.Separator)
+	for p := filepath.Dir(target); p != bucketDir && strings.HasPrefix(p, bucketDir+sep); p = filepath.Dir(p) {
+		info, err := os.Stat(p)
+		if err == nil && info.Mode().IsRegular() {
+			return "", false, ErrObjectConflict
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", false, err
+		}
+	}
+
+	info, err := os.Stat(target)
+	if err == nil {
+		if isMarker && info.Mode().IsRegular() {
+			return "", false, ErrObjectConflict
+		}
+		if !isMarker && info.IsDir() {
+			return "", false, ErrObjectConflict
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+	return target, isMarker, nil
+}
+
 func (s *MultipartStore) Complete(uploadID string, parts []CompletedPart) (ObjectInfo, error) {
 	manifest, err := s.validateParts(uploadID, parts)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	target, err := ResolveObjectPath(s.root, manifest.Bucket, manifest.Key)
-	if err != nil {
-		return ObjectInfo{}, err
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return ObjectInfo{}, err
-	}
-	tmp := target + ".merge-" + uploadID
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	target, isMarker, err := s.prepareTarget(manifest.Bucket, manifest.Key)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
@@ -265,15 +300,62 @@ func (s *MultipartStore) Complete(uploadID string, parts []CompletedPart) (Objec
 		partPath := s.partPath(uploadID, part.PartNumber)
 		partETag, md5Bytes, size, err := partDigest(partPath)
 		if err != nil {
-			_ = out.Close()
-			_ = os.Remove(tmp)
 			return ObjectInfo{}, err
 		}
 		if normalizeETag(part.ETag) != partETag {
-			_ = out.Close()
-			_ = os.Remove(tmp)
 			return ObjectInfo{}, ErrInvalidPart
 		}
+		partMD5s = append(partMD5s, md5Bytes...)
+		total += size
+	}
+
+	if isMarker {
+		if total != 0 {
+			return ObjectInfo{}, ErrInvalidObjectBody
+		}
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return ObjectInfo{}, err
+		}
+		contentType := normalizeContentType(manifest.ContentType, manifest.Key)
+		metadata := cloneStringMap(manifest.Metadata)
+		if err := WriteSidecar(target, s.metadataSuffix, Sidecar{
+			ETag:        emptyETag,
+			ContentType: contentType,
+			Metadata:    metadata,
+			Tags:        cloneStringMap(manifest.Tags),
+			Size:        0,
+			Directory:   true,
+			UploadedAt:  time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			return ObjectInfo{}, err
+		}
+		if err := os.RemoveAll(s.uploadDir(uploadID)); err != nil {
+			return ObjectInfo{}, err
+		}
+		stat, err := os.Stat(target)
+		if err != nil {
+			return ObjectInfo{}, err
+		}
+		return ObjectInfo{
+			Key:          filepath.ToSlash(manifest.Key),
+			Size:         0,
+			ETag:         emptyETag,
+			LastModified: stat.ModTime().UTC(),
+			ContentType:  contentType,
+			Metadata:     metadata,
+		}, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return ObjectInfo{}, err
+	}
+	tmp := target + ".merge-" + uploadID
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	for _, part := range parts {
+		partPath := s.partPath(uploadID, part.PartNumber)
 		in, err := os.Open(partPath)
 		if err != nil {
 			_ = out.Close()
@@ -287,8 +369,6 @@ func (s *MultipartStore) Complete(uploadID string, parts []CompletedPart) (Objec
 			_ = os.Remove(tmp)
 			return ObjectInfo{}, firstErr(copyErr, closeErr)
 		}
-		partMD5s = append(partMD5s, md5Bytes...)
-		total += size
 	}
 	syncErr := out.Sync()
 	closeErr := out.Close()

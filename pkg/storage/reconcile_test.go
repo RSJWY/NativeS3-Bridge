@@ -68,3 +68,24 @@ func TestReconcileBucketEmpty(t *testing.T) {
 		t.Fatalf("empty report = %+v", report)
 	}
 }
+func TestReconcileBucketCountsDirectoryMarkers(t *testing.T) {
+	root := t.TempDir()
+	bucketPath := filepath.Join(root, "test-bucket")
+	if err := os.MkdirAll(filepath.Join(bucketPath, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bucketPath, "dir.s3meta"), []byte(`{"directory":true,"size":0}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bucketPath, "dir", "file.txt"), []byte("12345"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := ReconcileBucket(root, "test-bucket", ".s3meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ObjectCount != 2 || report.ScannedBytes != 5 || report.OrphanSidecarCount() != 0 {
+		t.Fatalf("report = %+v, orphan count = %d", report, report.OrphanSidecarCount())
+	}
+}

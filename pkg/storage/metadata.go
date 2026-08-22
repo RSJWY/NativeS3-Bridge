@@ -17,6 +17,7 @@ type Sidecar struct {
 	Tags        map[string]string `json:"tags"`
 	Size        int64             `json:"size"`
 	UploadedAt  string            `json:"uploaded_at"`
+	Directory   bool              `json:"directory"`
 }
 
 func WriteSidecar(objPath, suffix string, s Sidecar) error {
