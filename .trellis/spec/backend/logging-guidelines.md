@@ -35,6 +35,7 @@
 - The `request_id` log field must exactly match the `x-amz-request-id` response header for that request.
 - Auth rejection logs use `slog.Warn("s3 auth denied", ...)` with the same `request_id`, `method`, and path plus stable `reason` and S3 `code`: `verify_failed`, `bucket_mismatch`, `credentials_required`, `acl_lookup_unavailable`, `acl_lookup_failed`, or `anonymous_not_allowed`.
 - Bucket mismatches add `bound_bucket`/`request_bucket`; anonymous ACL failures add non-secret bucket/existence/ACL diagnostics. Never log access keys, Authorization, secret material, raw query strings, or signature values.
+- The `node -health` probe (Docker healthcheck) sends an anonymous `GET /`, which by design logs `s3 auth denied reason=credentials_required code=AccessDenied` with a 403 on every probe interval. This periodic WARN is expected health-check noise; real client auth failures use other reasons (`verify_failed`, `bucket_mismatch`, ...). When triaging an outage, filter out `credentials_required` and correlate real failures by request ID.
 - S3 access logs may include method and path, but must not include Authorization headers, secret keys, session cookies, request bodies, object payloads, or presigned query signatures.
 
 ### 4. Validation & Error Matrix
@@ -115,6 +116,7 @@ logAuthDenied(w, r, "verify_failed", auth.ErrorCode(err))
 
 - Do not generate separate IDs for the log, response header, and XML error body; generate once in `Logging` and let S3 error helpers preserve the header.
 - Do not log signed URL query strings with `r.URL.String()` on S3 requests; prefer `r.URL.Path` to avoid persisting signatures or other query parameters.
+- Do not misread the periodic `credentials_required` WARN from the node healthcheck as an auth outage; conversely, do not dismiss `verify_failed`/`SignatureDoesNotMatch` as noise — when signed requests fail while the credentials are provably correct, suspect a middlebox (reverse proxy cache/WAF/CDN) rewriting signature-covered fields (method/path/query/headers) and diff the proxy access log against the node `s3 request` log.
 
 ## Scenario: Rotating File And Admin Ring Logging
 

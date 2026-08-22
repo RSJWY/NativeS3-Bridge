@@ -938,3 +938,32 @@ Implemented and hardened node storage telemetry end to end: persistent counters,
 ### Status
 
 [OK] **Completed**
+
+## Session 29: 排查线上 OpenList 访问 403(SignatureDoesNotMatch)——根因为反代层 HEAD→GET 改写
+
+**Date**: 2026-08-22
+**Task**: 线上 node-1 对 OpenList 对象级请求持续 403 的故障排查(非代码 bug)
+**Branch**: `main`
+
+### Summary
+
+- 用户报告 node-1 运行一段时间后 S3 403,重启无效、"轮换密钥才恢复"。日志里的 `credentials_required` 实为 docker healthcheck(`node -health` 匿名 `GET /`,每 30s)的预期噪音。
+- 用客户端报错中的 request id 反查 node 日志,确认真实失败是 `verify_failed` + `SignatureDoesNotMatch`,且 OpenList 发出 HEAD、网关却记录 GET。
+- 本地用 aws-sdk-go v1(与 OpenList 相同)对同源码网关做请求矩阵(中文/特殊字符 key、continuation-token 翻页、response-content-disposition)全部通过,排除网关验签问题;铁证实验:HEAD 签名以 GET 发送 → 精确复现 `SignatureDoesNotMatch`。
+- 根因:宝塔 nginx 反代层的缓存类功能把 HEAD 改写成 GET(proxy_cache 系),SigV4 将 method 纳入签名故必败。"轮换恢复"是错觉(根目录列表是 GET 本来就通)。
+- 文档更新:docs/public-deployment.md 增加"严禁缓存 S3 数据面(缓存键不含 Authorization → 越权泄露)"、宝塔插件/proxy_cache_path 残留、request id 反查法、`log.dir` 需挂载卷;README 安全要点同步;logging spec 增加 healthcheck WARN 噪音契约与排障指引。
+- 附带发现(未修,待立项):`PutObject "dir/"` 占位 marker 落成同名文件后,向该前缀写对象在 `file_backend.go` MkdirAll 处 500;OpenList 用 `.openlist` 占位不受影响。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| (本次提交) | docs: 反代缓存 HEAD→GET 故障与 S3 缓存越权风险 |
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 目录占位 marker 500 bug 修复(待用户确认立项)

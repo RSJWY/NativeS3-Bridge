@@ -155,6 +155,7 @@ aws $EP s3 presign s3://mybucket/docs/readme.txt --expires-in 300
 - 管理后台不要只依赖单密码，建议启用 TOTP 和 captcha；`session_secret` 生产必须替换为随机值。
 - 业务直链用 private bucket + 短 TTL presigned URL；`public-read` 只用于真正公开的对象。
 - Nginx 反代配置、代理缓存导致的 HEAD 签名失败、公网生产检查清单和监控项见[公网部署文档](docs/public-deployment.md)。
+- 严禁对 S3 数据面启用代理缓存：除了缓存会把 `HEAD` 改写成 `GET` 导致验签失败，默认缓存键不含 `Authorization`，缓存命中会把私有对象直接发给匿名请求，等价于数据泄露。
 
 ## 文档
 

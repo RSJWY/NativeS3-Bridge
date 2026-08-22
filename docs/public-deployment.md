@@ -76,6 +76,14 @@ server {
 
 S3 SigV4 会把 HTTP method 纳入签名。Nginx 的代理缓存配置可能把客户端 `HEAD` 转成上游 `GET`，导致 `HeadObject`/`HeadBucket` 返回 `SignatureDoesNotMatch`，而 PUT/GET/DELETE 仍然正常。使用宝塔等面板生成配置时，还要检查额外 include 文件是否重新启用了 `proxy_cache` 或覆盖 `proxy_cache_convert_head off`。修复后，Nginx access log 与 NativeS3 `s3 request` 日志应同时记录 `HEAD`。
 
+> **严禁对 S3 数据面启用任何代理缓存。** 这不只是 HEAD 改写问题：Nginx `proxy_cache` 的默认缓存键是 `scheme$host$request_uri`，**不含 `Authorization`**——一个用户签名下载的私有对象被缓存后，匿名请求同一 URI 会直接命中缓存拿到内容，等价于私有桶公开。S3 站点的正确做法是彻底关闭缓存，而不是只修 `proxy_cache_convert_head`。
+>
+> 宝塔等面板生成的站点配置中，缓存/加速功能可能由插件以 include（如 `vhost/nginx/extension/<域名>/*.conf`）或模块方式启用，不一定出现在主 vhost 文件里；残留的 `proxy_cache_path` 定义说明这类功能被打开过，应与缓存目录一并删除。判定时直接对照两侧日志：Nginx access log 记的是客户端发来的方法，NativeS3 `s3 request` 日志记的是网关实际收到的方法，二者不一致即中间层改写了请求。
+>
+> 排障时可用客户端报错里的 request id 反查：`docker logs <node容器> 2>&1 | grep <req-...>`，命中行的 `reason`/`code` 即失败原因（`verify_failed`/`SignatureDoesNotMatch` 通常意味着中间层改写了签名覆盖的 method、path、query 或 header）。
+
+若使用 Docker 部署并希望日志落盘，`log.dir` 必须指向已挂载的卷内路径（如 `/data/logs`）；指向容器内未挂载的路径（如 `/state/logs`）会导致日志只存在于容器层，宿主机不可见、重建即丢失。此时排查仍可用 `docker logs`（所有日志同时输出到 stdout）。
+
 若下发给 node 的策略启用了 `rate_limit.trust_forwarded`，必须确保 node 不能被绕过代理直接访问。
 
 ## 公网生产检查清单
@@ -98,6 +106,7 @@ S3 SigV4 会把 HTTP method 纳入签名。Nginx 的代理缓存配置可能把�
 
 - panel Compose 使用 `panel -check-config`。该检查会读取主密钥和在线 CA 并校验配置字段，但不是请求级 liveness/readiness 探针，也不能替代完整启动检查。
 - node Compose 使用 `node -health`。该探测会对已配置的 S3 listener 发起真实请求，属于进程级 liveness 信号。
+- node `-health` 每次探测都是一次匿名 `GET /`，网关会按预期返回 403 并记录一条 `s3 auth denied reason=credentials_required` WARN（默认每 30s 一条）。这是健康检查的正常副产物，不是认证故障；真正的客户端认证失败看 `reason=verify_failed` 等非 `credentials_required` 的行。
 
 不要按旧单体 README 暴露 `/healthz`、`/readyz` 或 `/metrics`；当前 panel 管理服务器没有注册这些旧端点。
 
