@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 28
-- **Last Active**: 2026-08-18
+- **Total Sessions**: 29
+- **Last Active**: 2026-08-22
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~940 | Active |
+| `journal-1.md` | ~990 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 29 | 2026-08-22 | 修复目录 marker 导致子级写入 500 | `553584c` | `main` |
 | 28 | 2026-08-18 | 完成 08-18-panel-node-interface-fixes 剩余子任务(nodeagent-hardening + controlproto 归档清理) | `c4cf197`, `433150b`, `67d1611`, `1e65bb5`, `aec97bf`, `c3364f4`, `f3cad30` | `main` |
 | 27 | 2026-08-15 | Complete node telemetry foundation | `ae26bdd`, `5b1a460` | `main` |
 | 26 | 2026-08-15 | Panel node health dashboard | `8635513` | `main` |

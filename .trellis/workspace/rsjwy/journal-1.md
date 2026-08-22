@@ -967,3 +967,24 @@ Implemented and hardened node storage telemetry end to end: persistent counters,
 ### Next Steps
 
 - 目录占位 marker 500 bug 修复(待用户确认立项)
+
+
+## Session 29: 修复目录 marker 导致子级写入 500
+
+**Date**: 2026-08-22
+**Task**: 修复目录 marker 导致子级写入 500
+**Branch**: `main`
+
+### Summary
+
+实现真实目录加 sidecar 的 S3 目录 marker，补齐 PUT/HEAD/GET/DELETE/LIST/COPY、multipart、reconcile、冲突映射和历史 marker 兼容；全量 pkg 测试与 go vet 通过。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `553584c` | (see git log) |
+
+### Status
+
+[OK] **Completed**
