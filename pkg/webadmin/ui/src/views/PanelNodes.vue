@@ -5,7 +5,7 @@
         <h1>节点管理</h1>
         <p class="muted">管理逻辑节点、注册状态和配置同步进度。</p>
       </div>
-      <button class="secondary-button" type="button" :disabled="loading" @click="load">
+      <button class="secondary-button" type="button" :disabled="loading" @click="() => load()">
         {{ loading ? '刷新中…' : '刷新' }}
       </button>
     </div>
@@ -84,6 +84,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { adminApi, type PanelNode } from '../api/client'
+import { useAdminEvents } from '../composables/useAdminEvents'
 
 const nodes = ref<PanelNode[]>([])
 const displayName = ref('')
@@ -93,15 +94,25 @@ const error = ref('')
 
 onMounted(load)
 
-async function load() {
-  loading.value = true
+// 节点上下线由 SSE 事件驱动静默重拉;SSE 不可用时 useAdminEvents 自动降级轮询。
+useAdminEvents({
+  reload: () => void load({ silent: true }),
+  onEvent: (type) => {
+    if (type === 'node_online' || type === 'node_offline') void load({ silent: true })
+  }
+})
+
+async function load(options: { silent?: boolean } = {}) {
+  // 事件驱动的重拉与手动刷新并发时只保留一次在途请求。
+  if (loading.value) return
+  if (!options.silent) loading.value = true
   error.value = ''
   try {
     nodes.value = await adminApi.listNodes()
   } catch (err) {
     error.value = messageFromError(err, '加载节点失败')
   } finally {
-    loading.value = false
+    if (!options.silent) loading.value = false
   }
 }
 

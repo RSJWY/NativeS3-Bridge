@@ -69,6 +69,21 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }
+
+    # 管理面板实时事件流(SSE)。SSE 是长连接响应,默认的 proxy_buffering 会把
+    # 事件缓冲住,浏览器收不到任何事件;超时若小于心跳周期(15s)还会掐断空闲流。
+    # 服务端已发送 X-Accel-Buffering: no,这里在代理层再显式关闭一层兜底。
+    location /api/admin/events {
+        proxy_pass http://127.0.0.1:9001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+    }
 }
 ```
 
@@ -83,6 +98,14 @@ S3 SigV4 会把 HTTP method 纳入签名。Nginx 的代理缓存配置可能把�
 > 排障时可用客户端报错里的 request id 反查：`docker logs <node容器> 2>&1 | grep <req-...>`，命中行的 `reason`/`code` 即失败原因（`verify_failed`/`SignatureDoesNotMatch` 通常意味着中间层改写了签名覆盖的 method、path、query 或 header）。
 
 若使用 Docker 部署并希望日志落盘，`log.dir` 必须指向已挂载的卷内路径（如 `/data/logs`）；指向容器内未挂载的路径（如 `/state/logs`）会导致日志只存在于容器层，宿主机不可见、重建即丢失。此时排查仍可用 `docker logs`（所有日志同时输出到 stdout）。
+
+## 管理面板实时事件流（SSE）
+
+管理页面通过 `GET /api/admin/events`（会话 Cookie 鉴权，与 REST 同一口径）订阅服务端推送：节点上线/下线、任务状态变化到达时页面自动重拉数据，无需手动刷新。该端点是一条 SSE 长连接：
+
+- 服务端每 15s 发送一次 `heartbeat` 事件用于判活；浏览器侧超过 45s 没有收到任何帧会自动降级为 30s 周期的轮询，因此即使代理缓冲了 SSE，页面数据仍会更新，只是不再是实时的。
+- 反向代理必须放行长连接：禁用响应缓冲（nginx `proxy_buffering off`，响应头已带 `X-Accel-Buffering: no` 兜底）、不要对该路径开缓存、读超时不得小于心跳周期（建议 ≥ 300s）。参考上方 Nginx 示例的 `/api/admin/events` location 块。
+- 不要对该端点启用任何代理缓存；事件流被缓存会让多个管理员共享同一份事件序列，页面状态错乱。
 
 若下发给 node 的策略启用了 `rate_limit.trust_forwarded`，必须确保 node 不能被绕过代理直接访问。
 

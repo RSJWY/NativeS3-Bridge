@@ -46,6 +46,22 @@ type TaskOrchestrator struct {
 	db      *gorm.DB
 	hub     *Hub
 	timeout time.Duration
+	// events 是管理面板 SSE 事件总线(见 events.go);可选,nil 时静默跳过发布。
+	events *AdminEventBus
+}
+
+// SetAdminEventBus wires the SSE event bus. Optional; nil disables publishing.
+func (o *TaskOrchestrator) SetAdminEventBus(bus *AdminEventBus) {
+	o.events = bus
+}
+
+// publishTaskState 通知管理面板某任务发生状态流转。发布点都在 DB 写成功之后,
+// 浏览器收到事件重拉 REST 时看到的是已落库的状态;Publish 永不阻塞,不会拖慢
+// 任务编排路径。
+func (o *TaskOrchestrator) publishTaskState(nodeID uint, taskID, state string) {
+	if o.events != nil {
+		o.events.Publish(AdminEvent{Type: AdminEventTaskUpdated, NodeID: nodeID, TaskID: taskID, State: state})
+	}
 }
 
 // NewTaskOrchestrator builds an orchestrator over the panel DB and connection
@@ -110,11 +126,13 @@ func (o *TaskOrchestrator) Dispatch(ctx context.Context, nodeID uint, taskType c
 	if err := o.db.Create(&record).Error; err != nil {
 		return "", fmt.Errorf("persist task: %w", err)
 	}
+	o.publishTaskState(nodeID, taskID, string(controlproto.TaskStatePending))
 
 	// Reserve an in-flight slot (backpressure). If the node is saturated, roll the
 	// task back to a terminal failed state so it is not left dangling as pending.
 	if !conn.reserveTask(taskID) {
 		o.markState(taskID, controlproto.TaskStateFailed, "", "node has too many tasks in flight")
+		o.publishTaskState(nodeID, taskID, string(controlproto.TaskStateFailed))
 		return "", ErrTooManyInFlight
 	}
 
@@ -133,10 +151,12 @@ func (o *TaskOrchestrator) Dispatch(ctx context.Context, nodeID uint, taskType c
 		// likely dead; the node never received the task, so failed (not unknown).
 		conn.releaseTask(taskID)
 		o.markState(taskID, controlproto.TaskStateFailed, "", fmt.Sprintf("send task: %v", err))
+		o.publishTaskState(nodeID, taskID, string(controlproto.TaskStateFailed))
 		return "", fmt.Errorf("send task: %w", err)
 	}
 
 	o.markState(taskID, controlproto.TaskStateRunning, "", "")
+	o.publishTaskState(nodeID, taskID, string(controlproto.TaskStateRunning))
 	o.audit("task_dispatch", nodeID, taskID, string(taskType), createdBy)
 	go o.expireTask(conn, taskID, nodeID)
 	return taskID, nil
@@ -173,6 +193,7 @@ func (o *TaskOrchestrator) expireTask(conn *AgentConn, taskID string, nodeID uin
 		})
 	if res.Error == nil && res.RowsAffected > 0 {
 		o.audit("task_timeout", nodeID, taskID, string(controlproto.TaskStateFailed), "control-plane")
+		o.publishTaskState(nodeID, taskID, string(controlproto.TaskStateFailed))
 	}
 }
 
@@ -216,6 +237,7 @@ func (o *TaskOrchestrator) FailInFlightForConn(conn *AgentConn) {
 			})
 		if res.Error == nil && res.RowsAffected > 0 {
 			o.audit("task_interrupted", conn.NodeID, taskID, "", "control-plane")
+			o.publishTaskState(conn.NodeID, taskID, string(controlproto.TaskStateUnknown))
 		}
 	}
 }

@@ -88,10 +88,15 @@ func main() {
 	defer cancel()
 
 	hub := panel.NewHub()
+	// 管理面板 SSE 事件总线:节点上下线与任务状态流转发布到这里,由 admin 监听器的
+	// /api/admin/events 流式转发给浏览器(见 pkg/panel/events.go)。面板按单实例
+	// 部署,进程内分发即可。
+	events := panel.NewAdminEventBus()
 	creds := panel.NewPanelCredentialStore(gdb, cipher)
 	desired := panel.NewDesiredStateAuthority(gdb, cipher)
 	auditor := panel.NewAuditor(gdb)
 	tasks := panel.NewTaskOrchestrator(gdb, hub, cfg.TaskTimeout)
+	tasks.SetAdminEventBus(events)
 	migration := panel.NewMigrationCoordinator(gdb, cipher, desired, auditor)
 
 	transport := panel.NewTransportServer(panel.TransportDeps{
@@ -101,6 +106,7 @@ func main() {
 		Cipher:        cipher,
 		ClientCTTL:    cfg.PKI.ClientCertTTL,
 		MigrationSink: migration,
+		Events:        events,
 		// 心跳落库节流的阈值由这个 cadence 推导(interval/2),所以要用实际配置值:
 		// 否则调过 heartbeat_interval 的部署会按默认 15s 去节流。
 		HeartbeatInterval: cfg.HeartbeatInterval,
@@ -120,6 +126,7 @@ func main() {
 		Audit:     auditor,
 		LogRing:   logRuntime.Ring,
 		LogFile:   logRuntime.File,
+		Events:    events,
 	})
 	if err != nil {
 		slog.Error("init admin server", "error", err)

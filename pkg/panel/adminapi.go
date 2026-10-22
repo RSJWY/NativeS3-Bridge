@@ -38,6 +38,8 @@ type AdminAPI struct {
 	// heartbeat_interval * offline_multiplier(由 cmd/panel 从 PanelConfig 注入),
 	// 不维护第二套默认值。零值时按面板默认心跳参数计算。
 	telemetryExpiry time.Duration
+	// events 是 SSE 管理事件总线(见 events.go);nil 时事件端点回 503。
+	events *AdminEventBus
 }
 
 // NewAdminAPI wires the admin API over its collaborators.
@@ -76,6 +78,7 @@ func (a *AdminAPI) Routes(mux *http.ServeMux, wrap func(http.Handler) http.Handl
 	mux.Handle("/api/admin/nodes", h(a.Nodes))
 	mux.Handle("/api/admin/nodes/", h(a.NodeByID))
 	mux.Handle("/api/admin/dashboard/summary", h(a.DashboardSummary))
+	mux.Handle("/api/admin/events", h(a.AdminEvents))
 }
 
 // --- request/response shapes ---

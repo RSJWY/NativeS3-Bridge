@@ -125,6 +125,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { adminApi, type PanelCertificate, type PanelCertificateStatus, type PanelNode, type PanelPublishResult, type PanelRegistrationToken } from '../api/client'
+import { useAdminEvents } from '../composables/useAdminEvents'
 import PanelNodeBucketsSection from '../components/panel/PanelNodeBucketsSection.vue'
 import PanelNodeConfigSection from '../components/panel/PanelNodeConfigSection.vue'
 import PanelNodeCredentialsSection from '../components/panel/PanelNodeCredentialsSection.vue'
@@ -166,6 +167,16 @@ onMounted(() => {
     return
   }
   void load()
+})
+
+// 节点上下线由 SSE 事件驱动静默重拉运行状态;SSE 不可用时 useAdminEvents 自动
+// 降级轮询。任务进度事件由 PanelNodeLogsSection 自己订阅,这里跳过。
+useAdminEvents({
+  reload: () => void refreshNode(),
+  onEvent: (type, payload) => {
+    if (type === 'task_updated') return
+    if (payload.node_id === undefined || payload.node_id === nodeID) void refreshNode()
+  }
 })
 
 async function load() {

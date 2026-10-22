@@ -40,6 +40,8 @@ type AdminServerDeps struct {
 	Audit     *Auditor
 	LogRing   *logging.Ring
 	LogFile   string
+	// Events 是管理面板的 SSE 事件总线,由 cmd/panel 创建并与 Transport/Tasks 共享。
+	Events *AdminEventBus
 }
 
 // NewAdminServer builds the admin HTTP server. It wires the reused webadmin auth
@@ -57,6 +59,7 @@ func NewAdminServer(deps AdminServerDeps) (*AdminServer, error) {
 	adminAPI := NewAdminAPI(deps.DB, deps.Hub, deps.Creds, deps.Desired, deps.Tasks, deps.Transport, deps.Migration, deps.Audit)
 	// 遥测过期口径与离线判定一致:heartbeat_interval * offline_multiplier。
 	adminAPI.SetTelemetryExpiry(deps.Config.HeartbeatInterval * time.Duration(deps.Config.OfflineMultiplier))
+	adminAPI.SetAdminEventBus(deps.Events)
 
 	// Auth endpoints (login/logout/settings) reuse the webadmin handlers.
 	mux.HandleFunc("/api/admin/auth-settings", authenticator.AuthSettings)
@@ -81,9 +84,11 @@ func NewAdminServer(deps AdminServerDeps) (*AdminServer, error) {
 			ReadHeaderTimeout: 10 * time.Second,
 			// 慢速 body 会一直占着连接:管理面最大请求体只有 1 MiB(见 decodeAdminJSON),
 			// 30s 对任何真实链路都富余。IdleTimeout 回收 keep-alive 空闲连接。
-			// 这里安全地不需要 per-handler 豁免:管理面没有 SSE/流式端点,节点控制面的
-			// WebSocket 长连接跑在 cmd/panel 里另一个 http.Server 上,不受此影响。
-			// 不设 WriteTimeout:仪表盘在大数据量下的正常响应不能被误杀。
+			// 不设 WriteTimeout:仪表盘在大数据量下的正常响应不能被误杀,而且管理面
+			// 现在有 SSE 流式端点(/api/admin/events,见 events.go)——写截止时间会掐断
+			// 长事件流。ReadTimeout 只约束请求读取:EventSource 的 GET 没有请求体,
+			// 不会伤到挂起的响应流。节点控制面的 WebSocket 长连接跑在 cmd/panel 里
+			// 另一个 http.Server 上,不受此影响。
 			ReadTimeout: 30 * time.Second,
 			IdleTimeout: 120 * time.Second,
 		},

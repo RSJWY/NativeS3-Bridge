@@ -71,6 +71,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { adminApi, ApiError, type PanelTask, type PanelTaskLogEntry } from '../../api/client'
+import { useAdminEvents } from '../../composables/useAdminEvents'
 
 const props = defineProps<{ nodeId: number; online: boolean; disabled: boolean }>()
 
@@ -85,6 +86,10 @@ const error = ref('')
 let pollTimer: number | undefined
 let queryGeneration = 0
 let disposed = false
+// 事件驱动进度跟踪:activeTaskID 非空表示有未到终态的查询在途。
+let activeTaskID: string | null = null
+let taskDeadline = 0
+let refreshing = false
 
 const structuredEntries = computed<PanelTaskLogEntry[]>(() => task.value?.result.log_entries ?? [])
 const legacyLines = computed(() => structuredEntries.value.length ? [] : task.value?.result.log_lines ?? [])
@@ -97,9 +102,22 @@ const taskStateMessage = computed(() => {
   return ''
 })
 
+// 任务状态变化由 SSE task_updated 事件驱动拉取;reload 供 SSE 降级轮询兜底。
+useAdminEvents({
+  reload: () => {
+    if (activeTaskID) void fetchTask(activeTaskID)
+  },
+  onEvent: (type, payload) => {
+    if (type === 'task_updated' && payload.task_id && payload.task_id === activeTaskID) {
+      void fetchTask(payload.task_id)
+    }
+  }
+})
+
 onBeforeUnmount(() => {
   disposed = true
   queryGeneration += 1
+  activeTaskID = null
   stopPolling()
 })
 
@@ -139,7 +157,9 @@ async function runQuery() {
       until: untilValue,
       limit: limit.value
     })
-    await pollTask(dispatched.task_id, generation, Date.now() + 70_000)
+    activeTaskID = dispatched.task_id
+    taskDeadline = Date.now() + 70_000
+    await fetchTask(dispatched.task_id, generation)
   } catch (err) {
     if (generation !== queryGeneration || disposed) return
     querying.value = false
@@ -147,36 +167,50 @@ async function runQuery() {
   }
 }
 
-async function pollTask(taskID: string, generation: number, deadline: number) {
-  if (generation !== queryGeneration || disposed) return
-  if (Date.now() >= deadline) {
+// fetchTask 拉一次任务状态。非终态时不再密集轮询:等 SSE task_updated 事件,
+// 另设 5s 兜底定时器防事件丢失;70s deadline 语义与旧 800ms 轮询一致。
+async function fetchTask(taskID: string, generation: number = queryGeneration) {
+  if (generation !== queryGeneration || disposed || refreshing) return
+  if (Date.now() >= taskDeadline) {
     querying.value = false
+    activeTaskID = null
+    stopPolling()
     error.value = '等待节点日志结果超时，请确认控制面连接后重试。'
     return
   }
+  refreshing = true
   try {
     const next = await adminApi.getNodeTask(props.nodeId, taskID)
     if (generation !== queryGeneration || disposed) return
     task.value = next
     if (next.state === 'success') {
-      querying.value = false
+      finishTracking()
       return
     }
     if (next.state === 'failed') {
-      querying.value = false
+      finishTracking()
       error.value = next.error?.includes('timed out') ? '节点日志查询超时，请重试。' : next.error || '节点日志查询失败。'
       return
     }
     if (next.state === 'unknown') {
-      querying.value = false
+      finishTracking()
       return
     }
-    pollTimer = window.setTimeout(() => { void pollTask(taskID, generation, deadline) }, 800)
+    stopPolling()
+    pollTimer = window.setTimeout(() => { void fetchTask(taskID, generation) }, 5_000)
   } catch (err) {
     if (generation !== queryGeneration || disposed) return
-    querying.value = false
+    finishTracking()
     error.value = queryErrorMessage(err)
+  } finally {
+    refreshing = false
   }
+}
+
+function finishTracking() {
+  querying.value = false
+  activeTaskID = null
+  stopPolling()
 }
 
 function stopPolling() {

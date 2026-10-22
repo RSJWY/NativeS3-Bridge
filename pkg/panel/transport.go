@@ -71,6 +71,9 @@ type TransportDeps struct {
 	// OnDisconnected fires when a serve loop ends (connection closed). It is used
 	// to fail any tasks still in flight on the dropped connection (design §5.3).
 	OnDisconnected func(conn *AgentConn)
+	// Events 是管理面板的 SSE 事件总线(见 events.go)。可选;nil 时静默跳过发布,
+	// 控制面行为不变。发布点只做 channel 投递,绝不阻塞连接读循环。
+	Events *AdminEventBus
 	// MigrationSink receives a node's read-only import report during in-place
 	// migration. Optional; nil disables the import path.
 	MigrationSink MigrationSink
@@ -362,6 +365,8 @@ func (s *TransportServer) serve(ctx context.Context, conn *AgentConn) {
 	}
 
 	s.setOnline(conn.NodeID, true)
+	// 先落库再发布:收到事件的浏览器重拉 REST 时,看到的必须已经是最终状态。
+	s.publishAdminEvent(AdminEvent{Type: AdminEventNodeOnline, NodeID: conn.NodeID})
 	defer s.disconnect(conn)
 
 	// On disconnect, fail any tasks still in flight on this connection. Deferred
@@ -406,12 +411,21 @@ func (s *TransportServer) disconnect(conn *AgentConn) {
 	s.deps.Hub.Unregister(conn.NodeID, conn)
 	if !s.deps.Hub.IsOnline(conn.NodeID) {
 		s.setOnline(conn.NodeID, false)
+		s.publishAdminEvent(AdminEvent{Type: AdminEventNodeOffline, NodeID: conn.NodeID})
 	}
 	// A replacement can register after the offline check but before the write
 	// above commits. Recheck so the obsolete disconnect cannot win the final DB
 	// write and leave a live replacement displayed as offline.
 	if s.deps.Hub.IsOnline(conn.NodeID) {
 		s.setOnline(conn.NodeID, true)
+	}
+}
+
+// publishAdminEvent 通知管理面板订阅者(可选依赖)。Publish 永不阻塞:慢订阅者
+// 被摘除而不是反压,所以控制面读循环可以放心同步调用。
+func (s *TransportServer) publishAdminEvent(ev AdminEvent) {
+	if s.deps.Events != nil {
+		s.deps.Events.Publish(ev)
 	}
 }
 
@@ -687,6 +701,7 @@ func (s *TransportServer) handleTaskResult(conn *AgentConn, env controlproto.Env
 		return nil
 	}
 	s.audit("task_result", conn.NodeID, result.TaskID, string(state))
+	s.publishAdminEvent(AdminEvent{Type: AdminEventTaskUpdated, NodeID: conn.NodeID, TaskID: result.TaskID, State: string(state)})
 	return nil
 }
 
