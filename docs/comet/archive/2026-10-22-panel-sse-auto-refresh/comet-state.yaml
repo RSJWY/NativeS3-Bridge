@@ -1,0 +1,333 @@
+schema: comet.native.v4
+name: panel-sse-auto-refresh
+language: zh-CN
+phase: archive
+status: done
+state_version: 11
+brief: brief.md
+document_constraints_version: 3
+shape_confirmation_hash: e868569eadafe51f7c9d3420dd8a59897f0437207f3c26170767ac39d412acb2
+spec_changes:
+  - capability: panel-live-events
+    operation: create
+    source: specs/panel-live-events/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/panel-sse-auto-refresh
+  target_branch: main
+  finish: push
+loop:
+  stage: done
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: null
+acceptance:
+  - id: A1
+    source: brief.md
+    text: "Scenario: 管理员登录面板后停留在 PanelNodes
+      页面，一个节点进程随后启动并注册成功，页面在线状态在数秒内自动变为在线，全程无手动刷新。"
+    result: passed
+    reason:
+      text: transport.go serve() 在 Hub.Register/setOnline(true) 落库后发布
+        node_online；PanelNodes.vue 经 useAdminEvents 订阅 node_online/node_offline
+        后静默重拉 listNodes，无手动刷新。TestTaskStateTransitionsPublishEvents（真实节点注册路径）与
+        TestAdminEventsHandlerStreamsEvents 均通过。
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "Scenario: 管理员停留在 PanelDashboard 总览页，节点下线后总览的节点统计自动更新。"
+    result: passed
+    reason:
+      text: transport.go disconnect() 在 Hub.Unregister 且 !IsOnline 分支 setOnline(false)
+        后发布 node_offline（顶替连接不误发）；PanelDashboard.vue 订阅节点事件后静默重拉
+        panelDashboardSummary。事件发布先于 REST 可见状态变化语义由发布点位于落库之后保证。
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "Scenario: 管理员在 PanelNodeDetail
+      触发导入任务并停留在任务进度区，任务状态（pending/running/success/failed/unknown）变化自动呈现，不再依赖固定
+      800ms 轮询。"
+    result: passed
+    reason:
+      text: tasks.go Dispatch 发布 pending/running 及两处 failed 回滚、expireTask 发布
+        failed、FailInFlightForConn 发布 unknown，transport.go handleTaskResult 发布
+        success/failed，五种状态全覆盖；PanelNodeLogsSection.vue 原 800ms setTimeout
+        轮询已删除，改为按 task_id 匹配 activeTaskID 的 task_updated 事件驱动 fetchTask，附 5s
+        兜底定时器与 70s deadline。TestTaskStateTransitionsPublishEvents 断言
+        pending→running→success 按序发布，通过。
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: "Scenario: 未携带会话 Cookie 请求 `GET /api/admin/events`，服务端返回 401，不建立事件流。"
+    result: passed
+    reason:
+      text: adminapi.go Routes 将 /api/admin/events 与其他 REST 同样置于调用方传入的鉴权 wrap
+        内（adminserver.go 传
+        authenticator.Middleware）；TestAdminEventsRouteRequiresSession 用真实
+        webadmin 中间件断言未携带会话返回 401 且 Content-Type 非 text/event-stream（不建立流），通过。
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "Scenario: SSE 连接中断后，前端自动重连并在恢复后补齐期间错过的状态变化（通过重拉 REST 数据）。"
+    result: passed
+    reason:
+      text: "useAdminEvents.ts：CONNECTING 态交给 EventSource 内建重连（服务端 retry: 5000 提示），致命
+        CLOSED 后 15s 手动重连；onopen 且 everOpened 时对所有订阅者触发
+        onReconnect，PanelNodes/PanelDashboard/PanelNodeDetail 的 reload 重拉 REST
+        补齐断连期间错过的变化。实现审查 + vue-tsc/build 通过证实。"
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: "Scenario: SSE 持续不可用（如反代缓冲导致连上但无事件到达）时，前端在心跳超时后自动降级为慢速定时轮询，页面数据仍能自动更新；SSE
+      恢复后轮询停止。"
+    result: passed
+    reason:
+      text: events.go 每 15s 发具名 heartbeat 事件（TestAdminEventsHandlerStreamsEvents
+        断言心跳帧到达，通过）；useAdminEvents.ts 看门狗每 5s 检查，45s 无任何帧即 degrade()：立即 reload
+        并启动 30s 慢速轮询，任意帧到达 noteReceived→undegrade
+        停止轮询，降级期间加入的订阅者也纳入轮询。心跳周期显著小于降级阈值，语义匹配。
+      truncated: false
+  - id: A7
+    source: brief.md
+    text: "Scenario: `go vet ./...` 与 `go test ./...`（至少覆盖
+      pkg/panel、pkg/webadmin）通过；pkg/webadmin/ui `npm run build`（vue-tsc + vite
+      build）通过。"
+    result: passed
+    reason:
+      text: 独立重跑：go vet ./... 退出码 0；go test ./... 18 包全部 ok（含
+        pkg/panel、pkg/webadmin）；定向 go test ./pkg/panel/ -run
+        'TestAdminEvent|TestAdminEvents|TestTaskStateTransitions' -v 8 个用例全部
+        PASS；pkg/webadmin/ui npm run build（vue-tsc --noEmit && vite build）退出码 0。
+      truncated: false
+builder_handoff:
+  candidate_id: 18848c0a-f12f-40ca-8f96-ab332d2256c3
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:059ebd6b-270d-45de-bf8a-6f6901afa50b
+  iteration: 1
+  summary:
+    text: "实现管理面板 SSE 实时刷新（panel-live-events）。后端：pkg/panel/events.go 新增
+      AdminEventBus（进程内发布/订阅，慢订阅者摘除不反压）与 GET /api/admin/events SSE
+      handler（text/event-stream、no-store、X-Accel-Buffering: no、15s 具名 heartbeat
+      事件、retry 提示）；transport.go 在 Hub.Register/setOnline 后发布
+      node_online、disconnect 实际离线分支发布 node_offline、handleTaskResult 落库成功后发布
+      task_updated；tasks.go 在 Dispatch(pending/running/两处 failed
+      回滚)、expireTask(failed)、FailInFlightForConn(unknown) 发布
+      task_updated；adminserver.go 挂载路由到现有 webadmin 会话中间件并更新超时注释（SSE 依赖不设
+      WriteTimeout）；cmd/panel/main.go 创建共享总线接线 transport/tasks/admin。前端：新增
+      composables/useAdminEvents.ts（模块级单例 EventSource + 引用计数、心跳判活、45s 无帧降级 30s
+      轮询、重连后 onReconnect 重拉补齐、401 走既有 markLoggedOut
+      路径）；PanelNodes/PanelDashboard 订阅节点事件静默重拉；PanelNodeDetail
+      订阅本节点上下线重拉运行状态；PanelNodeLogsSection 任务进度由 800ms 固定轮询改为 task_updated 事件驱动 +
+      5s 兜底 + 70s deadline。文档：docs/public-deployment.md 新增 SSE 章节与 nginx
+      /api/admin/events location 示例（proxy_buffering off、read_timeout 300s）。验收
+      A1-A7 全部实现并附证据。"
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+    - A7
+  acceptance_review:
+    - id: A1
+      status: implemented-with-evidence
+      evidence:
+        - pkg/panel/transport.go serve() 在 Hub.Register 与 setOnline(true) 之后发布
+          node_online
+        - pkg/webadmin/ui/src/views/PanelNodes.vue useAdminEvents 订阅
+          node_online/node_offline 后静默重拉 listNodes
+        - pkg/panel/events_test.go TestAdminEventsHandlerStreamsEvents 断言发布的事件以
+          SSE 帧到达浏览器连接
+        - pkg/panel/events_test.go TestTaskStateTransitionsPublishEvents
+          覆盖真实节点连接注册路径的事件发布
+      note: 节点注册成功即发布 node_online，前端收到后立即重拉 REST；发布在状态落库之后，重拉必见最新状态，全程无手动刷新。
+    - id: A2
+      status: implemented-with-evidence
+      evidence:
+        - pkg/panel/transport.go disconnect() 在 setOnline(false) 分支发布
+          node_offline（顶替连接的旧断开不会误发）
+        - pkg/webadmin/ui/src/views/PanelDashboard.vue 订阅节点事件后静默重拉
+          panelDashboardSummary
+        - pkg/panel/events_test.go TestAdminEventBusFanout 覆盖多订阅者扇出
+      note: 节点真正离线（离线 sweeper 口径外的连接级离线）即时推送，总览统计自动更新。
+    - id: A3
+      status: implemented-with-evidence
+      evidence:
+        - pkg/panel/tasks.go Dispatch 发布 pending→running 与两处 failed
+          回滚、expireTask 发布 failed、FailInFlightForConn 发布 unknown
+        - pkg/panel/transport.go handleTaskResult 落库成功后发布 success/failed
+        - pkg/panel/events_test.go TestTaskStateTransitionsPublishEvents 断言
+          pending→running→success 按序发布
+        - pkg/webadmin/ui/src/components/panel/PanelNodeLogsSection.vue
+          fetchTask 改为 task_updated 事件驱动，5s 兜底定时器 + 70s deadline 替换原 800ms 轮询
+      note: 任务全部五种状态流转都有发布点，前端按 task_id 过滤即时拉取，终态自动停止跟踪。
+    - id: A4
+      status: implemented-with-evidence
+      evidence:
+        - pkg/panel/adminapi.go Routes 将 /api/admin/events 挂在 caller 提供的鉴权 wrap 内
+        - pkg/panel/adminserver.go 经 authenticator.Middleware 注册
+        - pkg/panel/events_test.go TestAdminEventsRouteRequiresSession 断言未携带会话返回
+          401 且 Content-Type 不是 text/event-stream
+      note: 事件端点与 REST 同一 webadmin 会话 Cookie 中间件，未登录请求不建立流。
+    - id: A5
+      status: implemented-with-evidence
+      evidence:
+        - pkg/webadmin/ui/src/composables/useAdminEvents.ts es.onopen 在
+          everOpened 后触发 onReconnect，各页面 onReconnect 调 reload() 重拉 REST
+        - 致命关闭（readyState CLOSED，如 401/404）后 15s 手动重连；CONNECTING 状态交给
+          EventSource 内建重连
+        - pkg/panel/events.go sseRetryHint 提示浏览器 5s 重连间隔
+      note: 断线恢复后通过重拉 REST 补齐错过变化；重连成功事件先于心跳到达即恢复判活时钟。
+    - id: A6
+      status: implemented-with-evidence
+      evidence:
+        - pkg/panel/events.go 服务端每 15s 发送具名 heartbeat 事件（注释行浏览器 JS 不可见，故用具名事件）
+        - pkg/panel/events_test.go TestAdminEventsHandlerStreamsEvents 断言
+          heartbeat 帧按周期到达
+        - useAdminEvents.ts 45s 无任何帧即 degrade()：立即 reload 并启动 30s 轮询，任意帧到达
+          undegrade() 停止；降级中加入的订阅者同样纳入轮询
+      note: 反代缓冲等导致连上但无事件时自动降级轮询，数据仍自动更新；SSE 恢复后轮询自动停止。
+    - id: A7
+      status: implemented-with-evidence
+      evidence:
+        - go vet ./... 通过（worktree 全仓）
+        - go test ./... 通过：18 个包全部 ok（含新增 pkg/panel/events_test.go 7 个用例），输出见
+          /tmp/gotest.log
+        - pkg/webadmin/ui npm run build（vue-tsc --noEmit && vite build）通过，产出
+          dist/assets/index-Ninkzee6.js
+      note: 后端与前端全量检查在本候选上通过。
+  checks:
+    - name:
+        text: go vet ./...
+        truncated: false
+      result: passed
+      note:
+        text: worktree 根目录执行，无发现
+        truncated: false
+    - name:
+        text: go test ./...
+        truncated: false
+      result: passed
+      note:
+        text: 18 包全部 ok，含 panel/webadmin 与新增事件测试
+        truncated: false
+    - name:
+        text: npm run build (pkg/webadmin/ui)
+        truncated: false
+      result: passed
+      note:
+        text: vue-tsc 类型检查 + vite 生产构建通过
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: 前端 composable（降级轮询/重连补齐）无自动化测试：项目前端无单测基建，仅有 vue-tsc 类型检查与实现审查；SSE
+        判活阈值依赖真实时钟，未做时间加速测试。
+      truncated: false
+    - text: 真实浏览器 EventSource 的端到端行为（含反代场景）未在本环境运行验证，docs/public-deployment.md
+        的代理配置为部署指引。
+      truncated: false
+    - text: pkg/webadmin/ui/dist 构建产物按 .gitignore 不入库，Docker 构建阶段重新生成。
+      truncated: false
+  known_limits_truncated: false
+  review: null
+  submitted_at: 2026-10-22T07:38:17.073Z
+blockers: []
+verification:
+  candidate_id: 18848c0a-f12f-40ca-8f96-ab332d2256c3
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:7097c5b6-e84a-4d9e-bc2c-913e8d4ecb7c
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: go-vet
+      name:
+        text: go vet ./...
+        truncated: false
+      argv_display:
+        - text: vet
+          truncated: false
+        - text: ./...
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 875
+    - id: go-test
+      name:
+        text: go test ./...
+        truncated: false
+      argv_display:
+        - text: test
+          truncated: false
+        - text: ./...
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 66500
+    - id: ui-build
+      name:
+        text: webadmin ui build
+        truncated: false
+      argv_display:
+        - text: run
+          truncated: false
+        - text: build
+          truncated: false
+      argv_truncated: false
+      cwd_ref: pkg/webadmin/ui
+      status: passed
+      exit_code: 0
+      duration_ms: 5005
+  summary:
+    text: "候选实现完整覆盖 7 项验收：后端事件总线/发布点/SSE 端点鉴权与心跳、前端订阅/重连补齐/降级轮询均按规格落地，全量 go vet/go
+      test/npm build 独立重跑通过，8 个定向事件测试全部 PASS。verdict: passed。"
+    truncated: false
+  risks:
+    - text: 前端 composable（降级轮询/重连补齐/判活）无自动化测试基建，仅经实现审查与 vue-tsc/build
+        证实；真实浏览器与反代场景的端到端行为未在本环境运行。
+      truncated: false
+    - text: PanelNodeLogsSection 兜底为任务在途期间 5s 周期定时器，brief 措辞为「一次性兜底」；验收 A3 只要求事件驱动且摆脱
+        800ms 固定轮询，已满足，属轻微偏差。
+      truncated: false
+    - text: SSE 判活阈值（45s）依赖真实时钟，后台标签页定时器节流可能延迟降级判定，属浏览器固有行为。
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-10-22T07:49:01.929Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: "候选实现完整覆盖 7 项验收：后端事件总线/发布点/SSE 端点鉴权与心跳、前端订阅/重连补齐/降级轮询均按规格落地，全量 go vet/go
+        test/npm build 独立重跑通过，8 个定向事件测试全部 PASS。verdict: passed。"
+      truncated: false
+    completed_at: 2026-10-22T07:49:01.929Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: true
+created_at: 2026-10-22T06:57:32.559Z
