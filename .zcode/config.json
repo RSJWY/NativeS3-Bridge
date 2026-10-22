@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "enabled": true,
+    "events": {
+      "PreToolUse": [
+        {
+          "matcher": "Write|Edit",
+          "hooks": [
+            {
+              "type": "process",
+              "command": "node",
+              "args": [
+                "/opt/NativeS3-Bridge/.zcode/skills/comet/scripts/comet-hook-router.mjs",
+                "--platform",
+                "zcode",
+                "--project-root",
+                "/opt/NativeS3-Bridge"
+              ],
+              "timeoutMs": 60000
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -83,8 +83,8 @@ git status --ignored --short
 应提交：
 
 - 业务代码：`cmd/`、`pkg/`、`configs/*.example.yaml`、`scripts/`。
-- 文档：`README.md`、`docs/`、`AGENTS.md`、`.trellis/spec/`、已归档任务记录。
-- 项目级 AI 工作流配置：`.agents/`、`.codex/`。
+- 文档：`README.md`、`docs/`（含 `docs/openspec/` 的 Comet 规格产物）、`AGENTS.md`。
+- 项目级 AI 工作流配置：`.agents/`、`.codex/`、`.comet/config.yaml`。
 - 前端源码和锁文件：`pkg/webadmin/ui/src/`、`package.json`、`package-lock.json`。
 
 不应提交：
@@ -95,6 +95,4 @@ git status --ignored --short
 - SQLite 升级备份：`*.pre-upgrade-*.bak*`。
 - 构建产物：`panel`、`node`、`bin/`、`*.tar.gz`。
 - 前端依赖和产物：`pkg/webadmin/ui/node_modules/`、`pkg/webadmin/ui/dist/assets/`、`pkg/webadmin/ui/dist/index.html`。
-- Trellis 运行态：`.trellis/.developer`、`.trellis/.runtime/`、`__pycache__/`、`.trellis/.template-hashes.json` 的本地模板哈希改动。
-
-`.trellis/.template-hashes.json` 当前在仓库中已跟踪，但它容易记录本地模板刷新、runtime session 和 Python cache 哈希。除非明确在升级 Trellis 模板并审查了 diff，否则不要把它和业务或文档提交混在一起。
+- Comet 运行态：`.comet/` 下除 `config.yaml` 外的运行时数据由 `.gitignore` 统一管理，不要手工提交。

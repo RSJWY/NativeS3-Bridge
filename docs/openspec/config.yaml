@@ -1,0 +1,47 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+context: |
+  技术栈：Go 1.21+ 后端；Vue3 + Vite + ECharts 前端（pkg/webadmin/ui，经 go:embed 打入
+  panel，运行时不需要 Node.js）。数据库 GORM，panel 与 node 各自独立库，均支持
+  SQLite/MySQL/PostgreSQL，启动时自动迁移。
+  架构：panel（管理 UI/REST :9001 + node 控制面 :9443）与 node（S3 数据面 :9000，主动拨号
+  panel，mTLS WebSocket）分离；S3 对象字节不经过 panel，panel 不监听 S3 端口。
+  对象存储：原生文件 1:1 映射——bucket 是 storage.data_root 下的一级目录，object key 是
+  bucket 内相对路径，元数据存 .s3meta sidecar；不切块、不封装、不改名。以 / 结尾的 key 是
+  显式目录 marker（真实目录 + directory sidecar），与同名普通对象互斥。
+  关键目录：cmd/panel、cmd/node、pkg/panel、pkg/nodeagent、pkg/controlproto、pkg/config、
+  pkg/db、pkg/server、pkg/auth、pkg/quota、pkg/handlers、pkg/storage、pkg/hooks、
+  pkg/webadmin（详见 docs/contributing.md 代码结构）。
+  验证：go vet ./... && go test ./...（CI 另跑 go test -race）；重建 UI 才需要
+  npm ci/run build --prefix pkg/webadmin/ui；分发合同改动后先跑
+  scripts/test-distribution-contract.sh。
+  提交规范：conventional commits（feat/fix/docs/chore/test/refactor + scope，如 storage、
+  panel、nodeagent、controlproto、webadmin）。
+  文档语言：中文；README 保持精简，细节下沉 docs/（s3-api、admin-api、docker-deployment、
+  multi-node-operations、public-deployment、contributing）。
+  安全红线：严禁对 S3 数据面启用代理缓存（HEAD 被改写为 GET 导致验签失败，且缓存命中会把
+  私有对象发给匿名请求）；panel 主密钥（32 字节 AEAD）不得与 panel 数据库同备份。
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

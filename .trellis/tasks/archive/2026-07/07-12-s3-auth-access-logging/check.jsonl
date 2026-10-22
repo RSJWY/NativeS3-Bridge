@@ -1,4 +1,0 @@
-{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify no secret leakage and log field conventions"}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify 403/404 semantics unchanged"}
-{"file": ".trellis/spec/backend/auth-quota-guidelines.md", "reason": "Verify auth deny paths still match product rules"}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review tests and regression safety"}

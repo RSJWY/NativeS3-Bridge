@@ -1,24 +1,12 @@
 {
   "hooks": {
-    "UserPromptSubmit": [
+    "PreToolUse": [
       {
+        "matcher": "Write|Edit",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -X utf8 .codex/hooks/inject-workflow-state.py",
-            "timeout": 15
-          }
-        ]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "matcher": "^(?:trellis-implement|trellis-check|trellis-research)$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 -X utf8 .codex/hooks/inject-subagent-context.py",
-            "timeout": 15
+            "command": "node \"/opt/NativeS3-Bridge/.agents/skills/comet/scripts/comet-hook-router.mjs\" --platform \"codex\" --project-root \"/opt/NativeS3-Bridge\""
           }
         ]
       }
