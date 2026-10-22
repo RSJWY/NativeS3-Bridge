@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,7 +13,16 @@ import (
 // openTestDB opens a temp-file SQLite DB and migrates the panel schema.
 func openTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	gdb, err := db.Open("sqlite", filepath.Join(t.TempDir(), "panel.db"))
+	// 自建临时目录而非 t.TempDir():TempDir 的清理是框架固定步骤,无法让数据库
+	// 关闭先行;而控制面 serve goroutine 的收尾 DB 写(如被 sqlite 锁延迟的
+	// ActivateCert 事务)可能在清理删掉文件后才落盘,在目录里重建 journal,
+	// 让 TempDir 清理报 "directory not empty" 并把测试判负(CI 上偶发)。
+	// 自己注册清理:先关连接池,再有限重试 RemoveAll 吸收这个异步窗口。
+	dir, err := os.MkdirTemp("", "panel-test")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	gdb, err := db.Open("sqlite", filepath.Join(dir, "panel.db"))
 	if err != nil {
 		t.Fatalf("open sqlite db: %v", err)
 	}
@@ -23,14 +33,34 @@ func openTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("get sqlite db handle: %v", err)
 	}
-	// Close the pool before t.TempDir removes the SQLite directory. Control-plane
-	// cleanup can finish after the WebSocket closes and leave WAL sidecars behind.
+	// Close the pool before removing the SQLite directory. Control-plane cleanup
+	// can finish after the WebSocket closes and leave WAL sidecars behind.
 	t.Cleanup(func() {
 		if err := sqlDB.Close(); err != nil {
 			t.Errorf("close sqlite db: %v", err)
 		}
+		removeTestDirEventually(t, dir)
 	})
 	return gdb
+}
+
+// removeTestDirEventually removes dir, retrying a bounded number of times on
+// failure. A control-plane goroutine that queued a sqlite transaction before
+// the pool closed can still commit afterwards and recreate journal files in
+// the (partially removed) directory; the retries wait out that window instead
+// of failing the test.
+func removeTestDirEventually(t *testing.T, dir string) {
+	t.Helper()
+	const attempts = 100
+	for i := 0; ; i++ {
+		if err := os.RemoveAll(dir); err == nil {
+			return
+		} else if i >= attempts-1 {
+			t.Errorf("remove test dir %s: %v", dir, err)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func TestMigrateCreatesTablesAndIndexes(t *testing.T) {
